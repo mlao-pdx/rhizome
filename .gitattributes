@@ -1,0 +1,9 @@
+# Normalize line endings to LF for all text files in the repository,
+# enforced by Git itself regardless of contributors' local git config
+# or OS (complements end_of_line = lf in .editorconfig).
+* text=auto eol=lf
+
+# Fully machine-generated files: collapse in GitHub PR diffs by default
+# and exclude from language statistics.
+package-lock.json linguist-generated=true
+versions.json linguist-generated=true

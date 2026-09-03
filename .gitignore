@@ -1,0 +1,64 @@
+# vscode
+.vscode 
+
+# Intellij
+*.iml
+.idea
+
+# npm
+node_modules
+
+# Don't include the compiled main.js file in the repo.
+# They should be uploaded to GitHub releases instead.
+main.js
+
+# Exclude sourcemaps
+*.map
+
+# obsidian
+data.json
+
+# macOS
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+.fseventsd
+.DocumentRevisions-V100
+.TemporaryItems
+.apdisk
+Icon?
+*.icloud
+
+# Test / coverage output
+coverage/
+.nyc_output/
+*.lcov
+
+# fast-check property-test findings (local debugging artifacts only)
+.fast-check-findings/
+
+# Secrets / local environment files
+.env
+.env.*
+!.env.example
+
+# Local Kilo state and configuration (may contain API keys / local-only
+# settings, e.g. agent-manager.json). Ignore everything under .kilo/ except
+# the shared, non-secret skills and commands explicitly tracked below.
+# Revisit further selective tracking (agents/kilo.json) in a later stage.
+.kilo/*
+!.kilo/skill/
+!.kilo/command/
+
+# Local scratch artifacts (not part of the plugin or its docs)
+scratch/
+.scratch/
+tmp/
+*.tmp
+
+# Ad hoc / local screenshots (not committed doc assets)
+screenshots/
+.screenshots/

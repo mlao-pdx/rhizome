@@ -1,0 +1,15 @@
+# Generated
+main.js
+dist/
+coverage/
+package-lock.json
+CHANGELOG.md
+
+# Vendored third-party docs — preserve upstream formatting exactly
+docs/llm/
+
+# Fixture vaults — content is test data, not source
+tests/vaults/
+
+# Backups
+*.bak
