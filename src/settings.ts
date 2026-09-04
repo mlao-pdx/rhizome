@@ -1,26 +1,24 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
 import type { LogLevel } from '@ports/logger-port';
 import { LEVEL_ORDER } from './adapters/logger-format';
-import MyPlugin from './main';
+import RhizomePlugin from './main';
 
-export interface MyPluginSettings {
-	exampleSetting: string;
+export interface RhizomeSettings {
 	/** Diagnostics: write logs to the vault. Off by default. */
 	loggingEnabled: boolean;
 	/** Diagnostics: minimum severity written once logging is enabled. */
 	logLevel: LogLevel;
 }
 
-export const DEFAULT_SETTINGS: MyPluginSettings = {
-	exampleSetting: 'default',
+export const DEFAULT_SETTINGS: RhizomeSettings = {
 	loggingEnabled: false,
 	logLevel: 'warn',
 };
 
-export class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+export class RhizomeSettingTab extends PluginSettingTab {
+	plugin: RhizomePlugin;
 
-	constructor(app: App, plugin: MyPlugin) {
+	constructor(app: App, plugin: RhizomePlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
@@ -29,19 +27,6 @@ export class SampleSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 
 		containerEl.empty();
-
-		new Setting(containerEl)
-			.setName('Settings #1')
-			.setDesc("It's a secret")
-			.addText((text) =>
-				text
-					.setPlaceholder('Enter your secret')
-					.setValue(this.plugin.settings.exampleSetting)
-					.onChange(async (value) => {
-						this.plugin.settings.exampleSetting = value;
-						await this.plugin.saveSettings();
-					}),
-			);
 
 		this.displayDiagnostics(containerEl);
 	}

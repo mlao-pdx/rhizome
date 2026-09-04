@@ -15,7 +15,7 @@ import {
 import { derivePersistenceDbName } from '../../src/adapters/persistence-db-name';
 import { noticeMessages } from '../support/mock-obsidian-app';
 
-const PLUGIN_ID = 'sample-plugin';
+const PLUGIN_ID = 'rhizome';
 const DATABASE_ID = 'cache';
 const VAULT_ROOT = '/Users/tester/Vaults/main';
 const DB_NAME = derivePersistenceDbName({
@@ -120,7 +120,7 @@ describe('DexiePersistenceAdapter', () => {
 		const factory = new IDBFactory();
 		const { adapter } = createAdapter(factory, async () => PERSISTED_ID);
 		expect(adapter.dbName).toBe(DB_NAME);
-		expect(adapter.dbName).toMatch(/^sample-plugin\/cache\/[0-9a-f]{12}$/);
+		expect(adapter.dbName).toMatch(/^rhizome\/cache\/[0-9a-f]{12}$/);
 	});
 
 	it('opens no database and mints nothing until first use', async () => {

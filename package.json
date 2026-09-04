@@ -1,8 +1,16 @@
 {
-  "name": "obsidian-sample-plugin",
+  "name": "rhizome",
   "author": "B.P. \"Beppie\" Shortway",
   "version": "0.1.0",
-  "description": "An empty Obsidian plugin template with a hexagon architecture.",
+  "description": "An index and template engine for Obsidian.",
+  "homepage": "https://github.com/mlao-pdx/rhizome",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mlao-pdx/rhizome.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mlao-pdx/rhizome/issues"
+  },
   "main": "main.js",
   "type": "module",
   "scripts": {
@@ -22,7 +30,12 @@
     "test:promote": "node scripts/promote-fast-check.mjs",
     "check:licenses": "node scripts/check-licenses.mjs"
   },
-  "keywords": [],
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "index",
+    "templates"
+  ],
   "license": "0BSD",
   "lint-staged": {
     "*.{ts,tsx,js,mjs,mts,cts,json,md,yml,yaml,css}": "prettier --write"

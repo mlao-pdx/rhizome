@@ -20,8 +20,8 @@ no argument is given, default to a general workspace screenshot.
 Steps:
 
 1. Reload the plugin using the `id` currently set in `manifest.json` (read
-   it — do not hardcode a specific id literal here, since a template
-   project's id may be renamed):
+   it — do not hardcode a specific id literal here, since the plugin id may
+   be renamed):
    ```
    obsidian plugin:reload id=<id from manifest.json>
    ```

@@ -1,6 +1,6 @@
 # IndexedDB database identity
 
-Normative source for how this template names, scopes, and verifies its
+Normative source for how Rhizome names, scopes, and verifies its
 Dexie/IndexedDB databases. Code (`src/adapters/dexie-persistence-adapter.ts`,
 `src/adapters/persistence-db-name.ts`, `src/adapters/database-identity.ts`)
 and the `dexie-persistence-adapter` skill cite this document instead of
@@ -56,7 +56,7 @@ invalidates the whole database (delete and recreate).
 | Component       | Value                                                      | Responsibility                                                                                                                                                                                                                                      |
 | --------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `pluginId`      | `manifest.id`                                              | Partitions databases between plugins in the shared origin.                                                                                                                                                                                          |
-| `databaseId`    | logical dataset name; `"cache"` in this template           | Partitions multiple logical datasets of one plugin. **Stable like `manifest.id`**: the value encodes the invariant that the pattern is scoped to rebuildable vault-local data; renaming it orphans every existing user database.                    |
+| `databaseId`    | logical dataset name; `"cache"` in this plugin             | Partitions multiple logical datasets of one plugin. **Stable like `manifest.id`**: the value encodes the invariant that the pattern is scoped to rebuildable vault-local data; renaming it orphans every existing user database.                    |
 | `vaultRootHash` | `sha256(normalisedVaultRoot).slice(0, 12)` (`node:crypto`) | Scopes the database to the vault's filesystem location **without** embedding the raw path in the name. Normalisation strips trailing separators only — never lowercasing, which would wrongly merge distinct vaults on a case-sensitive filesystem. |
 
 The vault root comes from `FileSystemAdapter.getBasePath()`. The plugin is

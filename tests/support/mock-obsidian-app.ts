@@ -162,7 +162,7 @@ export function normalizePath(path: string): string {
 export class App {}
 
 /**
- * Minimal stand-in for Obsidian's `FileSystemAdapter`. `MyPlugin` is
+ * Minimal stand-in for Obsidian's `FileSystemAdapter`. `RhizomePlugin` is
  * desktop-only, so `onload()` narrows `vault.adapter` to this class via
  * `instanceof` and reads the vault root from it.
  */
@@ -176,7 +176,7 @@ export class FileSystemAdapter {
 	}
 }
 
-/** A minimal `app` value sufficient for `MyPlugin`'s current `onload()`. */
+/** A minimal `app` value sufficient for `RhizomePlugin`'s current `onload()`. */
 export function createMockApp(): unknown {
 	return {
 		vault: {
@@ -185,11 +185,11 @@ export function createMockApp(): unknown {
 	};
 }
 
-/** A minimal `manifest` value sufficient to construct `MyPlugin`. */
+/** A minimal `manifest` value sufficient to construct `RhizomePlugin`. */
 export function createMockManifest(): unknown {
 	return {
-		id: 'sample-plugin',
-		name: 'Sample Plugin',
+		id: 'rhizome',
+		name: 'Rhizome',
 		version: '0.0.0-test',
 		minAppVersion: '0.0.0',
 		author: 'test',

@@ -2,10 +2,10 @@ import { FileSystemAdapter, Plugin } from 'obsidian';
 import { DexiePersistenceAdapter } from './adapters/dexie-persistence-adapter';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
 import { PluginDataStore } from './adapters/plugin-data-store';
-import { DEFAULT_SETTINGS, type MyPluginSettings, SampleSettingTab } from './settings';
+import { DEFAULT_SETTINGS, type RhizomeSettings, RhizomeSettingTab } from './settings';
 
-export default class MyPlugin extends Plugin {
-	settings!: MyPluginSettings;
+export default class RhizomePlugin extends Plugin {
+	settings!: RhizomeSettings;
 	loggerAdapter!: ObsidianLoggerAdapter;
 	dataStore!: PluginDataStore;
 	persistence!: DexiePersistenceAdapter;
@@ -50,7 +50,7 @@ export default class MyPlugin extends Plugin {
 		this.register(() => this.persistence.close());
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+		this.addSettingTab(new RhizomeSettingTab(this.app, this));
 	}
 
 	override onunload() {

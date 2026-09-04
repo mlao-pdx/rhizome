@@ -1,11 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { MyPluginSettings } from '../../src/settings';
+import type { RhizomeSettings } from '../../src/settings';
 import { isValidVaultInstanceId } from '../../src/adapters/database-identity';
 import { PluginDataStore, type PluginData } from '../../src/adapters/plugin-data-store';
 import { createInMemoryPluginData } from '../support/plugin-data-fake';
 
-const DEFAULTS: MyPluginSettings = {
-	exampleSetting: 'default',
+const DEFAULTS: RhizomeSettings = {
 	loggingEnabled: false,
 	logLevel: 'warn',
 };
@@ -24,18 +23,18 @@ describe('PluginDataStore.loadSettings', () => {
 
 	it('reads the structured { settings, vaultInstanceId } shape', async () => {
 		const { store } = createStore({
-			settings: { exampleSetting: 'custom' },
+			settings: { loggingEnabled: true },
 			vaultInstanceId: 'stored-id',
 		});
-		expect(await store.loadSettings()).toEqual({ ...DEFAULTS, exampleSetting: 'custom' });
+		expect(await store.loadSettings()).toEqual({ ...DEFAULTS, loggingEnabled: true });
 	});
 
 	it('forgivingly reads the legacy flat settings shape instead of discarding it', async () => {
-		const { store } = createStore({ exampleSetting: 'legacy', loggingEnabled: true });
+		const { store } = createStore({ loggingEnabled: true, logLevel: 'info' });
 		expect(await store.loadSettings()).toEqual({
 			...DEFAULTS,
-			exampleSetting: 'legacy',
 			loggingEnabled: true,
+			logLevel: 'info',
 		});
 	});
 
@@ -116,21 +115,21 @@ describe('PluginDataStore.ensureVaultInstanceId', () => {
 describe('PluginDataStore.saveSettings', () => {
 	it('persists the full settings object under the settings key', async () => {
 		const { data, store } = createStore();
-		await store.saveSettings({ ...DEFAULTS, exampleSetting: 'changed' });
+		await store.saveSettings({ ...DEFAULTS, loggingEnabled: true });
 		const written = data.writes[0] as PluginData;
-		expect(written.settings.exampleSetting).toBe('changed');
+		expect(written.settings.loggingEnabled).toBe(true);
 		expect(written.vaultInstanceId).toBeUndefined();
 	});
 
 	it('interleaved settings save and identity mint do not clobber each other', async () => {
 		const { data, store } = createStore();
 		await Promise.all([
-			store.saveSettings({ ...DEFAULTS, exampleSetting: 'changed' }),
+			store.saveSettings({ ...DEFAULTS, loggingEnabled: true }),
 			store.ensureVaultInstanceId(),
-			store.saveSettings({ ...DEFAULTS, exampleSetting: 'changed-again' }),
+			store.saveSettings({ ...DEFAULTS, loggingEnabled: true, logLevel: 'info' }),
 		]);
 		const last = data.writes[data.writes.length - 1] as PluginData;
-		expect(last.settings.exampleSetting).toBe('changed-again');
+		expect(last.settings.logLevel).toBe('info');
 		expect(isValidVaultInstanceId(last.vaultInstanceId)).toBe(true);
 		// No write lost either intermediate state permanently.
 		expect(data.writes.length).toBeGreaterThanOrEqual(3);
@@ -150,11 +149,11 @@ describe('PluginDataStore.saveSettings', () => {
 			},
 			DEFAULTS,
 		);
-		await expect(store.saveSettings({ ...DEFAULTS, exampleSetting: 'lost' })).rejects.toThrow(
+		await expect(store.saveSettings({ ...DEFAULTS, loggingEnabled: true })).rejects.toThrow(
 			'disk full',
 		);
-		await store.saveSettings({ ...DEFAULTS, exampleSetting: 'kept' });
+		await store.saveSettings({ ...DEFAULTS, logLevel: 'info' });
 		expect(data.writes).toHaveLength(1);
-		expect((data.writes[0] as PluginData).settings.exampleSetting).toBe('kept');
+		expect((data.writes[0] as PluginData).settings.logLevel).toBe('info');
 	});
 });

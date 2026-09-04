@@ -1,69 +1,22 @@
-# Obsidian Sample Plugin
+# Rhizome
 
-An empty Obsidian plugin template with a hexagon architecture:
-`src/core` (pure domain logic) and `src/ports` (technology-agnostic
-interfaces) never import `obsidian` or `dexie` at runtime; `src/adapters`
-implements those ports against the real Obsidian API and Dexie. The
-template retains Vitest (unit + property/fast-check tiers), Prettier,
-ESLint (including the boundary rule enforcing the hexagon), esbuild,
-`__DEV__`-gated dev-only code, Husky git hooks, license auditing, and the
-TSDoc `@remarks` convention.
+An index and template engine for Obsidian.
 
-> **Status: template.** Not in the community plugin catalogue.
+Built on a hexagon architecture: `src/core` (pure domain logic) and
+`src/ports` (technology-agnostic interfaces) never import `obsidian` or
+`dexie` at runtime; `src/adapters` implements those ports against the real
+Obsidian API and Dexie. Rhizome retains Vitest (unit + property/fast-check
+tiers), Prettier, ESLint (including the boundary rule enforcing the
+hexagon), esbuild, `__DEV__`-gated dev-only code, Husky git hooks, license
+auditing, and the TSDoc `@remarks` convention.
 
-## Using this template
+> **Status: pre-release.** Not yet in the community plugin catalogue.
 
-This repo is a template: fork it, then work through this checklist before
-your first release. Every item replaces an intentional placeholder.
-
-- [ ] `manifest.json` — set `id` (unique, kebab-case, and stable forever:
-      never rename it after release), `name`, `description`, and `author`.
-- [ ] `package.json` — set `name`, `description`, and `keywords`, and add
-      `repository`/`bugs`/`homepage` fields.
-- [ ] `LICENSE` — set the copyright holder and year (and refresh
-      `THIRD-PARTY-NOTICES.md` if the dependency set or licences change).
-- [ ] `src/settings.ts` — rename `MyPlugin`, `MyPluginSettings`, and
-      `SampleSettingTab`, and remove or repurpose the sample `exampleSetting`
-      field/UI ("Settings #1" / "It's a secret").
-- [ ] Protect the default branch: create a branch ruleset with
-      "Block force pushes" and "Restrict deletions" (see "Protecting the
-      default branch" below).
-- [ ] Delete this checklist section once done.
-
-### Protecting the default branch
-
-GitHub warns that your main branch isn't protected. For a solo repo the fix is
-a branch ruleset that blocks force pushes and deletions only — no pull-request
-or status-check requirements, so it doesn't slow down working directly on the
-default branch.
-
-1. Open the repo's **Settings → Rules → Rulesets** (or visit
-   `https://github.com/<owner>/<repo>/settings/rules`).
-2. Click **New ruleset → New branch ruleset**.
-3. Set:
-   - **Ruleset name** — anything, e.g. `protect-main`
-   - **Enforcement status** — `Active`
-   - **Target branches** — **Add target → Include default branch**
-   - **Block force pushes** — on
-   - **Restrict deletions** — on
-   - leave everything else (pull requests, status checks, signed commits,
-     linear history) off
-4. Click **Create**.
-
-Verify: GitHub's "main branch isn't protected" warning disappears from the
-repo's front page. Two caveats:
-
-- Rulesets are available on the Free plan for public repositories; a private
-  repository may need a paid plan.
-- With "Block force pushes" on, admins cannot rename the default branch until
-  they bypass or delete the ruleset, so remove it first if you ever rename
-  `main`.
-
-See [Design principles](docs/principles.md) for the 7 guiding choices this template ships with.
+See [Design principles](docs/principles.md) for the 7 guiding choices this project ships with.
 
 ## Persistence
 
-The template ships [Dexie](https://dexie.org) as its persistence layer —
+Rhizome ships [Dexie](https://dexie.org) as its persistence layer —
 the supported API over IndexedDB, never raw IndexedDB used directly.
 `src/ports/persistence-port.ts` is the technology-agnostic shape
 `src/core` depends on; `src/adapters/dexie-persistence-adapter.ts`
@@ -72,16 +25,12 @@ transaction patterns). Everything persisted is a rebuildable derived
 cache — never a source of truth — in a database addressed to this plugin
 and this vault location and verified against a per-vault identity; see
 `docs/dev/indexeddb-database-identity.md` for the naming/identity scheme.
-A plugin generated from this template that persists nothing can delete the
-port, the persistence adapter modules in `src/adapters/`
-(`dexie-persistence-adapter.ts`, `database-bootstrap.ts`,
-`database-identity.ts`, `persistence-db-name.ts`), the `dexie` dependency
-and the `fake-indexeddb` devDependency, and the persistence wiring in
-`src/main.ts`; one that persists anything does so through Dexie.
+Everything Rhizome persists goes through this port and adapter — nothing
+touches raw IndexedDB.
 
 ## Support policy
 
-- A desktop-only plugin template. No mobile support, on any OS.
+- A desktop-only plugin. No mobile support, on any OS.
 
 ## Testing
 

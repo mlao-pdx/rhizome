@@ -6,7 +6,7 @@ import type { App } from 'obsidian';
 import { ObsidianLoggerAdapter } from '../../src/adapters/obsidian-logger-adapter';
 import { createInMemoryDataAdapter, type InMemoryDataAdapter } from '../support/mock-vault-adapter';
 
-const TEST_PLUGIN_ID = 'sample-plugin';
+const TEST_PLUGIN_ID = 'rhizome';
 const LOG_PATH = `_${TEST_PLUGIN_ID}/logs/${TEST_PLUGIN_ID}.log`;
 const BACKUP_PATH = `_${TEST_PLUGIN_ID}/logs/${TEST_PLUGIN_ID}.log.1`;
 const ROTATION_CAP_BYTES = 5 * 1024 * 1024;

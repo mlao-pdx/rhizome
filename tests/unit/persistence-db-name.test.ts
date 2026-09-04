@@ -6,14 +6,14 @@ import {
 } from '../../src/adapters/persistence-db-name';
 
 const INPUT = {
-	pluginId: 'sample-plugin',
+	pluginId: 'rhizome',
 	databaseId: 'cache',
 	vaultRootPath: '/Users/tester/Vaults/main',
 };
 
 describe('derivePersistenceDbName', () => {
 	it('produces the {pluginId}/{databaseId}/{hash} address shape', () => {
-		expect(derivePersistenceDbName(INPUT)).toMatch(/^sample-plugin\/cache\/[0-9a-f]{12}$/);
+		expect(derivePersistenceDbName(INPUT)).toMatch(/^rhizome\/cache\/[0-9a-f]{12}$/);
 	});
 
 	it('is deterministic for identical input', () => {
@@ -30,7 +30,7 @@ describe('derivePersistenceDbName', () => {
 
 	it('includes the databaseId in the address', () => {
 		const other = derivePersistenceDbName({ ...INPUT, databaseId: 'index' });
-		expect(other).toMatch(/^sample-plugin\/index\/[0-9a-f]{12}$/);
+		expect(other).toMatch(/^rhizome\/index\/[0-9a-f]{12}$/);
 		expect(other).not.toBe(derivePersistenceDbName(INPUT));
 	});
 

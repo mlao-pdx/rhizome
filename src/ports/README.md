@@ -17,10 +17,10 @@ implements that interface against the real Obsidian API or Dexie schema.
 
 ## Current ports
 
-| Port              | Wraps                                       | Notes                                                                                 |
-| ----------------- | ------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `PersistencePort` | Dexie/IndexedDB schema                      | Dexie is the template's chosen API layer over IndexedDB — nothing uses raw IndexedDB. |
-| `LoggerPort`      | vault-file writes for developer diagnostics | Opt-in, silent by default — see below.                                                |
+| Port              | Wraps                                       | Notes                                                                                |
+| ----------------- | ------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `PersistencePort` | Dexie/IndexedDB schema                      | Dexie is the project's chosen API layer over IndexedDB — nothing uses raw IndexedDB. |
+| `LoggerPort`      | vault-file writes for developer diagnostics | Opt-in, silent by default — see below.                                               |
 
 ## Current adapters
 

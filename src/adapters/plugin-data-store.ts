@@ -1,4 +1,4 @@
-import type { MyPluginSettings } from '../settings';
+import type { RhizomeSettings } from '../settings';
 import { isValidVaultInstanceId, mintVaultInstanceId } from './database-identity';
 
 /**
@@ -16,7 +16,7 @@ import { isValidVaultInstanceId, mintVaultInstanceId } from './database-identity
  * @see docs/dev/indexeddb-database-identity.md
  */
 export interface PluginData {
-	settings: MyPluginSettings;
+	settings: RhizomeSettings;
 	vaultInstanceId?: string;
 }
 
@@ -41,17 +41,17 @@ export class PluginDataStore {
 	constructor(
 		private readonly loadData: () => Promise<unknown>,
 		private readonly saveData: (data: PluginData) => Promise<void>,
-		private readonly defaultSettings: MyPluginSettings,
+		private readonly defaultSettings: RhizomeSettings,
 	) {}
 
 	/** Reads `data.json` (once, then cached) and returns the merged settings. */
-	async loadSettings(): Promise<MyPluginSettings> {
+	async loadSettings(): Promise<RhizomeSettings> {
 		const data = await this.read();
 		return data.settings;
 	}
 
 	/** Persists the full settings object through the serialized write queue. */
-	saveSettings(settings: MyPluginSettings): Promise<void> {
+	saveSettings(settings: RhizomeSettings): Promise<void> {
 		return this.enqueueWrite((data) => ({ ...data, settings }));
 	}
 
@@ -117,7 +117,7 @@ export class PluginDataStore {
  * Forgiving read (design principle 6): an object without a `settings` key
  * is treated as the legacy flat settings shape rather than discarded.
  */
-function parsePluginData(raw: unknown, defaults: MyPluginSettings): PluginData {
+function parsePluginData(raw: unknown, defaults: RhizomeSettings): PluginData {
 	if (raw !== null && typeof raw === 'object' && 'settings' in raw) {
 		const obj = raw as { settings?: unknown; vaultInstanceId?: unknown };
 		const data: PluginData = { settings: mergeSettings(defaults, obj.settings) };
@@ -129,9 +129,9 @@ function parsePluginData(raw: unknown, defaults: MyPluginSettings): PluginData {
 	return { settings: mergeSettings(defaults, raw) };
 }
 
-function mergeSettings(defaults: MyPluginSettings, raw: unknown): MyPluginSettings {
+function mergeSettings(defaults: RhizomeSettings, raw: unknown): RhizomeSettings {
 	if (raw === null || typeof raw !== 'object') {
 		return { ...defaults };
 	}
-	return { ...defaults, ...(raw as Partial<MyPluginSettings>) };
+	return { ...defaults, ...(raw as Partial<RhizomeSettings>) };
 }

@@ -1,5 +1,5 @@
 /**
- * `PersistencePort` — repository interface for the template's
+ * `PersistencePort` — repository interface for the project's
  * IndexedDB-backed persistence. Core code depends on this port; the
  * Dexie-backed adapter (`src/adapters/dexie-persistence-adapter.ts`)
  * implements it, and nothing talks to raw IndexedDB directly. Replace
@@ -19,8 +19,8 @@
  */
 
 /**
- * The template's single domain-neutral example record. Replace it with the
- * record shapes your plugin actually persists.
+ * The project's single domain-neutral example record. Replace it with the
+ * record shapes the plugin actually persists.
  */
 export interface ExampleRecord {
 	readonly id: number;

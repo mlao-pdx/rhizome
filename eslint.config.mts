@@ -104,18 +104,5 @@ export default defineConfig(
 			],
 		},
 	},
-	{
-		// This project is a template, not a fork of the sample plugin
-		// preparing to publish under new names — it deliberately keeps
-		// `obsidian-sample-plugin`'s own class names as its identity (see
-		// `manifest.json`). `obsidianmd/sample-names` exists to nag real
-		// plugin authors into renaming these before release; that nag does
-		// not apply here, so it is disabled for the two files that use
-		// them.
-		files: ['src/main.ts', 'src/settings.ts'],
-		rules: {
-			'obsidianmd/sample-names': 'off',
-		},
-	},
 	prettier,
 );

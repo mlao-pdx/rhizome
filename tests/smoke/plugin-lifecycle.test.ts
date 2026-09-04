@@ -3,16 +3,16 @@ import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 
-import MyPlugin from '../../src/main';
+import RhizomePlugin from '../../src/main';
 import { createMockApp, createMockManifest } from '../support/mock-obsidian-app';
 
-function createPlugin(): MyPlugin {
+function createPlugin(): RhizomePlugin {
 	const app = createMockApp() as App;
 	const manifest = createMockManifest() as PluginManifest;
-	return new MyPlugin(app, manifest);
+	return new RhizomePlugin(app, manifest);
 }
 
-describe('MyPlugin lifecycle (smoke)', () => {
+describe('RhizomePlugin lifecycle (smoke)', () => {
 	it('onload() does not throw', async () => {
 		const plugin = createPlugin();
 		await plugin.onload();
@@ -27,7 +27,6 @@ describe('MyPlugin lifecycle (smoke)', () => {
 	it('settings load with defaults when loadData() resolves undefined', async () => {
 		const plugin = createPlugin();
 		await plugin.onload();
-		expect(plugin.settings.exampleSetting).toBe('default');
 		expect(plugin.settings.loggingEnabled).toBe(false);
 		expect(plugin.settings.logLevel).toBe('warn');
 	});
@@ -41,6 +40,6 @@ describe('MyPlugin lifecycle (smoke)', () => {
 	it('derives the log folder path from the manifest id, not a hardcoded literal', async () => {
 		const plugin = createPlugin();
 		await plugin.onload();
-		expect(plugin.loggerAdapter.logsFolderPath).toBe('_sample-plugin/logs');
+		expect(plugin.loggerAdapter.logsFolderPath).toBe('_rhizome/logs');
 	});
 });
