@@ -22,10 +22,11 @@ the vault worse than a manual edit would. Deviations must be well-reasoned.
 - Split large files: if a file exceeds ~200-300 lines, break it into
   smaller, focused modules with a single, well-defined responsibility.
 - Bundle everything into `main.js` (no unbundled runtime deps).
-- Desktop-only plugin (`manifest.json` sets `isDesktopOnly: true`). Node/
-  Electron APIs are fine to use. Mobile is explicitly out of scope: not
-  tested, not designed for, and not a goal for the foreseeable future. A
-  Git-backed feature set is likewise explicitly out of scope.
+- Cross-platform plugin (desktop + mobile). **No Node/Electron APIs in
+  `src/**`** — use Web APIs (`crypto.subtle`, IndexedDB via Dexie);
+  enforced by the `no-restricted-imports` rule in `eslint.config.mts`.
+  `manifest.json` must not set `isDesktopOnly`. A Git-backed feature set
+  is explicitly out of scope.
 - Prefer `async/await` over promise chains; handle errors gracefully.
 - Never commit build artifacts: `node_modules/`, `main.js`, and other
   generated output must never be tracked in Git.
@@ -100,9 +101,9 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
 - Design principles: `docs/principles.md`.
 - Example file structure, common task code snippets, UI copy/UX
   guidelines: `obsidian-plugin-patterns` skill.
-- IndexedDB database naming and identity (address vs identity, the
-  `{pluginId}/{databaseId}/{vaultRootHash}` pattern, verification and
-  crash-consistency ordering): `docs/dev/indexeddb-database-identity.md`.
+- IndexedDB database naming (`{pluginId}/{databaseId}/{vaultScope}` —
+  Obsidian's per-vault appId, or a path-hash fallback):
+  `docs/dev/indexeddb-database-identity.md`.
 - Creating or revising a decision record (rev-tagged IBIS diagrams
   recording a design decision's reasoning and history, with `wins over`
   supersession and `thus` consequence edges): load the

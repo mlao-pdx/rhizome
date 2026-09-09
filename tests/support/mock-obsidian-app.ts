@@ -41,8 +41,8 @@ export class Plugin {
 
 /**
  * Messages passed to `Notice` constructions, in order. Tests assert on
- * this to verify user-visible failure surfaces (e.g. the persistence
- * adapter's latched untrusted-database Notice).
+ * this to verify user-visible failure surfaces (e.g. the logger adapter's
+ * reveal-log-folder Notices).
  */
 export const noticeMessages: string[] = [];
 
@@ -162,9 +162,10 @@ export function normalizePath(path: string): string {
 export class App {}
 
 /**
- * Minimal stand-in for Obsidian's `FileSystemAdapter`. `RhizomePlugin` is
- * desktop-only, so `onload()` narrows `vault.adapter` to this class via
- * `instanceof` and reads the vault root from it.
+ * Minimal stand-in for Obsidian's `FileSystemAdapter` (desktop vaults).
+ * `onload()` narrows `vault.adapter` to this class via `instanceof` and
+ * reads the vault root from `getBasePath()` for the persistence database's
+ * fallback scope.
  */
 export class FileSystemAdapter {
 	getBasePath(): string {
@@ -176,11 +177,32 @@ export class FileSystemAdapter {
 	}
 }
 
-/** A minimal `app` value sufficient for `RhizomePlugin`'s current `onload()`. */
-export function createMockApp(): unknown {
+/**
+ * Minimal stand-in for Obsidian's `CapacitorAdapter` (mobile vaults). No
+ * `getBasePath()` — the real class has none; `onload()` reads the vault
+ * root from `getFullPath('')` instead.
+ */
+export class CapacitorAdapter {
+	getFullPath(normalizedPath: string): string {
+		return normalizedPath === '' ? '/mock/vault' : `/mock/vault/${normalizedPath}`;
+	}
+}
+
+/**
+ * A minimal `app` value sufficient for `RhizomePlugin`'s current
+ * `onload()`. Defaults to a desktop (fs) adapter **with** an `appId`, the
+ * common case; pass `appId: ''` for an app without a usable one (empty
+ * string = invalid scope, exercises the fallback hash), and
+ * `adapter: 'capacitor'` for the mobile path.
+ */
+export function createMockApp(
+	options: { appId?: string; adapter?: 'fs' | 'capacitor' } = {},
+): unknown {
+	const { appId = 'test-app-id', adapter = 'fs' } = options;
 	return {
+		appId,
 		vault: {
-			adapter: new FileSystemAdapter(),
+			adapter: adapter === 'capacitor' ? new CapacitorAdapter() : new FileSystemAdapter(),
 		},
 	};
 }

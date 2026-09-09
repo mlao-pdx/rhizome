@@ -22,31 +22,29 @@ algorithms depend only on `PersistencePort` (`src/ports/persistence-port.ts`);
 this skill's patterns belong in the adapter module that implements that
 interface, never inside `src/core` or `src/ports` themselves.
 
-The inverse guard applies to the test shim: `fake-indexeddb` is banned under
-`src/**` by a second `no-restricted-imports` block. It reaches Dexie only
-through the `{ indexedDB, IDBKeyRange }` pair passed into
-`DexiePersistenceAdapter`'s constructor (forwarded to `PluginDatabase` as
-`DexieOptions`) — never by patching globals, and never from production code.
+The inverse guard applies to the test shim and to Node builtins:
+`fake-indexeddb` and `node:*` are banned under `src/**` by a second
+`no-restricted-imports` block. The shim reaches Dexie only through the
+`{ indexedDB, IDBKeyRange }` pair passed into `DexiePersistenceAdapter`'s
+constructor (forwarded to `PluginDatabase` as `DexieOptions`) — never by
+patching globals, and never from production code. Node builtins are
+unavailable in mobile webviews; use Web APIs (`crypto.subtle`).
 
 ## Schema declaration matching the adapter
 
-The shipped schema (`src/adapters/dexie-persistence-adapter.ts`) declares two
-tables: `identity` (bootstrap bookkeeping) and `records` (the example
-application table):
+The shipped schema (`src/adapters/dexie-persistence-adapter.ts`) declares
+one application table (`records`, the example):
 
 ```ts
 import { Dexie, type DexieOptions, type Table } from 'dexie';
 import type { ExampleRecord } from '@ports/persistence-port';
-import type { DatabaseIdentityRecord } from './database-identity';
 
 export class PluginDatabase extends Dexie {
-	identity!: Table<DatabaseIdentityRecord, string>;
 	records!: Table<ExampleRecord, number>;
 
 	constructor(name: string, options?: DexieOptions) {
 		super(name, options);
 		this.version(1).stores({
-			identity: 'key',
 			records: 'id',
 		});
 	}
@@ -59,32 +57,30 @@ export class PluginDatabase extends Dexie {
   arrays of indexable keys, and typed arrays/`ArrayBuffer` — never `boolean`,
   `null`, `undefined`, or a plain object. A field typed `T | undefined` is
   simply unindexed for rows where it's absent (sparse index), not an error.
-- The `identity` table is not application data: it holds the singleton
-  continuity record the bootstrap verifies. It is the **first write** on
-  create/recreate, must survive `clear()` (which wipes `records` only), and
-  must never be read before the rest of the database is trusted. Replace
-  `ExampleRecord`/`records` with your plugin's real row shapes; leave
-  `identity` alone.
+- The schema holds application data only — no bookkeeping table. The
+  database is trusted on sight (vault-scoped name, see below), so there is
+  nothing to verify and nothing that must survive `clear()`. Replace
+  `ExampleRecord`/`records` with your plugin's real row shapes.
 - Dexie 4 auto-detects schema changes on load; incrementing `version()` on a
   pure additive change is optional but still best practice (saves ~1ms on
   open). Only a genuine schema edit needs the version bump below.
 
-## Database naming and identity — pointer, not restatement
+## Database naming — pointer, not restatement
 
-The database **address** (`{pluginId}/{databaseId}/{vaultRootHash}`), the
-persisted **vault-instance identity**, the verification table, and the
-crash-consistency ordering are normative in
-`docs/dev/indexeddb-database-identity.md`. Read that document before
-touching `database-bootstrap.ts`, `database-identity.ts`,
-`persistence-db-name.ts`, or anything that renames a database. Two rules
-from it that shape adapter code directly:
+The database **address** (`{pluginId}/{databaseId}/{vaultScope}`, where the
+vault scope is Obsidian's per-vault `appId` or a `sha256-hex-12` hash of the
+vault root) is normative in `docs/dev/indexeddb-database-identity.md`. Read
+that document before touching `persistence-db-name.ts` or anything that
+renames a database. Two rules from it that shape adapter code directly:
 
 - `databaseId` (`"cache"` in `main.ts`) is stable like `manifest.id` —
   renaming it orphans every user's database.
-- Existence checks use the injected `IDBFactory.databases()`, deletion the
-  Dexie **instance** `db.delete()`. The statics `Dexie.exists()`/
-  `Dexie.delete()` take no options and hit the ambient global, bypassing any
-  injected fake — never use them.
+- Bootstrap is open-only: Dexie **creates the database on demand** at the
+  derived address, and a database found there is trusted (its name is
+  vault-instance-scoped). There is no existence check and no delete path —
+  and if one is ever added, never use the `Dexie.exists()`/`Dexie.delete()`
+  statics: they take no options and hit the ambient global, bypassing any
+  injected fake.
 
 ## Atomic transaction pattern
 
@@ -137,10 +133,13 @@ names or teardown are needed:
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 
 const factory = new IDBFactory();
-const adapter = new DexiePersistenceAdapter(pluginId, databaseId, vaultRoot, ensure, logger, {
-	indexedDB: factory,
-	IDBKeyRange,
-});
+const adapter = new DexiePersistenceAdapter(
+	pluginId,
+	databaseId,
+	vaultScope, // validated appId, or the path-hash fallback — see persistence-db-name.ts
+	logger,
+	{ indexedDB: factory, IDBKeyRange },
+);
 ```
 
 Never import `fake-indexeddb/auto` (global patching) — the lint guard and
@@ -175,8 +174,8 @@ this.version(3)
   a downgraded schema version triggers a clear/rebuild path instead.
 - Remember the cache invariant before reaching for migrations: everything in
   IndexedDB is rebuildable derived cache. When a migration is more work than
-  a rebuild, bumping the identity record's `format` (or the database
-  address) and recreating is the intended escape hatch — see
+  a rebuild, bumping the database address or the schema version and
+  rebuilding is the intended escape hatch — see
   `docs/dev/indexeddb-database-identity.md`.
 - Sources for schema/versioning/transaction detail beyond this skill:
   `https://dexie.org/docs/Dexie/Dexie.version()`,

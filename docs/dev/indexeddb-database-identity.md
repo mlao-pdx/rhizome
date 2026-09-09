@@ -1,19 +1,22 @@
-# IndexedDB database identity
+# IndexedDB database naming
 
-Normative source for how Rhizome names, scopes, and verifies its
-Dexie/IndexedDB databases. Code (`src/adapters/dexie-persistence-adapter.ts`,
-`src/adapters/persistence-db-name.ts`, `src/adapters/database-identity.ts`)
-and the `dexie-persistence-adapter` skill cite this document instead of
-restating it, so the three cannot drift.
+Normative source for how Rhizome names and scopes its Dexie/IndexedDB
+databases. Code (`src/adapters/persistence-db-name.ts`,
+`src/adapters/dexie-persistence-adapter.ts`, `src/main.ts`) and the
+`dexie-persistence-adapter` skill cite this document instead of restating
+it, so they cannot drift. The decisions behind the current scheme — and the
+tombstone of the identity-verification machinery it replaced — are recorded
+in `docs/spec/decisions.md` (Rev 0.1).
 
 ## Why naming is non-trivial: origin partitioning
 
 IndexedDB is partitioned by **origin**, not by vault or plugin. Obsidian
-(Electron) presents one origin, so every plugin of every vault on the
-machine shares a single IndexedDB namespace. A plugin cannot ask "my"
-database — it can only compute a name and hope the database at that name
-belongs to the current vault. Naming and identity below exist to make that
-hope checkable.
+desktop (Electron) presents one origin, so every plugin of every vault on
+the machine shares a single IndexedDB namespace. Mobile webviews are also
+one origin per app (`capacitor://localhost` / `https://localhost`), so all
+vaults on a device share one namespace there too. A plugin cannot ask for
+"my" database — it can only compute a name that scopes precisely enough
+that whatever is found at it must be its own.
 
 ## Lifecycle mismatch: IndexedDB vs plugin data
 
@@ -33,127 +36,101 @@ The consequences that shape everything below:
 - Nothing in IndexedDB may ever be a source of truth — it is rebuildable
   derived cache (design principle 3: vault is truth).
 
-## Address vs identity
-
-The design separates two questions that a naive scheme conflates:
-
-- **Address** — where is this vault's database? A _deterministic, derivable_
-  name computed from facts available on every install.
-- **Identity** — is the database at that address really ours? A _persisted,
-  random_ vault-instance id compared against a record stored inside the
-  database itself.
-
-The address finds the database; the identity decides whether its contents
-may be **reused**. A mismatch never merges, migrates, or repairs — it
-invalidates the whole database (delete and recreate).
-
 ## The address pattern
 
 ```
-{pluginId}/{databaseId}/{vaultRootHash}
+{pluginId}/{databaseId}/{vaultScope}
 ```
 
-| Component       | Value                                                      | Responsibility                                                                                                                                                                                                                                      |
-| --------------- | ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pluginId`      | `manifest.id`                                              | Partitions databases between plugins in the shared origin.                                                                                                                                                                                          |
-| `databaseId`    | logical dataset name; `"cache"` in this plugin             | Partitions multiple logical datasets of one plugin. **Stable like `manifest.id`**: the value encodes the invariant that the pattern is scoped to rebuildable vault-local data; renaming it orphans every existing user database.                    |
-| `vaultRootHash` | `sha256(normalisedVaultRoot).slice(0, 12)` (`node:crypto`) | Scopes the database to the vault's filesystem location **without** embedding the raw path in the name. Normalisation strips trailing separators only — never lowercasing, which would wrongly merge distinct vaults on a case-sensitive filesystem. |
+| Component    | Value                                                      | Responsibility                                                                                                                                                                                 |
+| ------------ | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pluginId`   | `manifest.id`                                              | Partitions databases between plugins in the shared origin.                                                                                                                                     |
+| `databaseId` | logical dataset name; `"cache"` in this plugin             | Partitions multiple logical datasets of one plugin. **Stable like `manifest.id`**: renaming it orphans every existing user database.                                                           |
+| `vaultScope` | validated `app.appId`, else `sha256-hex-12(vaultRootPath)` | Scopes the database to this vault **instance** on this machine. Derived in `deriveVaultScope` (`src/adapters/persistence-db-name.ts`), awaited in `main.ts` before the adapter is constructed. |
 
-The vault root comes from `FileSystemAdapter.getBasePath()`. The plugin is
-desktop-only (`manifest.json` sets `isDesktopOnly: true`), so the vault
-adapter is a `FileSystemAdapter` at runtime; `main.ts` narrows to it with
-`instanceof`. Note that `getFullPath()`/`getBasePath()` are declared on the
-concrete adapter classes (`FileSystemAdapter`, `CapacitorAdapter`), **not**
-on the `DataAdapter` interface — code typed against `DataAdapter` alone
-cannot call them. `app.appId` is deliberately **not** used as a vault
-identifier: it is not part of the public typings.
+`main.ts` reads the vault root from the typed adapter classes:
+`FileSystemAdapter.getBasePath()` (desktop) or
+`CapacitorAdapter.getFullPath('')` (mobile) — `getFullPath()`/`getBasePath()`
+are declared on the concrete adapter classes, **not** on the `DataAdapter`
+interface, so code typed against `DataAdapter` alone cannot call them. Both
+classes are runtime-exported on both platforms, so `instanceof` narrowing is
+safe. An adapter that is neither yields no vault root; without an appId,
+`deriveVaultScope` throws rather than ever opening an unscoped database.
 
-## Why the name excludes the identity
+## Why appId
 
-The address must stay derivable from facts that survive uninstall. Uninstall
-removes `data.json` — where the identity lives — but leaves the database. If
-the name embedded the identity, a reinstall could never recompute it, and
-the surviving database would be permanently orphaned. With a pure address,
-reinstall rediscovers the database by name, runs the identity check, and
-reclaims (reuse) or rebuilds (recreate) it.
+`app.appId` is Obsidian's own per-vault instance id: the vault-registry key
+(desktop: `~/Library/Application Support/obsidian/obsidian.json`), a 16-char
+hex id persisted **outside the vault**. It is stable across restarts,
+survives plugin uninstall (so the old "the name must stay derivable after
+uninstall" argument holds even better than for a path hash), and is
+machine-local. Obsidian itself namespaces all of its per-vault storage by
+appId — IndexedDB `${appId}-cache`, `-sync`, `-backup`, `-webview`;
+localStorage keys `${appId}-*`; the webview partition
+`persist:vault-${appId}` — so this is both precedent and a collision
+constraint: our name must keep the `{pluginId}/{databaseId}/` prefix.
 
-## The identity record
+appId is **not** in the public typings (`obsidian.d.ts`). It is accessed
+through a local `ExtendedApp` cast in `main.ts` and validated at runtime as
+a non-empty string — its format is never constrained, because uniqueness,
+not shape, is the requirement for an undocumented value.
 
-`vaultInstanceId` is a `randomUUID()` value minted once per vault instance.
-It is persisted in **two** places with distinct roles:
+## The fallback
 
-- **`data.json`** (authoritative, under a separate top-level key — not
-  inside the user-settings object). Deleting IndexedDB never mints a new id:
-  the same vault instance keeps the same id.
-- **The database's `identity` table** (continuity check). A singleton record
-  decides whether the database contents may be reused. It is _not_ a second
-  authority.
+When the appId is missing, empty, or not a string, `deriveVaultScope`
+hashes the vault root instead:
 
-Shape (`src/adapters/database-identity.ts`):
+- **Base-path sources**: `FileSystemAdapter.getBasePath()` (desktop),
+  `CapacitorAdapter.getFullPath('')` (mobile).
+- **Normalisation**: trailing `/` and `\` separators stripped only —
+  deliberately **no** lowercasing, which would wrongly merge distinct
+  vaults on a case-sensitive filesystem.
+- **Hash**: `sha256(normaliseVaultRoot(path))` via the ambient Web
+  `crypto.subtle` (available in the desktop renderer, both mobile webview
+  schemes, and Node ≥18 in tests — no Node builtins anywhere in `src/`),
+  hex-encoded and truncated to 12 characters. Lowercase hex, not base64:
+  legible, copy-pastable, and free of `+`/`/`/`=` metacharacters.
 
-```ts
-interface DatabaseIdentityRecord {
-	key: 'identity';
-	format: 1;
-	vaultInstanceId: string;
-}
-```
+The fallback's guarantee is **weaker**, and that is accepted: it scopes by
+location, so successive vault instances at one path share a database. The
+worst case is a stale rebuildable cache — never a source of truth.
 
-`format` is checked strictly (`=== 1`): a future format bump makes old
-records invalid, which self-heals via recreate rather than requiring a
-migration.
+If neither an appId nor a vault root is available, `deriveVaultScope`
+throws a descriptive error. An unscoped (or literal-`"undefined"`) database
+name must never be produced; a visible failure at load is correct.
 
-## Verification table
+## Bootstrap = open
 
-`decideBootstrapAction` implements exactly this table
-(`persistedValid` = `data.json` holds a valid id; a database that exists but
-fails to open counts as **present** and untrusted):
-
-| Persisted identity | Database at address | Database identity | Action                           |
-| ------------------ | ------------------- | ----------------- | -------------------------------- |
-| missing/malformed  | absent              | —                 | mint id first, then **create**   |
-| present            | absent              | —                 | **create**                       |
-| present            | present             | equal             | **reuse**                        |
-| present            | present             | different         | **recreate**                     |
-| present            | present             | missing/malformed | **recreate**                     |
-| missing/malformed  | present             | any               | mint id first, then **recreate** |
-
-`create` opens a database that does not yet exist; `recreate` deletes the
-database first, then creates it. Existence is determined via the
-**injected** `IDBFactory.databases()`; deletion via the Dexie **instance**
-`db.delete()`. The statics `Dexie.exists()`/`Dexie.delete()` bypass any
-injected `indexedDB` and hit the ambient global — they must never be used.
-
-## Creation and crash-consistency ordering
-
-1. Read `vaultInstanceId` from `data.json`; if invalid, mint one with
-   `randomUUID()` and **persist it before any database work** — the
-   authoritative identity must be durable before the database exists.
-2. Determine existence at the derived address.
-3. If present, open and read the `identity` singleton. Application tables
-   are **never read before identity verification succeeds.**
-4. Apply the decided action. On `create`/`recreate`, the identity record is
-   the **first write**, before any application row.
-
-Crash consistency follows from the ordering, not from any journaling:
-
-- Interrupted after persisting the id → next attempt creates/validates
-  against it.
-- Interrupted after creating a database but before its identity record is
-  durable → next attempt sees a missing identity and recreates.
-- Interrupted mid-delete → next attempt detects the same mismatch and
-  retries.
-
-If the delete of an untrusted database fails or is blocked, the adapter must
-fail visibly (a `Notice`, an `error`-level log, a rejected promise) and
-refuse the database until reload — it must never read application tables
-from a database it could not verify and could not replace.
+A database at this address could only have been created by this vault
+instance on this machine, so it is **trusted on sight**. Bootstrap reduces
+to: derive the name → open (Dexie creates the database on demand) → use.
+There is no existence check, no content verification, and no delete path.
+The retired verification machinery — the `identity` table, the
+`vaultInstanceId` in `data.json`, the bootstrap decision table, the
+crash-consistency ordering, and the untrusted-delete latch — is tombstoned
+in `docs/spec/decisions.md` (Rev 0.1, "Persistence database naming").
 
 ## Remaining lifecycle limitation
 
-A database at **another** location's `vaultRootHash` — left behind by moving
-or copying the vault — can be neither verified nor safely deleted: it may
-belong to a live copy of the vault. Such databases **MUST NOT** be
-auto-deleted. This is accepted, not worked around: reinstall already
-self-heals the common case (rediscovery by address at the current location),
-and manual reclamation is a user action.
+Databases orphaned at an old scope **MUST NOT** be auto-deleted: they may
+belong to a live copy of the vault elsewhere, and everything here is
+rebuildable cache anyway. Orphaning happens when:
+
+- a vault is **moved or renamed** (the desktop registry keys by path, so
+  the vault gets a new appId → fresh database);
+- a vault is **removed from and re-added to** the vault list (new registry
+  entry → new appId → fresh database);
+- a vault is **copied to another machine** (appIds are machine-local);
+- a database was created under the **pre-Rev-0.1 legacy name**
+  (`rhizome/cache/<12-hex path hash>`). Under appId scoping (the normal
+  case) the rename orphans it. Under the path-hash fallback the name
+  components are **identical** — the fallback digest is the same
+  `sha256-hex-12` of the same normalised path the legacy scheme computed —
+  so the legacy database is **reused on sight**: its rows are the same
+  vault's rebuildable cache, and its retired `identity` store lingers
+  inert (never read, never reconciled, never deleted). Both outcomes are
+  accepted — the plugin is pre-release, so no user is affected — and in
+  neither case is a legacy database auto-deleted.
+
+Manual reclamation is a user action: DevTools → Application → IndexedDB,
+delete the database at the old name.

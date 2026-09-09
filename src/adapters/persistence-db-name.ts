@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 /**
  * Pure naming helpers for the Dexie persistence adapter
  * (`dexie-persistence-adapter.ts`). Split out with zero `obsidian`/`dexie`
@@ -9,8 +7,8 @@ import { createHash } from 'node:crypto';
  * @see docs/dev/indexeddb-database-identity.md
  */
 
-/** Length of the `vaultRootHash` component of a persistence database address. */
-export const VAULT_ROOT_HASH_LENGTH = 12;
+/** Length of the fallback-hash `vaultScope` component of a persistence database address. */
+export const VAULT_SCOPE_HASH_LENGTH = 12;
 
 /**
  * Strips trailing separators from a vault root path.
@@ -26,27 +24,70 @@ export function normaliseVaultRoot(vaultRootPath: string): string {
 }
 
 /**
- * Derives the IndexedDB **address** for this plugin's persistence
- * database: `{pluginId}/{databaseId}/{vaultRootHash}`, where
- * `vaultRootHash` is `sha256(normalisedVaultRoot).slice(0, 12)`.
+ * Derives the vault scope for the persistence database address: Obsidian's
+ * per-vault `appId` when it is a valid non-empty string, else a SHA-256
+ * hex digest of the normalised vault root, else throws.
  *
  * @see docs/dev/indexeddb-database-identity.md
  * @remarks
- * (design, 2026-09-01) The address is a pure function of facts available
- * on every install, and contains no identity: a reinstall must be able to
- * recompute it after uninstall removed `data.json`, so the surviving
- * database can be rediscovered and reclaimed. The vault root enters only
- * as a hash so the user's filesystem path never appears in the database
- * name.
+ * (design, 2026-09-09) Obsidian namespaces its own per-vault IndexedDB
+ * stores by `app.appId` — the vault-registry id persisted outside the
+ * vault — so reusing it follows precedent and keeps the address derivable
+ * after uninstall. The value is undocumented, so it is validated only as
+ * "non-empty string": uniqueness, not shape, is the requirement. When the
+ * appId is unusable, the fallback hashes the normalised vault root with
+ * the ambient Web `crypto.subtle` — available in the desktop renderer,
+ * both mobile webview schemes, and Node ≥18 in tests — and keeps
+ * `VAULT_SCOPE_HASH_LENGTH` lowercase hex chars: legible and free of
+ * base64 `+`/`/`/`=` metacharacters. With neither available, throwing is
+ * correct: an unscoped database name must never be produced.
+ */
+export async function deriveVaultScope(
+	appId: unknown,
+	vaultRootPath: string | undefined,
+): Promise<string> {
+	if (typeof appId === 'string' && appId.length > 0) {
+		return appId;
+	}
+	if (vaultRootPath !== undefined) {
+		const digest = await crypto.subtle.digest(
+			'SHA-256',
+			new TextEncoder().encode(normaliseVaultRoot(vaultRootPath)),
+		);
+		return hexEncode(digest).slice(0, VAULT_SCOPE_HASH_LENGTH);
+	}
+	throw new Error(
+		'Cannot derive the persistence database vault scope: no appId and no readable vault root path.',
+	);
+}
+
+/**
+ * Joins `pluginId`, `databaseId`, and `vaultScope` into the IndexedDB
+ * **address** for this plugin's persistence database:
+ * `{pluginId}/{databaseId}/{vaultScope}`. A pure sync join — scoping
+ * hashing lives in `deriveVaultScope`, awaited in `main.ts` before the
+ * adapter is constructed so the adapter's `readonly dbName` stays
+ * synchronous.
+ *
+ * @see docs/dev/indexeddb-database-identity.md
+ * @remarks
+ * (design, 2026-09-09) The third component is the `vaultScope` derived by
+ * `deriveVaultScope` — Obsidian's per-vault appId, or a hash of the vault
+ * root — so the name is vault-derived and the raw path never appears in
+ * it.
+ *
+ * SUPERSEDED (design, 2026-09-01): this function computed a
+ * `vaultRootHash` by hashing the vault root internally via `node:crypto`
+ * and had no `vaultScope` input.
  */
 export function derivePersistenceDbName(input: {
 	pluginId: string;
 	databaseId: string;
-	vaultRootPath: string;
+	vaultScope: string;
 }): string {
-	const hash = createHash('sha256')
-		.update(normaliseVaultRoot(input.vaultRootPath))
-		.digest('hex')
-		.slice(0, VAULT_ROOT_HASH_LENGTH);
-	return `${input.pluginId}/${input.databaseId}/${hash}`;
+	return `${input.pluginId}/${input.databaseId}/${input.vaultScope}`;
+}
+
+function hexEncode(bytes: ArrayBuffer): string {
+	return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }

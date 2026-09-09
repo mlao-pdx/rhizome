@@ -66,8 +66,9 @@ const context = await esbuild.context({
 		'@lezer/highlight',
 		'@lezer/lr',
 		// Node builtins under both specifier forms — `builtinModules` lists
-		// only the unprefixed names, but source imports use `node:` prefixes
-		// (e.g. `node:crypto` in the persistence adapter helpers).
+		// only the unprefixed names. `src/` itself must not import these
+		// (enforced by `eslint.config.mts`: the plugin runs on mobile too),
+		// so the externals are defensive build-tooling only.
 		...builtinModules,
 		...builtinModules.map((name) => `node:${name}`),
 	],

@@ -1,26 +1,21 @@
-import { Notice } from 'obsidian';
 import { Dexie, type DexieOptions, type Table } from 'dexie';
 import type { LoggerPort } from '@ports/logger-port';
 import type { ExampleRecord, PersistencePort } from '@ports/persistence-port';
-import { UntrustedDatabaseDeleteError, bootstrapPersistenceDatabase } from './database-bootstrap';
-import type { DatabaseIdentityRecord } from './database-identity';
 import { derivePersistenceDbName } from './persistence-db-name';
 
 /**
  * The Dexie-backed `PersistencePort` adapter. `PluginDatabase` declares the
  * schema; `DexiePersistenceAdapter` implements the port, owns the lazy
- * identity-verified bootstrap, and applies the error policy: ordinary
- * errors log-and-rethrow, an untrusted database that cannot be deleted
- * fails visibly and latches until reload.
+ * open-only bootstrap, and applies one uniform error policy: errors log
+ * and rethrow.
  *
  * @see docs/dev/indexeddb-database-identity.md
  */
 
 /**
- * The plugin's IndexedDB schema: one `identity` singleton table plus the
- * application table(s). The identity record is the first write on
- * create/recreate and must survive `clear()` — see
- * `docs/dev/indexeddb-database-identity.md`.
+ * The plugin's IndexedDB schema: the application table(s) — this example
+ * declares a single `records` table. Replace `ExampleRecord` with the row
+ * shapes the plugin actually persists.
  *
  * @remarks
  * (design, 2026-09-01) `fake-indexeddb` is never imported here: tests
@@ -29,13 +24,11 @@ import { derivePersistenceDbName } from './persistence-db-name';
  * `no-restricted-imports` rule in `eslint.config.mts`).
  */
 export class PluginDatabase extends Dexie {
-	identity!: Table<DatabaseIdentityRecord, string>;
 	records!: Table<ExampleRecord, number>;
 
 	constructor(name: string, options?: DexieOptions) {
 		super(name, options);
 		this.version(1).stores({
-			identity: 'key',
 			records: 'id',
 		});
 	}
@@ -50,38 +43,40 @@ export interface AmbientIndexedDb {
 /**
  * Dexie implementation of `PersistencePort` over rebuildable derived
  * cache. Storage opens lazily on first use — construction performs no I/O
- * and mints nothing — so wiring in `main.ts` keeps startup light.
+ * — so wiring in `main.ts` keeps startup light.
  *
  * @remarks
- * (design, 2026-09-01) Existence checks use the injected factory's
- * `databases()` and deletion the Dexie **instance** `delete()`: the
- * `Dexie.exists()`/`Dexie.delete()` statics take no options and would
- * bypass the injected fake in tests (and any future injection) entirely.
+ * (design, 2026-09-09) Bootstrap is open-only: the address embeds this
+ * vault's scope (Obsidian's per-vault appId, or a hash of the vault root),
+ * so a database at this name could only have been created by this vault
+ * instance on this machine and is trusted on sight — Dexie creates it on
+ * demand when absent. No existence checks and no delete paths exist
+ * anymore; if one is ever added, it must go through the injected factory,
+ * never the `Dexie.exists()`/`Dexie.delete()` statics, which take no
+ * options and would bypass the injected fake in tests (and any future
+ * injection) entirely. The retired verification machinery is tombstoned in
+ * `docs/spec/decisions.md` (Rev 0.1).
  */
 export class DexiePersistenceAdapter implements PersistencePort {
 	readonly dbName: string;
 
 	private readonly ambient: AmbientIndexedDb | undefined;
-	private readonly ensureVaultInstanceId: () => Promise<string>;
 	private readonly logger: LoggerPort;
 
 	private resolvedAmbient: AmbientIndexedDb | undefined;
 	private bootstrapPromise: Promise<PluginDatabase> | undefined;
-	private latchedError: Error | undefined;
 	private db: PluginDatabase | undefined;
 	private closed = false;
 
 	constructor(
 		pluginId: string,
 		databaseId: string,
-		vaultRootPath: string,
-		ensureVaultInstanceId: () => Promise<string>,
+		vaultScope: string,
 		logger: LoggerPort,
 		ambient?: AmbientIndexedDb,
 	) {
-		this.dbName = derivePersistenceDbName({ pluginId, databaseId, vaultRootPath });
+		this.dbName = derivePersistenceDbName({ pluginId, databaseId, vaultScope });
 		this.ambient = ambient;
-		this.ensureVaultInstanceId = ensureVaultInstanceId;
 		this.logger = logger;
 	}
 
@@ -126,7 +121,8 @@ export class DexiePersistenceAdapter implements PersistencePort {
 	}
 
 	/**
-	 * Empties the application table only; the identity record survives.
+	 * Empties every application row. Nothing else survives: the database
+	 * carries no bookkeeping of its own.
 	 */
 	clear(): Promise<void> {
 		return this.withDb('clear', (db) => db.records.clear());
@@ -149,12 +145,9 @@ export class DexiePersistenceAdapter implements PersistencePort {
 		if (this.closed) {
 			return Promise.reject(new Error('Persistence adapter is closed'));
 		}
-		if (this.latchedError !== undefined) {
-			return Promise.reject(this.latchedError);
-		}
 		this.bootstrapPromise ??= this.doBootstrap().catch((error) => {
-			// Ordinary failures may retry on the next call; the latch check
-			// above keeps the untrusted-delete failure sticky until reload.
+			// Ordinary failures may retry on the next call: clear the memo
+			// so a transient open failure is not cached forever.
 			this.bootstrapPromise = undefined;
 			throw error;
 		});
@@ -162,33 +155,15 @@ export class DexiePersistenceAdapter implements PersistencePort {
 	}
 
 	private async doBootstrap(): Promise<PluginDatabase> {
-		try {
-			const db = await bootstrapPersistenceDatabase({
-				dbName: this.dbName,
-				factory: this.resolveAmbient().indexedDB,
-				ensureVaultInstanceId: this.ensureVaultInstanceId,
-				openDatabase: () => this.openDatabase(),
-			});
-			if (this.closed) {
-				// close() raced the bootstrap: don't leak the connection.
-				db.close();
-				throw new Error('Persistence adapter closed during bootstrap');
-			}
-			this.db = db;
-			return db;
-		} catch (error) {
-			if (error instanceof UntrustedDatabaseDeleteError) {
-				this.latchedError = error;
-				// Visible failure by design: diagnostics logging is off by
-				// default, so a log alone would be invisible. The latch
-				// keeps this the only Notice — no storm on repeated calls.
-				new Notice(
-					'Plugin cache database could not be replaced and will not be used. ' +
-						'Reload the plugin to retry.',
-				);
-			}
-			throw error;
+		const db = this.openDatabase();
+		await db.open();
+		if (this.closed) {
+			// close() raced the bootstrap: don't leak the connection.
+			db.close();
+			throw new Error('Persistence adapter closed during bootstrap');
 		}
+		this.db = db;
+		return db;
 	}
 
 	private openDatabase(): PluginDatabase {
@@ -202,9 +177,10 @@ export class DexiePersistenceAdapter implements PersistencePort {
 	/**
 	 * Uniform error policy: log at `error`, then rethrow. The port is a
 	 * data contract — swallowing errors would invent recovery policy the
-	 * caller cannot know. Vault-derived values (the database name embeds a
-	 * hash of the vault root) are wrapped in guillemets per `LoggerPort`'s
-	 * redaction contract; the raw vault path itself never appears.
+	 * caller cannot know. Vault-derived values (the database name embeds
+	 * the vault's appId or a hash of the vault root) are wrapped in
+	 * guillemets per `LoggerPort`'s redaction contract; the raw vault path
+	 * itself never appears.
 	 */
 	private async withDb<T>(
 		operation: string,

@@ -1,5 +1,4 @@
 import type { RhizomeSettings } from '../settings';
-import { isValidVaultInstanceId, mintVaultInstanceId } from './database-identity';
 
 /**
  * Owns the shape of `data.json` and is the only caller of
@@ -9,32 +8,42 @@ import { isValidVaultInstanceId, mintVaultInstanceId } from './database-identity
  */
 
 /**
- * The full persisted shape of `data.json`. `vaultInstanceId` lives under a
- * separate top-level key, not inside the user-settings object, so a
- * "restore defaults" or settings migration can never regenerate it.
+ * The full persisted shape of `data.json`.
  *
- * @see docs/dev/indexeddb-database-identity.md
+ * @remarks
+ * (design, 2026-09-09) The shape is now just the user settings: the
+ * `vaultInstanceId` key it once carried for database identity verification
+ * is retired (see `docs/spec/decisions.md`, Rev 0.1). An old file with the
+ * key still parses — read forgivingly — and the key is shed on the next
+ * settings write.
+ *
+ * SUPERSEDED (design, 2026-09-01): `vaultInstanceId` lived under a
+ * separate top-level key, not inside the user-settings object, so a
+ * "restore defaults" or settings migration could never regenerate it.
  */
 export interface PluginData {
 	settings: RhizomeSettings;
-	vaultInstanceId?: string;
 }
 
 export class PluginDataStore {
 	private cached: PluginData | undefined;
 	private readInFlight: Promise<PluginData> | undefined;
-	private ensureInFlight: Promise<string> | undefined;
 
 	/**
 	 * Serializes every `data.json` write through one promise chain.
 	 *
 	 * @remarks
-	 * (design, 2026-09-01) `saveData` rewrites the whole file, so an
-	 * unserialized settings save and identity mint can clobber each other.
-	 * Mirrors the `writeQueue` precedent in `obsidian-logger-adapter.ts`,
-	 * except failures propagate to the awaiting caller (a rejected write
-	 * must be visible, not swallowed) while the chain itself stays alive
-	 * for subsequent writes.
+	 * (design, 2026-09-09) `saveData` rewrites the whole file, so two
+	 * concurrent saves would each start from the same stale in-memory copy
+	 * and the loser's changes would vanish; the queue makes later writes
+	 * observe earlier ones. Mirrors the `writeQueue` precedent in
+	 * `obsidian-logger-adapter.ts`, except failures propagate to the
+	 * awaiting caller (a rejected write must be visible, not swallowed)
+	 * while the chain itself stays alive for subsequent writes.
+	 *
+	 * SUPERSEDED (design, 2026-09-01): the queue originally also kept an
+	 * unserialized settings save and an identity mint from clobbering each
+	 * other; the mint is gone, but whole-file rewrites still race.
 	 */
 	private writeQueue: Promise<void> = Promise.resolve();
 
@@ -53,34 +62,6 @@ export class PluginDataStore {
 	/** Persists the full settings object through the serialized write queue. */
 	saveSettings(settings: RhizomeSettings): Promise<void> {
 		return this.enqueueWrite((data) => ({ ...data, settings }));
-	}
-
-	/**
-	 * Returns a valid stored `vaultInstanceId`, or mints one, persists it,
-	 * and returns it.
-	 *
-	 * @remarks
-	 * (design, 2026-09-01) The in-flight promise is memoized so concurrent
-	 * first calls mint exactly once, and cleared on settlement so a failed
-	 * mint can be retried. Persistence happens **before** the promise
-	 * resolves: the authoritative identity must be durable before any
-	 * database work (see `docs/dev/indexeddb-database-identity.md`).
-	 */
-	ensureVaultInstanceId(): Promise<string> {
-		this.ensureInFlight ??= this.ensureVaultInstanceIdOnce().finally(() => {
-			this.ensureInFlight = undefined;
-		});
-		return this.ensureInFlight;
-	}
-
-	private async ensureVaultInstanceIdOnce(): Promise<string> {
-		const data = await this.read();
-		if (isValidVaultInstanceId(data.vaultInstanceId)) {
-			return data.vaultInstanceId;
-		}
-		const minted = mintVaultInstanceId();
-		await this.enqueueWrite((current) => ({ ...current, vaultInstanceId: minted }));
-		return minted;
 	}
 
 	private read(): Promise<PluginData> {
@@ -115,16 +96,14 @@ export class PluginDataStore {
 
 /**
  * Forgiving read (design principle 6): an object without a `settings` key
- * is treated as the legacy flat settings shape rather than discarded.
+ * is treated as the legacy flat settings shape rather than discarded, and
+ * unknown or retired top-level keys (e.g. a legacy `vaultInstanceId`) are
+ * ignored — shed on the next write rather than preserved.
  */
 function parsePluginData(raw: unknown, defaults: RhizomeSettings): PluginData {
 	if (raw !== null && typeof raw === 'object' && 'settings' in raw) {
-		const obj = raw as { settings?: unknown; vaultInstanceId?: unknown };
-		const data: PluginData = { settings: mergeSettings(defaults, obj.settings) };
-		if (isValidVaultInstanceId(obj.vaultInstanceId)) {
-			data.vaultInstanceId = obj.vaultInstanceId;
-		}
-		return data;
+		const obj = raw as { settings?: unknown };
+		return { settings: mergeSettings(defaults, obj.settings) };
 	}
 	return { settings: mergeSettings(defaults, raw) };
 }

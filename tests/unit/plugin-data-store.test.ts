@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import type { RhizomeSettings } from '../../src/settings';
-import { isValidVaultInstanceId } from '../../src/adapters/database-identity';
 import { PluginDataStore, type PluginData } from '../../src/adapters/plugin-data-store';
 import { createInMemoryPluginData } from '../support/plugin-data-fake';
 
@@ -21,11 +20,8 @@ describe('PluginDataStore.loadSettings', () => {
 		expect(await store.loadSettings()).toEqual(DEFAULTS);
 	});
 
-	it('reads the structured { settings, vaultInstanceId } shape', async () => {
-		const { store } = createStore({
-			settings: { loggingEnabled: true },
-			vaultInstanceId: 'stored-id',
-		});
+	it('reads the structured { settings } shape', async () => {
+		const { store } = createStore({ settings: { loggingEnabled: true } });
 		expect(await store.loadSettings()).toEqual({ ...DEFAULTS, loggingEnabled: true });
 	});
 
@@ -38,77 +34,17 @@ describe('PluginDataStore.loadSettings', () => {
 		});
 	});
 
+	it('parses a legacy data.json that still carries a vaultInstanceId, ignoring the key', async () => {
+		const { store } = createStore({
+			settings: { loggingEnabled: true },
+			vaultInstanceId: 'retired-instance-id',
+		});
+		expect(await store.loadSettings()).toEqual({ ...DEFAULTS, loggingEnabled: true });
+	});
+
 	it('treats garbage as defaults rather than throwing', async () => {
 		const { store } = createStore('not-an-object');
 		expect(await store.loadSettings()).toEqual(DEFAULTS);
-	});
-});
-
-describe('PluginDataStore.ensureVaultInstanceId', () => {
-	it('returns a valid stored vaultInstanceId without writing', async () => {
-		const { data, store } = createStore({ settings: DEFAULTS, vaultInstanceId: 'stored-id' });
-		expect(await store.ensureVaultInstanceId()).toBe('stored-id');
-		expect(data.writes).toHaveLength(0);
-	});
-
-	it.each([
-		['missing', { settings: DEFAULTS }],
-		['empty string', { settings: DEFAULTS, vaultInstanceId: '' }],
-		['non-string', { settings: DEFAULTS, vaultInstanceId: 42 }],
-	])('mints and persists when the stored id is %s', async (_label, initial) => {
-		const { data, store } = createStore(initial);
-		const id = await store.ensureVaultInstanceId();
-		expect(isValidVaultInstanceId(id)).toBe(true);
-		expect(data.writes).toHaveLength(1);
-		const written = data.writes[0] as PluginData;
-		expect(written.vaultInstanceId).toBe(id);
-		expect(written.settings).toEqual(DEFAULTS);
-	});
-
-	it('persists the minted id before resolving (authoritative before any database work)', async () => {
-		const { data, store } = createStore();
-		const id = await store.ensureVaultInstanceId();
-		// The write is durable by the time the promise resolves.
-		expect((data.writes[0] as PluginData).vaultInstanceId).toBe(id);
-	});
-
-	it('is idempotent: sequential calls return the same id with one write', async () => {
-		const { data, store } = createStore();
-		const first = await store.ensureVaultInstanceId();
-		const second = await store.ensureVaultInstanceId();
-		expect(second).toBe(first);
-		expect(data.writes).toHaveLength(1);
-	});
-
-	it('concurrent calls yield one id and one write', async () => {
-		const { data, store } = createStore();
-		const results = await Promise.all([
-			store.ensureVaultInstanceId(),
-			store.ensureVaultInstanceId(),
-			store.ensureVaultInstanceId(),
-		]);
-		expect(new Set(results).size).toBe(1);
-		expect(data.writes).toHaveLength(1);
-	});
-
-	it('a failed mint can be retried', async () => {
-		let failNext = true;
-		const data = createInMemoryPluginData();
-		const store = new PluginDataStore(
-			data.loadData,
-			async (value) => {
-				if (failNext) {
-					failNext = false;
-					throw new Error('saveData failed');
-				}
-				await data.saveData(value);
-			},
-			DEFAULTS,
-		);
-		await expect(store.ensureVaultInstanceId()).rejects.toThrow('saveData failed');
-		const id = await store.ensureVaultInstanceId();
-		expect(isValidVaultInstanceId(id)).toBe(true);
-		expect(data.writes).toHaveLength(1);
 	});
 });
 
@@ -116,23 +52,32 @@ describe('PluginDataStore.saveSettings', () => {
 	it('persists the full settings object under the settings key', async () => {
 		const { data, store } = createStore();
 		await store.saveSettings({ ...DEFAULTS, loggingEnabled: true });
-		const written = data.writes[0] as PluginData;
-		expect(written.settings.loggingEnabled).toBe(true);
-		expect(written.vaultInstanceId).toBeUndefined();
+		expect(data.writes).toHaveLength(1);
+		expect(data.writes[0]).toEqual({ settings: { ...DEFAULTS, loggingEnabled: true } });
 	});
 
-	it('interleaved settings save and identity mint do not clobber each other', async () => {
+	it('sheds a legacy vaultInstanceId key on the next write', async () => {
+		const { data, store } = createStore({
+			settings: DEFAULTS,
+			vaultInstanceId: 'retired-instance-id',
+		});
+		await store.saveSettings({ ...DEFAULTS, loggingEnabled: true });
+		expect(data.writes).toHaveLength(1);
+		// Read forgivingly, write critically: the retired key is gone from
+		// the persisted shape (design principle 6).
+		expect(data.writes[0]).toEqual({ settings: { ...DEFAULTS, loggingEnabled: true } });
+		expect(data.writes[0] as Record<string, unknown>).not.toHaveProperty('vaultInstanceId');
+	});
+
+	it('serialized writes observe each other: the last save wins with earlier state kept', async () => {
 		const { data, store } = createStore();
 		await Promise.all([
 			store.saveSettings({ ...DEFAULTS, loggingEnabled: true }),
-			store.ensureVaultInstanceId(),
 			store.saveSettings({ ...DEFAULTS, loggingEnabled: true, logLevel: 'info' }),
 		]);
 		const last = data.writes[data.writes.length - 1] as PluginData;
-		expect(last.settings.logLevel).toBe('info');
-		expect(isValidVaultInstanceId(last.vaultInstanceId)).toBe(true);
-		// No write lost either intermediate state permanently.
-		expect(data.writes.length).toBeGreaterThanOrEqual(3);
+		expect(last.settings).toEqual({ ...DEFAULTS, loggingEnabled: true, logLevel: 'info' });
+		expect(data.writes).toHaveLength(2);
 	});
 
 	it('a failed write rejects the caller but does not poison the queue', async () => {

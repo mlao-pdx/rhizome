@@ -5,6 +5,31 @@ import prettier from 'eslint-config-prettier';
 import { globalIgnores, defineConfig } from 'eslint/config';
 import tsdocSingleRemarks from './eslint-rules/tsdoc-single-remarks.ts';
 
+/**
+ * Import bans that apply to every file under `src/` (test shim + Node
+ * builtins). Restated in each `no-restricted-imports` block below because
+ * flat config replaces a rule's settings wholesale per matching file —
+ * there is no per-pattern merge across blocks.
+ */
+const srcWideBannedImports = [
+	{
+		// `fake-indexeddb` is a test-only shim. It must never reach a
+		// production path: the adapter gets IndexedDB from the ambient
+		// globals (or an injected `IDBFactory` via `DexieOptions`), and the
+		// shim is wired in only from `tests/`.
+		group: ['fake-indexeddb', 'fake-indexeddb/*'],
+		message:
+			'fake-indexeddb is a test-only shim — production code must use the ambient IndexedDB (injected via DexieOptions), never the fake.',
+	},
+	{
+		// The platform decision (docs/spec/decisions.md, Rev 0.1): src runs
+		// in desktop and mobile webviews.
+		group: ['node:*', 'node:*/*'],
+		message:
+			'src/ runs in desktop and mobile webviews — Node/Electron builtins are unavailable on mobile; use Web APIs (e.g. crypto.subtle).',
+	},
+];
+
 export default defineConfig(
 	globalIgnores([
 		'node_modules',
@@ -60,6 +85,21 @@ export default defineConfig(
 		},
 	},
 	{
+		// Everything under src/ except core and ports: no test shim, no
+		// Node builtins. `obsidian`/`dexie` runtime imports are allowed
+		// here — this is the adapter layer.
+		files: ['src/**/*.ts'],
+		ignores: ['src/core/**', 'src/ports/**'],
+		rules: {
+			'no-restricted-imports': ['error', { patterns: srcWideBannedImports }],
+		},
+	},
+	{
+		// The hexagon boundary, plus the same src-wide bans. In flat config
+		// the last matching config replaces a rule's settings wholesale —
+		// overlapping blocks cannot each contribute patterns — so this
+		// block must restate the src-wide bans or core/ports files would
+		// silently lose them.
 		files: ['src/core/**/*.ts', 'src/ports/**/*.ts'],
 		rules: {
 			'no-restricted-imports': [
@@ -76,29 +116,7 @@ export default defineConfig(
 							message:
 								'src/core and src/ports must not import dexie at runtime — depend on a @ports/* interface instead.',
 						},
-					],
-				},
-			],
-		},
-	},
-	{
-		// `fake-indexeddb` is a test-only shim. It must never reach a
-		// production path: the adapter gets IndexedDB from the ambient
-		// globals (or an injected `IDBFactory` via `DexieOptions`), and the
-		// shim is wired in only from `tests/`. Separate block from the
-		// hexagon rule above because its scope is all of `src/**`, not just
-		// core/ports.
-		files: ['src/**/*.ts'],
-		rules: {
-			'no-restricted-imports': [
-				'error',
-				{
-					patterns: [
-						{
-							group: ['fake-indexeddb', 'fake-indexeddb/*'],
-							message:
-								'fake-indexeddb is a test-only shim — production code must use the ambient IndexedDB (injected via DexieOptions), never the fake.',
-						},
+						...srcWideBannedImports,
 					],
 				},
 			],

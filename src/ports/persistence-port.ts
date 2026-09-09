@@ -58,14 +58,18 @@ export interface PersistencePort {
 	putMany(records: readonly ExampleRecord[]): Promise<void>;
 
 	/**
-	 * Removes every application record.
+	 * Removes every persisted record.
 	 *
 	 * @remarks
-	 * (design, 2026-09-01) Empties application rows only: any bookkeeping
-	 * the implementation needs to verify and reuse its backing store (the
-	 * database identity record, see
-	 * `docs/dev/indexeddb-database-identity.md`) must survive `clear()`,
-	 * or the store would invalidate itself on the next bootstrap.
+	 * (design, 2026-09-09) Empties everything the implementation persists:
+	 * the store keeps no bookkeeping record of its own anymore (the
+	 * database identity record is retired — see
+	 * `docs/dev/indexeddb-database-identity.md` and
+	 * `docs/spec/decisions.md`, Rev 0.1), so nothing survives `clear()`
+	 * and the store cannot invalidate itself by being emptied.
+	 *
+	 * SUPERSEDED (design, 2026-09-01): `clear()` used to preserve a
+	 * singleton identity record the next bootstrap verified against.
 	 */
 	clear(): Promise<void>;
 }

@@ -1,8 +1,20 @@
-import { FileSystemAdapter, Plugin } from 'obsidian';
+import { CapacitorAdapter, FileSystemAdapter, Plugin, type App } from 'obsidian';
 import { DexiePersistenceAdapter } from './adapters/dexie-persistence-adapter';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
+import { deriveVaultScope } from './adapters/persistence-db-name';
 import { PluginDataStore } from './adapters/plugin-data-store';
 import { DEFAULT_SETTINGS, type RhizomeSettings, RhizomeSettingTab } from './settings';
+
+/**
+ * `app.appId` is Obsidian's per-vault instance id (the vault-registry key),
+ * absent from the public typings. Typed optional — honest about the
+ * fallback: when it is missing, `deriveVaultScope` hashes the vault root.
+ *
+ * @see docs/dev/indexeddb-database-identity.md
+ */
+interface ExtendedApp extends App {
+	readonly appId?: string;
+}
 
 export default class RhizomePlugin extends Plugin {
 	settings!: RhizomeSettings;
@@ -33,18 +45,24 @@ export default class RhizomePlugin extends Plugin {
 		// 'cache' is this plugin's databaseId — part of the IndexedDB
 		// address and stable like manifest.id: renaming it orphans every
 		// user's existing database (docs/dev/indexeddb-database-identity.md).
-		// No I/O happens here: bootstrap is deferred until first use.
-		const vaultAdapter = this.app.vault.adapter;
-		if (!(vaultAdapter instanceof FileSystemAdapter)) {
-			// Cannot happen: this plugin is desktop-only
-			// (`manifest.json` sets `isDesktopOnly: true`).
-			throw new Error('Expected a FileSystemAdapter vault adapter');
-		}
+		// Startup stays light: the scope is the appId, or — only when that
+		// is unusable — one small hash of the vault root; the database
+		// itself is opened lazily on first use. An adapter that is neither
+		// FileSystemAdapter nor CapacitorAdapter yields no vault root, and
+		// without an appId `deriveVaultScope` throws rather than ever
+		// opening an unscoped database.
+		const adapter = this.app.vault.adapter;
+		const vaultRootPath =
+			adapter instanceof FileSystemAdapter
+				? adapter.getBasePath()
+				: adapter instanceof CapacitorAdapter
+					? adapter.getFullPath('')
+					: undefined;
+		const vaultScope = await deriveVaultScope((this.app as ExtendedApp).appId, vaultRootPath);
 		this.persistence = new DexiePersistenceAdapter(
 			this.manifest.id,
 			'cache',
-			vaultAdapter.getBasePath(),
-			() => this.dataStore.ensureVaultInstanceId(),
+			vaultScope,
 			this.loggerAdapter,
 		);
 		this.register(() => this.persistence.close());

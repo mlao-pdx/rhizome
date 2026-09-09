@@ -23,14 +23,9 @@ the supported API over IndexedDB, never raw IndexedDB used directly.
 implements it (see the `dexie-persistence-adapter` skill for schema and
 transaction patterns). Everything persisted is a rebuildable derived
 cache — never a source of truth — in a database addressed to this plugin
-and this vault location and verified against a per-vault identity; see
-`docs/dev/indexeddb-database-identity.md` for the naming/identity scheme.
+and this vault instance.
 Everything Rhizome persists goes through this port and adapter — nothing
 touches raw IndexedDB.
-
-## Support policy
-
-- A desktop-only plugin. No mobile support, on any OS.
 
 ## Testing
 
