@@ -218,8 +218,9 @@ export default class MyPlugin extends Plugin {
 
 Source: `https://docs.obsidian.md/Plugins/User+interface/Settings`,
 `https://docs.obsidian.md/plugins/guides/migrate-declarative-settings`.
-`minAppVersion` is already `1.13.0` (`manifest.json`) — always use this API,
-never the legacy imperative `display()` override.
+`minAppVersion` is `1.14.0` (`manifest.json`; declarative settings were
+introduced in `1.13.0`) — always use this API, never the legacy imperative
+`display()` override.
 
 ```ts
 import { App, PluginSettingTab } from 'obsidian';

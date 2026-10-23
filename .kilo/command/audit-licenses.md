@@ -1,8 +1,8 @@
 ---
-description: Run after adding or upgrading a dependency, before committing — audits production dependency licenses and drafts any missing THIRD-PARTY-NOTICES.md entries. The check is CI-enforced.
+description: Run after adding or upgrading a dependency, before committing — verifies exact version pinning, audits production dependency licenses, and drafts any missing THIRD-PARTY-NOTICES.md entries. The check is CI-enforced.
 ---
 
-Run `npm run check:licenses` and report the result.
+Run `npm run check:licenses` and verify dependency hygiene before committing.
 
 This runs `scripts/check-licenses.mjs`, which shells out to
 `license-checker-rseidelsohn` scoped to production dependencies only
@@ -15,13 +15,22 @@ allowed.
 
 Steps:
 
-1. Run `npm run check:licenses`.
-2. If it exits non-zero because of a disallowed/missing license: report
+1. **Verify exact version pinning and lockfile sync:**
+   - Every entry in `dependencies` and `devDependencies` in `package.json`
+     must be pinned to an exact `x.y.z` version (no `^`, `~`, or range
+     prefixes, per `AGENTS.md` and `.npmrc` `save-exact=true`).
+   - Confirm the root `packages[""]` block in `package-lock.json` and the
+     resolved `node_modules/*` entries match `package.json` (`npm ls`).
+   - For any added or upgraded dependency, confirm that the changelog and
+     sub-dependency diff were reviewed rather than blindly upgraded or
+     modified via `npm audit fix --force`.
+2. Run `npm run check:licenses`.
+3. If it exits non-zero because of a disallowed/missing license: report
    the offending package and license to the user, and stop — do not
    attempt to work around the allowlist or silently continue. The
    allowlist itself lives in `scripts/check-licenses.mjs` and should only
    be changed with explicit user sign-off.
-3. If it exits non-zero because a production dependency isn't yet listed
+4. If it exits non-zero because a production dependency isn't yet listed
    in `THIRD-PARTY-NOTICES.md`, the script prints a draft notice (package
    name, version, license, repository, and local license file path) for
    each missing entry. Use that draft to add a full entry to
@@ -36,9 +45,9 @@ Steps:
      `THIRD-PARTY-NOTICES.md` for you — it is a hand-maintained file, same
      convention as `docs/dev/fast-check-log.md` being append-only by a
      script but never silently rewritten wholesale.
-4. Re-run `npm run check:licenses` after updating the notices file to
+5. Re-run `npm run check:licenses` after updating the notices file to
    confirm it now passes.
-5. This check also runs in CI via `.github/workflows/lint.yml` on every
+6. This check also runs in CI via `.github/workflows/lint.yml` on every
    push and pull request, so a failing audit blocks CI as well. The local
    run exists for drafting `THIRD-PARTY-NOTICES.md` entries: run it after
    adding or upgrading a dependency so any missing notices are drafted and

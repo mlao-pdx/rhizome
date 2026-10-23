@@ -41,28 +41,28 @@
     "*.{ts,tsx,js,mjs,mts,cts,json,md,yml,yaml,css}": "prettier --write"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.4",
-    "@types/node": "^22.15.17",
-    "@vitest/coverage-v8": "^4.1.10",
+    "@eslint/js": "9.39.4",
+    "@types/node": "22.19.17",
+    "@vitest/coverage-v8": "4.1.10",
     "esbuild": "0.25.5",
-    "eslint": "^9.39.4",
-    "eslint-config-prettier": "^10.1.8",
-    "eslint-plugin-obsidianmd": "^0.1.8",
-    "eslint-plugin-tsdoc": "^0.5.2",
-    "fake-indexeddb": "^6.2.5",
-    "fast-check": "^4.9.0",
-    "globals": "^17.6.0",
-    "husky": "^9.1.7",
-    "jiti": "^2.6.1",
-    "license-checker-rseidelsohn": "^5.0.1",
-    "lint-staged": "^17.3.0",
-    "obsidian": "^1.12.3",
-    "prettier": "^3.9.6",
-    "typescript": "^5.8.3",
-    "typescript-eslint": "^8.59.1",
-    "vitest": "^4.1.10"
+    "eslint": "9.39.4",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-obsidianmd": "0.1.8",
+    "eslint-plugin-tsdoc": "0.5.2",
+    "fake-indexeddb": "6.2.5",
+    "fast-check": "4.9.0",
+    "globals": "17.6.0",
+    "husky": "9.1.7",
+    "jiti": "2.7.0",
+    "license-checker-rseidelsohn": "5.0.1",
+    "lint-staged": "17.3.0",
+    "obsidian": "1.14.4",
+    "prettier": "3.9.6",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.59.2",
+    "vitest": "4.1.10"
   },
   "dependencies": {
-    "dexie": "^4.4.4"
+    "dexie": "4.4.4"
   }
 }

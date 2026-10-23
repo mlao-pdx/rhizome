@@ -22,10 +22,11 @@ the vault worse than a manual edit would. Deviations must be well-reasoned.
 - Split large files: if a file exceeds ~200-300 lines, break it into
   smaller, focused modules with a single, well-defined responsibility.
 - Bundle everything into `main.js` (no unbundled runtime deps).
-- Desktop-only plugin (`manifest.json` sets `isDesktopOnly: true`). Node/
-  Electron APIs are fine to use. Mobile is explicitly out of scope: not
-  tested, not designed for, and not a goal for the foreseeable future. A
-  Git-backed feature set is likewise explicitly out of scope.
+- Desktop and mobile plugin (`manifest.json` sets `isDesktopOnly: false`,
+  `minAppVersion: "1.14.0"`). Runtime code bundled into `main.js` must not
+  depend on Node.js (`node:*`), Electron, or desktop-only Obsidian APIs
+  (`FileSystemAdapter`) without a cross-platform path. A Git-backed feature
+  set is explicitly out of scope.
 - Prefer `async/await` over promise chains; handle errors gracefully.
 - Never commit build artifacts: `node_modules/`, `main.js`, and other
   generated output must never be tracked in Git.
@@ -51,6 +52,21 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
 - Avoid deceptive patterns, ads, or spammy notifications.
 - Register and clean up all DOM, app, and interval listeners using the
   provided `register*` helpers so the plugin unloads safely.
+- **Supply-chain security ([_Less is safer_](https://obsidian.md/blog/less-is-safer/)):**
+  - **Minimize dependencies:** Prefer implementing small utilities in-house
+    over adding third-party packages. Keep the dependency graph shallow,
+    especially for runtime `dependencies` bundled into `main.js`.
+  - **Pin exact versions and commit the lockfile:** All `dependencies` and
+    `devDependencies` in `package.json` must be pinned to exact `x.y.z`
+    versions (`save-exact=true` in `.npmrc`; no `^`, `~`, or range
+    specifiers). `package-lock.json` is committed and authoritative
+    (`npm ci`).
+  - **Upgrade slowly and deliberately:** Do not rush to newly published
+    package versions; allow a buffer window for the ecosystem to surface
+    regressions or supply-chain compromises. Treat every upgrade like
+    adding a new dependency: review the changelog and sub-dependency diff,
+    run `npm run check:licenses` and the test suite, and update
+    `THIRD-PARTY-NOTICES.md` if a production dependency changed.
 
 ## Performance
 
@@ -70,6 +86,8 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
 - Use `this.register*` helpers for everything that needs cleanup.
 - Never change `manifest.json`'s `id` after release; treat it as a stable
   API.
+- Pin exact package versions in `package.json` (`save-exact=true`) and run
+  `npm run check:licenses` after adding or upgrading any dependency.
 
 **Don't**
 
@@ -81,6 +99,10 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
 - Assign a default hotkey to any command (`Command.hotkeys`). This project
   never ships default hotkeys — binding any key is entirely the user's
   prerogative, configured by them in Obsidian's Hotkeys settings.
+- Add third-party packages for trivial utilities that can be written
+  in-house, use semver range prefixes (`^`, `~`) in `package.json`, or
+  upgrade/downgrade dependencies opportunistically (including via
+  `npm audit fix --force`) without explicit user request and review.
 
 ## Git workflow
 

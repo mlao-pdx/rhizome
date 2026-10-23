@@ -30,7 +30,7 @@ touches raw IndexedDB.
 
 ## Support policy
 
-- A desktop-only plugin. No mobile support, on any OS.
+- Supports both desktop and mobile (`isDesktopOnly: false`, Obsidian `1.14.0+`).
 
 ## Testing
 
