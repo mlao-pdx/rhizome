@@ -2,8 +2,8 @@
   "id": "rhizome",
   "name": "Rhizome",
   "version": "0.1.0",
-  "minAppVersion": "1.13.0",
+  "minAppVersion": "1.14.0",
   "description": "An index and template engine for Obsidian.",
   "author": "B.P. \"Beppie\" Shortway",
-  "isDesktopOnly": true
+  "isDesktopOnly": false
 }
