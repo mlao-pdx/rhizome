@@ -5,10 +5,17 @@ import {
 	FORBIDDEN_KEYS,
 	initEngineConfig,
 	isCleanSanitizedScalar,
+	isVirtualFileKey,
 	normalizeObsidianMetadata,
+	resolveQueryPropertyType,
+	resolveUserPropertyType,
 	VALID_PROPERTY_TYPES_LIST,
+	VIRTUAL_FILE_KEYS_LIST,
+	type DocumentDiagnostic,
 	type InlinePropertyInput,
+	type NormalizedDocument,
 	type ObsidianPropertyType,
+	type PropertyTypeRegistry,
 } from '../../src/core/search';
 import { assertProperty } from '../support/assertProperty';
 
@@ -319,6 +326,378 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					}
 				},
 			),
+		);
+	});
+
+	it('Diagnostics Bijection Invariant: doc.diagnostics is in 1-to-1 correspondence with invalid TypedPropertyValue entries', async () => {
+		const configRes = initEngineConfig({
+			timeZone: 'Pacific/Apia',
+			propertyTypes: {
+				score: 'number',
+				due: 'date',
+				meeting: 'datetime',
+				done: 'checkbox',
+				status: 'text',
+				tags: 'tags',
+				aliases: 'multitext',
+			},
+		});
+		if (!configRes.ok) throw new Error('Expected valid config');
+		const resolvedConfig = configRes.config;
+
+		const frontmatterEntriesArb = fc.array(fc.tuple(propertyKeyArb, propertyValueArb), {
+			maxLength: 8,
+		});
+		const inlineEntriesArb = fc.array(inlinePropArb, { maxLength: 8 });
+
+		await assertProperty(
+			'search/normalizer__diagnostics-bijection-and-value-index-alignment',
+			fc.property(frontmatterEntriesArb, inlineEntriesArb, (fmEntries, inlineProps) => {
+				const frontmatter: Record<string, unknown> = {};
+				for (const [k, v] of fmEntries) {
+					Object.defineProperty(frontmatter, k, {
+						value: v,
+						writable: true,
+						enumerable: true,
+						configurable: true,
+					});
+				}
+
+				const doc = normalizeObsidianMetadata(
+					{
+						path: 'Projects/Sprint.md',
+						name: 'Sprint.md',
+						basename: 'Sprint',
+						extension: 'md',
+						parent: { path: 'Projects' },
+						stat: { ctime: 1000, mtime: 2000, size: 128 },
+					},
+					{ frontmatter },
+					resolvedConfig,
+					inlineProps,
+				);
+
+				const expectedDiagnostics: Array<{
+					occurrenceIndex: number;
+					valueIndex: number;
+					propertyKey: string;
+					rawKey: string;
+					rawValue: string;
+					expectedType: ObsidianPropertyType;
+					source: 'frontmatter' | 'inline';
+					line: number | null;
+					code: DocumentDiagnostic['code'];
+					hint: string | null;
+				}> = [];
+
+				doc.propertyOccurrences.forEach((occ, occIdx) => {
+					if (Array.isArray(occ.rawValue)) {
+						expect(occ.typedValues.length).toBe(occ.rawValue.length);
+					} else {
+						expect(occ.typedValues.length).toBe(1);
+					}
+
+					occ.typedValues.forEach((tv, valIdx) => {
+						if (tv.kind === 'invalid') {
+							expectedDiagnostics.push({
+								occurrenceIndex: occIdx,
+								valueIndex: valIdx,
+								propertyKey: occ.key,
+								rawKey: occ.rawKey,
+								rawValue: tv.raw,
+								expectedType: tv.expectedType,
+								source: occ.source,
+								line: occ.line,
+								code:
+									tv.reason === 'REVERSED_DATE_RANGE'
+										? 'DOC_REVERSED_DATE_RANGE'
+										: tv.reason === 'SKIPPED_DATE'
+											? 'DOC_SKIPPED_DATE'
+											: 'DOC_INVALID_PROPERTY_VALUE',
+								hint: tv.hint,
+							});
+						}
+					});
+				});
+
+				expect(doc.diagnostics.length).toBe(expectedDiagnostics.length);
+				doc.diagnostics.forEach((diag, idx) => {
+					expect(diag).toMatchObject(expectedDiagnostics[idx]!);
+				});
+			}),
+		);
+	});
+
+	it('Lazy Getter Access-Order Independence & Memoization Invariant: all read orders produce identical documents and memoize references', async () => {
+		const configRes = initEngineConfig({
+			timeZone: 'UTC',
+			propertyTypes: { score: 'number', due: 'date' },
+		});
+		if (!configRes.ok) throw new Error('Expected valid config');
+		const resolvedConfig = configRes.config;
+
+		const lazyKeys = [
+			'aliases',
+			'tags',
+			'headings',
+			'links',
+			'embeds',
+			'referencedLinks',
+			'blocks',
+			'propertyKeys',
+			'properties',
+		] as const satisfies ReadonlyArray<keyof NormalizedDocument>;
+
+		const frontmatterEntriesArb = fc.array(
+			fc.tuple(fc.constantFrom('tags', 'aliases', 'score', 'due', 'foo'), propertyValueArb),
+			{ maxLength: 5 },
+		);
+		const inlineEntriesArb = fc.array(inlinePropArb, { maxLength: 5 });
+		const permArb = fc.shuffledSubarray([...lazyKeys], {
+			minLength: lazyKeys.length,
+			maxLength: lazyKeys.length,
+		});
+
+		await assertProperty(
+			'search/normalizer__lazy-getter-access-order-independence-and-memoization',
+			fc.property(
+				frontmatterEntriesArb,
+				inlineEntriesArb,
+				permArb,
+				(fmEntries, inlineProps, order) => {
+					const makeDoc = (): NormalizedDocument => {
+						const frontmatter: Record<string, unknown> = {};
+						for (const [k, v] of fmEntries) {
+							frontmatter[k] = Array.isArray(v) ? (v as unknown[]).slice() : v;
+						}
+						return normalizeObsidianMetadata(
+							{
+								path: 'Notes/Lazy.md',
+								name: 'Lazy.md',
+								basename: 'Lazy',
+								extension: 'md',
+								parent: { path: 'Notes' },
+								stat: { ctime: 1000, mtime: 2000, size: 64 },
+							},
+							{
+								frontmatter,
+								tags: [{ tag: 'TagA' }, { tag: '#TagB' }],
+								headings: [{ heading: 'Intro', level: 2 }],
+								links: [{ link: '#Intro' }, { link: 'Target#Sec' }],
+								embeds: [{ link: 'Img.png' }],
+								blocks: { '^blk-1': { id: 'blk-1' } },
+							},
+							resolvedConfig,
+							inlineProps,
+							{ 'Back.md': { 'Notes/Lazy.md': 1 } },
+							(raw) => `${raw}.md`,
+						);
+					};
+
+					const docPermuted = makeDoc();
+					const firstReads = new Map<keyof NormalizedDocument, unknown>();
+					for (const k of order) {
+						firstReads.set(k, docPermuted[k]);
+					}
+					// Second read of every lazy getter must return the exact same memoized reference
+					for (const k of lazyKeys) {
+						expect(docPermuted[k]).toBe(firstReads.get(k));
+					}
+
+					// Compare against a fresh doc materialized via JSON.stringify first (and properties-before-propertyKeys)
+					const docJsonFirst = makeDoc();
+					const jsonSnapshot = JSON.parse(JSON.stringify(docJsonFirst)) as unknown;
+					expect(docPermuted).toEqual(jsonSnapshot);
+					expect(Object.keys(docPermuted)).toEqual(Object.keys(docJsonFirst));
+				},
+			),
+		);
+	});
+
+	it('Normalized Collection & Link Split Invariant: tags, headings, blocks, referencedLinks, links, and embeds satisfy structural bounds', async () => {
+		const configRes = initEngineConfig({ timeZone: 'UTC', propertyTypes: {} });
+		if (!configRes.ok) throw new Error('Expected valid config');
+		const resolvedConfig = configRes.config;
+
+		const tagsArb = fc.array(fc.record({ tag: fc.string({ maxLength: 16 }) }), {
+			maxLength: 6,
+		});
+		const fmTagsArb = fc.array(fc.string({ maxLength: 16 }), { maxLength: 6 });
+		const headingsArb = fc.array(
+			fc.record({
+				heading: fc.string({ maxLength: 16 }),
+				level: fc.double({ noDefaultInfinity: false, noNaN: false }),
+			}),
+			{ maxLength: 6 },
+		);
+		const linksArb = fc.array(
+			fc.record({
+				link: fc.oneof(
+					fc.constantFrom(
+						'#Head',
+						'^blk',
+						'Note#Head',
+						'Note^blk',
+						'PlainNote',
+						'A#B^C',
+						'A^B#C',
+					),
+					fc.string({ maxLength: 20 }),
+				),
+				displayText: fc.option(fc.string({ maxLength: 12 }), { nil: undefined }),
+			}),
+			{ maxLength: 6 },
+		);
+		const blocksArb = fc.dictionary(
+			fc.string({ minLength: 1, maxLength: 12 }),
+			fc.constant({ id: 'x' }),
+			{ maxKeys: 6 },
+		);
+		const backlinksArb = fc.dictionary(
+			fc.string({ minLength: 1, maxLength: 12 }),
+			fc.record({ 'Notes/Doc.md': fc.integer({ min: -2, max: 5 }) }),
+			{ maxKeys: 6 },
+		);
+
+		await assertProperty(
+			'search/normalizer__collection-and-link-split-invariants',
+			fc.property(
+				tagsArb,
+				fmTagsArb,
+				headingsArb,
+				linksArb,
+				blocksArb,
+				backlinksArb,
+				(tags, fmTags, headings, links, blocks, resolvedLinks) => {
+					const doc = normalizeObsidianMetadata(
+						{
+							path: 'Notes/Doc.md',
+							name: 'Doc.md',
+							basename: 'Doc',
+							extension: 'md',
+							parent: { path: 'Notes' },
+							stat: { ctime: 100, mtime: 200, size: 10 },
+						},
+						{
+							frontmatter: { tags: fmTags },
+							tags,
+							headings,
+							links,
+							embeds: links,
+							blocks,
+						},
+						resolvedConfig,
+						[],
+						resolvedLinks,
+						(target) => `Resolved/${target}.md`,
+					);
+
+					// 1. tags: non-empty, lowercase, starts with '#', strictly sorted & deduplicated
+					for (let i = 0; i < doc.tags.length; i++) {
+						const t = doc.tags[i]!;
+						expect(t.startsWith('#')).toBe(true);
+						expect(t.length).toBeGreaterThan(1);
+						expect(t).toBe(t.toLowerCase());
+						if (i > 0) {
+							expect(doc.tags[i - 1]! < t).toBe(true);
+						}
+					}
+
+					// 2. headings: level is always an integer in 1..6
+					for (const h of doc.headings) {
+						expect(Number.isInteger(h.level)).toBe(true);
+						expect(h.level).toBeGreaterThanOrEqual(1);
+						expect(h.level).toBeLessThanOrEqual(6);
+					}
+
+					// 3. blocks: always lowercase
+					for (const b of doc.blocks) {
+						expect(b).toBe(b.toLowerCase());
+					}
+
+					// 4. referencedLinks: strictly sorted & deduplicated, and only includes positive counts
+					for (let i = 0; i < doc.referencedLinks.length; i++) {
+						const src = doc.referencedLinks[i]!;
+						expect(resolvedLinks[src]?.['Notes/Doc.md']).toBeGreaterThan(0);
+						if (i > 0) {
+							expect(doc.referencedLinks[i - 1]! < src).toBe(true);
+						}
+					}
+
+					// 5. links & embeds: self-link vs target+subpath decomposition
+					for (const l of [...doc.links, ...doc.embeds]) {
+						if (l.link.startsWith('#') || l.link.startsWith('^')) {
+							expect(l.rawTarget).toBe('Notes/Doc.md');
+							expect(l.resolvedPath).toBe('Notes/Doc.md');
+							expect(l.subpath).toBe(l.link);
+						} else {
+							expect(l.rawTarget + l.subpath).toBe(l.link);
+							expect(l.rawTarget.includes('#')).toBe(false);
+							expect(l.rawTarget.includes('^')).toBe(false);
+							if (l.subpath !== '') {
+								expect(l.subpath.startsWith('#') || l.subpath.startsWith('^')).toBe(
+									true,
+								);
+							}
+						}
+					}
+				},
+			),
+		);
+	});
+
+	it('Virtual vs User Property Type Resolution Invariant: query virtual keys override registry while user properties ignore virtual keys', async () => {
+		const registryArb: fc.Arbitrary<PropertyTypeRegistry> = fc.dictionary(
+			fc.oneof(
+				fc.constantFrom(
+					...VIRTUAL_FILE_KEYS_LIST,
+					'tags',
+					'tag',
+					'aliases',
+					'alias',
+					'score',
+				),
+				fc.string({ minLength: 1, maxLength: 12 }),
+			),
+			propTypeArb,
+			{ maxKeys: 8 },
+		);
+
+		const keyArb = fc.oneof(
+			fc.constantFrom(...VIRTUAL_FILE_KEYS_LIST, 'tags', 'tag', 'aliases', 'alias', 'score'),
+			fc.string({ minLength: 1, maxLength: 12 }),
+		);
+
+		await assertProperty(
+			'search/property-coercion__virtual-vs-user-property-type-precedence',
+			fc.property(registryArb, keyArb, (reg, key) => {
+				const lowerKey = key.trim().toLowerCase();
+				const userType = resolveUserPropertyType(lowerKey, reg);
+				const queryType = resolveQueryPropertyType(lowerKey, reg);
+
+				if (isVirtualFileKey(lowerKey)) {
+					if (lowerKey === 'file.mtime' || lowerKey === 'file.ctime') {
+						expect(queryType).toBe('datetime');
+					} else if (lowerKey === 'file.size') {
+						expect(queryType).toBe('number');
+					} else {
+						expect(queryType).toBe('text');
+					}
+
+					// User property resolution ignores virtual file.* status unless explicitly in reg
+					const expectedUserType = Object.prototype.hasOwnProperty.call(reg, lowerKey)
+						? reg[lowerKey]!
+						: 'text';
+					expect(userType).toBe(expectedUserType);
+				} else {
+					expect(queryType).toBe(userType);
+					if (lowerKey === 'tags' || lowerKey === 'tag') {
+						expect(userType).toBe('tags');
+					} else if (lowerKey === 'aliases' || lowerKey === 'alias') {
+						expect(userType).toBe('multitext');
+					}
+				}
+			}),
 		);
 	});
 });

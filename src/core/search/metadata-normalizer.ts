@@ -311,15 +311,15 @@ export function normalizeObsidianMetadata(
 	defineLazyProperty(doc, 'tags', () => {
 		const tagSet = new Set<string>();
 		for (const t of cache?.tags ?? []) {
-			const clean = t.tag.trim().toLowerCase();
-			if (clean) tagSet.add(clean.startsWith('#') ? clean : `#${clean}`);
+			const body = t.tag.trim().replace(/^#+/, '').toLowerCase();
+			if (body) tagSet.add(`#${body}`);
 		}
 		for (const occ of propertyOccurrences) {
 			if (occ.key === 'tags' || occ.key === 'tag') {
 				for (const tv of occ.typedValues) {
 					if (tv.kind === 'text') {
-						const clean = tv.value.trim().toLowerCase();
-						if (clean) tagSet.add(clean.startsWith('#') ? clean : `#${clean}`);
+						const body = tv.value.trim().replace(/^#+/, '').toLowerCase();
+						if (body) tagSet.add(`#${body}`);
 					}
 				}
 			}

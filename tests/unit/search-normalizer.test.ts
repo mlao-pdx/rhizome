@@ -399,10 +399,10 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			{
 				frontmatter: {
 					position: { start: { line: 0 }, end: { line: 4 } },
-					tags: ['Project', '#work/urgent'],
+					tags: ['Project', '#work/urgent', '#', '###', '##work/urgent'],
 					aliases: ['First Alias', 42],
 				},
-				tags: [{ tag: '#work/urgent' }, { tag: 'inline-tag' }],
+				tags: [{ tag: '#work/urgent' }, { tag: 'inline-tag' }, { tag: ' # ' }],
 				headings: [
 					{ heading: 'H1', level: 0 },
 					{ heading: 'H6', level: 9 },
