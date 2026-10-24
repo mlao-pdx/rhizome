@@ -425,7 +425,7 @@ export interface VaultEvaluationReport {
    - `YYYY` (authored 4-digit year `1000..9999`)
    - `YYYY-MM` (`MM` in `01..12`)
    - `YYYY-MM-DD` (`DD` strictly validated against `daysInMonth(YYYY, MM)`)
-   - `YYYY-MM-DD[+-]\d+d` (ISO day with explicit signed day offset `[+-]N` where $|N| \le 36500$; the offset result may cross into adjacent years outside `1000..9999` provided it remains a valid `Temporal.PlainDate`)
+   - `YYYY-MM-DD[+-]\d+d` (ISO day with explicit signed day offset `[+-]N` where $|N| \le 36525$; the offset result may cross into adjacent years outside `1000..9999` provided it remains a valid `Temporal.PlainDate`)
    - `YYYY-MM-DDTHH:mm` or `"YYYY-MM-DD HH:mm"` (with optional `:ss`, optional `.sss...` fractional seconds accepted only after `:ss` and truncated to 3 digits, and optional `Z` or `[+-]HH:?mm` offset where `HH` in `00..23` and `mm` in `00..59`)
 2. **Timezone Disambiguation & Interval Duration Rules**:
    - If an explicit offset (`Z` or `[+-]HH:?mm`) is present, `start` is computed using that fixed offset, and `end` adds a fixed elapsed duration: `60_000` ms (`minute`), `1_000` ms (`second`), or `1` ms (`ms`).
@@ -435,7 +435,7 @@ export interface VaultEvaluationReport {
 3. **Relative `@` Anchors (Allowed in Query Literals Only; Rejected in Stored Properties)**:
    Evaluated against the pinned `referenceTimeMs` in `resolvedConfig.timeZone` (case-insensitive):
    - **`@now`**: Millisecond scalar interval $[t, t + 1)$ where $t = \text{referenceTimeMs}$.
-   - **Day-Level Relative Anchors (Accept Optional Explicit Day Offset `[+-]\d+d?` with $|N| \le 36500$ applied on top of the anchor’s base day)**:
+   - **Day-Level Relative Anchors (Accept Optional Explicit Day Offset `[+-]\d+d?` with $|N| \le 36525$ applied on top of the anchor’s base day)**:
      - `@today` / `@thisday` (base delta `0`), `@yesterday` / `@lastday` (base delta `-1`), `@tomorrow` / `@nextday` (base delta `+1`).
      - E.g., `@today-6d..@today` spans 7 calendar days (from 6 days ago at local `00:00` through the end of today at tomorrow’s local `00:00`); `@today-7d..@today` spans 8 calendar days (seven days ago through today, inclusive).
    - **Coarse Relative Anchors (Do NOT Accept Day Offsets)**:
@@ -1099,7 +1099,7 @@ const RELATIVE_DAY_RE = /^@(today|yesterday|tomorrow|(?:last|this|next)day)(?:([
 const RELATIVE_COARSE_RE = /^@(last|this|next)(week|month|quarter|year)$/i;
 
 export const MAX_SAFE_EPOCH_MS = 8_640_000_000_000_000;
-const MAX_DAY_OFFSET = 36_500;
+const MAX_DAY_OFFSET = 36_525;
 
 export function isValidReferenceTimeMs(val: unknown): val is number {
   return typeof val === 'number' && Number.isSafeInteger(val) && Math.abs(val) <= MAX_SAFE_EPOCH_MS;
@@ -2307,7 +2307,7 @@ export function normalizeAST(ast: SearchAST): SearchAST {
 6. **Temporal Range, Relative Anchor & Point-Timestamp Partitioning Invariants**:
    - **Successful-Result Validity**: Every `parseTemporalExpr` call returning `ok: true` produces a `DateInterval` with safe integer bounds satisfying `start < end`.
    - **Alias Equivalence (Excluding `raw`)**: For any `timeZone` and `referenceTimeMs`, `@yesterday`, `@lastday`, and `@today-1d` produce identical `{ start, end, grain }` on success or identical `{ ok: false, reason }` on failure (and similarly for `@today` / `@thisday` / `@today+0d` and `@tomorrow` / `@nextday` / `@today+1d`).
-   - **Ordinary-Case Coverage**: For representable reference times in non-skipped calendar periods (e.g., years `1970..2100` in `UTC` and `America/New_York`), all relative anchor families (`@now`, `@today`, `@yesterday`, `@tomorrow`, `@(last|this|next)(day|week|month|quarter|year)`) resolve with `ok: true`.
+   - **Ordinary-Case Coverage & Triplet Contiguity**: For representable reference times in non-skipped calendar periods (e.g., years `1970..2100` in `UTC` and `America/New_York`), all relative anchor families (`@now`, `@today`, `@yesterday`, `@tomorrow`, `@(last|this|next)(day|week|month|quarter|year)`) resolve with `ok: true`, and for each unit `u ∈ {'day', 'week', 'month', 'quarter', 'year'}`, `@last<u>`, `@this<u>`, and `@next<u>` form a contiguous partition (`last.end === this.start`, `this.end === next.start`, `this.start <= referenceTimeMs < this.end`, and `@last<u>..@next<u>` spans `[last.start, next.end)`).
    - **Point Timestamp Partitioning**: For any valid `NormalizedDocument` and any valid `DateInterval` query $Q$, `doc` satisfies **exactly one** of `[file.mtime < Q]`, `[file.mtime = Q]`, or `[file.mtime > Q]`, and `[file.mtime = Q]` is equivalent to `[file.mtime >= Q] AND [file.mtime <= Q]`.
 7. **Boolean Algebra & Per-Item Scope Distribution**:
    De Morgan’s Laws, Complementarity (`A OR NOT A = U`, `A AND NOT A = ∅`), Scope OR Distribution (`s:(a OR b) === s:a OR s:b`), and Scope AND Containment (`s:(a AND b) ⊆ s:a AND s:b`) hold across all generated executable `PreparedQuery` objects and compatible documents.

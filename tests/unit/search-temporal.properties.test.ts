@@ -133,7 +133,7 @@ describe('search temporal property invariants', () => {
 		);
 	});
 
-	it('Invariant 6a: every ok parseTemporalExpr result is a frozen DateInterval with safe integer start < end', async () => {
+	it('Invariant 6a: every ok parseTemporalExpr result is a frozen DateInterval with safe integer start < end, and every REVERSED_RANGE has a valid swappable hint', async () => {
 		const ordinaryRefArb = fc.integer({
 			min: Date.parse('1970-01-01T00:00:00.000Z'),
 			max: Date.parse('2100-12-31T23:59:59.999Z'),
@@ -148,17 +148,24 @@ describe('search temporal property invariants', () => {
 				fc.boolean(),
 				ordinaryRefArb,
 				(expr, timeZone, allowYearOnly, allowRelative, referenceTimeMs) => {
-					const res = parseTemporalExpr(expr, {
+					const opts = {
 						allowYearOnly,
 						allowRelative,
 						timeZone,
 						referenceTimeMs,
-					});
+					};
+					const res = parseTemporalExpr(expr, opts);
 					if (res.ok) {
 						expect(Object.isFrozen(res.interval)).toBe(true);
 						expect(Number.isSafeInteger(res.interval.start)).toBe(true);
 						expect(Number.isSafeInteger(res.interval.end)).toBe(true);
 						expect(res.interval.start).toBeLessThan(res.interval.end);
+					} else if (res.reason === 'REVERSED_RANGE') {
+						// Because s1 >= e2 on two valid atoms (s1 < e1 and s2 < e2) implies s2 < e2 <= s1 < e1,
+						// s2 < e1 always holds and swapping endpoints always produces a valid range.
+						expect(res.hint).toBe(`Use ${res.rightRaw}..${res.leftRaw}`);
+						const swapped = parseTemporalExpr(`${res.rightRaw}..${res.leftRaw}`, opts);
+						expect(swapped.ok).toBe(true);
 					}
 				},
 			),
@@ -207,16 +214,18 @@ describe('search temporal property invariants', () => {
 		);
 	});
 
-	it('Invariant 6c: ordinary reference times (1970..2100) in UTC and America/New_York resolve all 19 relative anchor keywords with ok: true', async () => {
+	it('Invariant 6c: ordinary reference times (1970..2100) resolve all 19 relative anchors and form contiguous [@last*, @this*, @next*] partitions containing referenceTimeMs', async () => {
 		const ordinaryRefArb = fc.integer({
 			min: Date.parse('1970-01-01T00:00:00.000Z'),
 			max: Date.parse('2100-12-31T23:59:59.999Z'),
 		});
 
+		const tripletUnits = ['day', 'week', 'month', 'quarter', 'year'] as const;
+
 		await assertProperty(
 			'search/temporal__ordinary-reference-times-resolve-all-anchors',
 			fc.property(
-				fc.constantFrom('UTC', 'America/New_York'),
+				fc.constantFrom('UTC', 'America/New_York', 'Europe/London', 'Asia/Tokyo'),
 				ordinaryRefArb,
 				(timeZone, referenceTimeMs) => {
 					const opts = {
@@ -230,6 +239,34 @@ describe('search temporal property invariants', () => {
 						expect(res.ok).toBe(true);
 						if (res.ok) {
 							expect(res.interval.start).toBeLessThan(res.interval.end);
+						}
+					}
+
+					for (const unit of tripletUnits) {
+						const lastRes = parseTemporalExpr(`@last${unit}`, opts);
+						const thisRes = parseTemporalExpr(`@this${unit}`, opts);
+						const nextRes = parseTemporalExpr(`@next${unit}`, opts);
+						const spanRes = parseTemporalExpr(`@last${unit}..@next${unit}`, opts);
+
+						expect(lastRes.ok && thisRes.ok && nextRes.ok && spanRes.ok).toBe(true);
+						if (lastRes.ok && thisRes.ok && nextRes.ok && spanRes.ok) {
+							// Contiguous abutting boundaries: [s1, e1) + [s2, e2) + [s3, e3) where e1 === s2 and e2 === s3
+							expect(lastRes.interval.end).toBe(thisRes.interval.start);
+							expect(thisRes.interval.end).toBe(nextRes.interval.start);
+
+							// Reference instant falls inside @this<unit>
+							expect(thisRes.interval.start).toBeLessThanOrEqual(referenceTimeMs);
+							expect(referenceTimeMs).toBeLessThan(thisRes.interval.end);
+
+							// Full @last<unit>..@next<unit> range equals the union of the three contiguous periods
+							expect(spanRes.interval.start).toBe(lastRes.interval.start);
+							expect(spanRes.interval.end).toBe(nextRes.interval.end);
+							expect(spanRes.interval.end - spanRes.interval.start).toBe(
+								lastRes.interval.end -
+									lastRes.interval.start +
+									(thisRes.interval.end - thisRes.interval.start) +
+									(nextRes.interval.end - nextRes.interval.start),
+							);
 						}
 					}
 				},

@@ -8,7 +8,7 @@ const RELATIVE_DAY_RE = /^@(today|yesterday|tomorrow|(?:last|this|next)day)(?:([
 const RELATIVE_COARSE_RE = /^@(last|this|next)(week|month|quarter|year)$/i;
 
 export const MAX_SAFE_EPOCH_MS = 8_640_000_000_000_000;
-const MAX_DAY_OFFSET = 36_500;
+const MAX_DAY_OFFSET = 36_525;
 
 export interface TemporalParseOptions {
 	readonly allowYearOnly: boolean;

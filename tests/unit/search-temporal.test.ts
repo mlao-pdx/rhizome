@@ -395,6 +395,18 @@ describe('Conformance Tests 5, 6, 7 & 14: Temporal Engine', () => {
 			rightRaw: '2026-10-01',
 			hint: 'Use 2026-10-01..2026-10-15',
 		});
+
+		// Touching/abutting reversed range (s1 === e2, e.g., 2026-10-02..2026-10-01):
+		// s1 >= e2 triggers REVERSED_RANGE, and because s2 < e2 <= s1 < e1 holds for all valid atoms,
+		// the swapped range 2026-10-01..2026-10-02 is guaranteed valid and hinted.
+		const touchingRev = parseTemporalExpr('2026-10-02..2026-10-01', NY_QUERY_OPTS);
+		expect(touchingRev).toEqual({
+			ok: false,
+			reason: 'REVERSED_RANGE',
+			leftRaw: '2026-10-02',
+			rightRaw: '2026-10-01',
+			hint: 'Use 2026-10-01..2026-10-02',
+		});
 	});
 });
 
@@ -454,6 +466,19 @@ describe('ISO grains, options gating & boundary cases', () => {
 				raw: '2026-10-22+10d',
 			},
 		});
+
+		// Full Julian century (36,525 days, including leap days) is accepted at the boundary
+		expect(parseTemporalExpr('2000-01-01+36525d', UTC_QUERY_OPTS)).toEqual({
+			ok: true,
+			interval: {
+				start: Date.parse('2100-01-01T00:00:00.000Z'),
+				end: Date.parse('2100-01-02T00:00:00.000Z'),
+				grain: 'day',
+				raw: '2000-01-01+36525d',
+			},
+		});
+		expect(parseTemporalExpr('@today+36525d', UTC_QUERY_OPTS).ok).toBe(true);
+		expect(parseTemporalExpr('@today-36525d', UTC_QUERY_OPTS).ok).toBe(true);
 
 		expect(parseTemporalExpr('2026-10-22 14:05', UTC_QUERY_OPTS)).toEqual({
 			ok: true,
@@ -519,10 +544,10 @@ describe('ISO grains, options gating & boundary cases', () => {
 			'2026-10-22T12:00:60',
 			'2026-10-22T12:00:00+24:00',
 			'2026-10-22T12:00:00+02:60',
-			'2026-10-22+36501d',
-			'2026-10-22-36501d',
-			'@today+36501d',
-			'@today-36501d',
+			'2026-10-22+36526d',
+			'2026-10-22-36526d',
+			'@today+36526d',
+			'@today-36526d',
 			'@unknown',
 			'2026-01-01..',
 			'..2026-01-01',
