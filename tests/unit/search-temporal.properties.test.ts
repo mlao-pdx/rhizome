@@ -214,7 +214,7 @@ describe('search temporal property invariants', () => {
 		);
 	});
 
-	it('Invariant 6c: ordinary reference times (1970..2100) resolve all 19 relative anchors and form contiguous [@last*, @this*, @next*] partitions containing referenceTimeMs', async () => {
+	it('Invariant 6c: ordinary reference times (1970..2100) resolve all 19 relative anchors, form contiguous [@last*, @this*, @next*] partitions, and satisfy cross-grain @today containment/ordering', async () => {
 		const ordinaryRefArb = fc.integer({
 			min: Date.parse('1970-01-01T00:00:00.000Z'),
 			max: Date.parse('2100-12-31T23:59:59.999Z'),
@@ -242,6 +242,16 @@ describe('search temporal property invariants', () => {
 						}
 					}
 
+					const nowRes = parseTemporalExpr('@now', opts);
+					const todayRes = parseTemporalExpr('@today', opts);
+					expect(nowRes.ok && todayRes.ok).toBe(true);
+					if (!nowRes.ok || !todayRes.ok) return;
+
+					// @now is contained in @today
+					expect(compareDateIntervals(nowRes.interval, '=', todayRes.interval)).toBe(
+						true,
+					);
+
 					for (const unit of tripletUnits) {
 						const lastRes = parseTemporalExpr(`@last${unit}`, opts);
 						const thisRes = parseTemporalExpr(`@this${unit}`, opts);
@@ -258,6 +268,20 @@ describe('search temporal property invariants', () => {
 							expect(thisRes.interval.start).toBeLessThanOrEqual(referenceTimeMs);
 							expect(referenceTimeMs).toBeLessThan(thisRes.interval.end);
 
+							// Cross-grain containment & ordering for @today against @this<unit>, @next<unit>, and @last<unit>:
+							// - @today = @this(day|week|month|quarter|year)
+							// - @today < @next(day|week|month|quarter|year)
+							// - @today > @last(day|week|month|quarter|year)
+							expect(
+								compareDateIntervals(todayRes.interval, '=', thisRes.interval),
+							).toBe(true);
+							expect(
+								compareDateIntervals(todayRes.interval, '<', nextRes.interval),
+							).toBe(true);
+							expect(
+								compareDateIntervals(todayRes.interval, '>', lastRes.interval),
+							).toBe(true);
+
 							// Full @last<unit>..@next<unit> range equals the union of the three contiguous periods
 							expect(spanRes.interval.start).toBe(lastRes.interval.start);
 							expect(spanRes.interval.end).toBe(nextRes.interval.end);
@@ -268,6 +292,19 @@ describe('search temporal property invariants', () => {
 									(nextRes.interval.end - nextRes.interval.start),
 							);
 						}
+					}
+
+					// Calendar hierarchy chain: @thisday ⊆ @thismonth ⊆ @thisquarter ⊆ @thisyear
+					const thisMonth = parseTemporalExpr('@thismonth', opts);
+					const thisQuarter = parseTemporalExpr('@thisquarter', opts);
+					const thisYear = parseTemporalExpr('@thisyear', opts);
+					if (thisMonth.ok && thisQuarter.ok && thisYear.ok) {
+						expect(
+							compareDateIntervals(thisMonth.interval, '=', thisQuarter.interval),
+						).toBe(true);
+						expect(
+							compareDateIntervals(thisQuarter.interval, '=', thisYear.interval),
+						).toBe(true);
 					}
 				},
 			),
