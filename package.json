@@ -63,6 +63,8 @@
     "vitest": "4.1.10"
   },
   "dependencies": {
+    "@js-temporal/polyfill": "0.5.1",
+    "chevrotain": "13.2.0",
     "dexie": "4.4.4"
   }
 }

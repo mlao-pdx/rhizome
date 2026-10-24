@@ -5,7 +5,7 @@ import { PluginDataStore } from './adapters/plugin-data-store';
 import { DEFAULT_SETTINGS, type RhizomeSettings, RhizomeSettingTab } from './settings';
 
 export default class RhizomePlugin extends Plugin {
-	settings!: RhizomeSettings;
+	declare settings: RhizomeSettings;
 	loggerAdapter!: ObsidianLoggerAdapter;
 	dataStore!: PluginDataStore;
 	persistence!: DexiePersistenceAdapter;

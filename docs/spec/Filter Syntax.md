@@ -387,9 +387,9 @@ export interface VaultEvaluationReport {
    - Rejects case collisions in `types.json` that map to **different** types (e.g., `{ Status: 'text', status: 'number' }` $\to$ `ERROR_INVALID_CONFIG`; identical types `{ Status: 'date', status: 'date' }` are deduplicated cleanly).
    - Freezes `normalizedTypes` with `Object.freeze()`.
 3. **Normalization Fingerprint (`normalizationFingerprint`)**:
-   - Computed deterministically as `JSON.stringify({ v: 1, tz: trimmedTz, types: Object.keys(normalizedTypes).sort().map(k => [k, normalizedTypes[k]]) })`.
+   - Computed deterministically as `JSON.stringify({ tz: trimmedTz, types: Object.keys(normalizedTypes).sort().map(k => [k, normalizedTypes[k]]) })`.
    - Stored on `ResolvedEngineConfig.normalizationFingerprint` and stamped onto every `NormalizedDocument.normalizationFingerprint`.
-   - **Compatibility Precondition**: Every document passed to `evaluateVault(docs, prepared)` or `oracleEvaluateVault(docs, prepared)` **must** have `doc.normalizationFingerprint === prepared.resolvedConfig.normalizationFingerprint`; mismatches throw an error. (If an integration persists normalized documents across plugin or runtime upgrades, it must bump the schema version `v` or rebuild the persisted index on startup).
+   - **Compatibility Precondition**: Every document passed to `evaluateVault(docs, prepared)` or `oracleEvaluateVault(docs, prepared)` **must** have `doc.normalizationFingerprint === prepared.resolvedConfig.normalizationFingerprint`; mismatches throw an error. (If an integration persists normalized documents across plugin or runtime upgrades, it must rebuild the persisted index on startup when the engine schema changes).
 4. **Custom Scope Normalization, Cloning & Deduplication**:
    - Deduplicates exact source `ScopeDefinition` object references in `rawConfig.customScopes`.
    - Trims `canonicalName`, deduplicates lowercase aliases, validates against `/^[a-zA-Z][a-zA-Z0-9_-]*$/` (excluding `and`, `or`, `not`), rejects cross-definition collisions (`ERROR_INVALID_CONFIG`), and stores a deeply frozen defensive copy in the private `Map`.
