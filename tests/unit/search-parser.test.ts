@@ -368,6 +368,25 @@ describe('Resource Limits & Syntax Error Boundaries', () => {
 		}
 	});
 
+	// Promoted from fast-check finding: search/parser__fuzz-totality-error-gating-and-span-integrity
+	// seed=65383671 path="33:10"
+	it('regression: search/parser__fuzz-totality-error-gating-and-span-integrity counterexample', () => {
+		const args = ['['] as const;
+		const res = parseQuery(args[0]);
+		expect(res.ast).toBeNull();
+		expect(res.diagnostics).toHaveLength(1);
+		const span = res.diagnostics[0]!.span!;
+		expect(span.startOffset).toBeGreaterThanOrEqual(0);
+		expect(span.endOffset).toBeGreaterThanOrEqual(span.startOffset);
+		expect(span.endOffset).toBeLessThanOrEqual(args[0].length);
+		expect(span).toEqual({
+			startOffset: 0,
+			endOffset: 1,
+			startLine: 1,
+			startColumn: 1,
+		});
+	});
+
 	it('rejects empty WikiLinkValue targets and empty PropertyKeys with SYNTAX_ERROR and discards non-error hints', () => {
 		for (const badWiki of [
 			'links:[[]]',

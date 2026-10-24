@@ -66,25 +66,30 @@ export function tokenToSpan(
 	fallbackToken?: IToken,
 	input = '',
 ): SourceSpan {
-	const tok =
-		token && Number.isFinite(token.startOffset)
-			? token
-			: fallbackToken && Number.isFinite(fallbackToken.startOffset)
-				? fallbackToken
-				: undefined;
+	const isValidTokenOffset = (t: IToken | undefined): t is IToken =>
+		Boolean(t && Number.isSafeInteger(t.startOffset) && t.startOffset >= 0);
+
+	const tok = isValidTokenOffset(token)
+		? token
+		: isValidTokenOffset(fallbackToken)
+			? fallbackToken
+			: undefined;
 	if (!tok) return endOfInputSpan(input);
 
 	const startOffset = tok.startOffset;
-	const endOffset =
-		tok.endOffset !== undefined && Number.isFinite(tok.endOffset)
+	const rawEnd =
+		tok.endOffset !== undefined && Number.isSafeInteger(tok.endOffset) && tok.endOffset >= 0
 			? tok.endOffset + 1
 			: startOffset + tok.image.length;
+	const endOffset = Math.max(startOffset, rawEnd);
 	const startLine =
-		tok.startLine !== undefined && Number.isFinite(tok.startLine) && tok.startLine >= 1
+		tok.startLine !== undefined && Number.isSafeInteger(tok.startLine) && tok.startLine >= 1
 			? tok.startLine
 			: 1;
 	const startColumn =
-		tok.startColumn !== undefined && Number.isFinite(tok.startColumn) && tok.startColumn >= 1
+		tok.startColumn !== undefined &&
+		Number.isSafeInteger(tok.startColumn) &&
+		tok.startColumn >= 1
 			? tok.startColumn
 			: 1;
 	return { startOffset, endOffset, startLine, startColumn };
