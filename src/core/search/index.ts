@@ -4,3 +4,8 @@ export * from './config';
 export * from './temporal';
 export * from './property-coercion';
 export * from './metadata-normalizer';
+export * from './tokens';
+export * from './literals';
+export * from './ast-utils';
+export * from './ast-lowering';
+export * from './parser';
