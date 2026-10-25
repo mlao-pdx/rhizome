@@ -137,29 +137,38 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		assertEval(docs, '[num]', config, ['valid.md']);
 	});
 
-	it('evaluates property colon on raw representations for number, date, and checkbox with per-entry logical grouping', () => {
+	it('evaluates property colon as typed equality on number, date, and checkbox, hierarchical tag matching on tags, regex on raw/normalized representations, and per-entry logical grouping', () => {
 		const config = makeConfig();
 		const fm1 = {
 			num: ' 1.5e2 ',
 			day: '2026-10-22',
 			flag: ' TRUE ',
 			multi: ['alpha one', 'beta two'],
+			tags: ['#work/urgent', 'project'],
 		};
 		const fm2 = {
 			num: 150,
 			day: '2025-01-01',
 			flag: false,
 			multi: ['alpha two', 'gamma three'],
+			tags: ['work', '#archive'],
 		};
 		const docs = [
 			makeDoc(config, 'raw1.md', { frontmatter: fm1 }),
 			makeDoc(config, 'raw2.md', { frontmatter: fm2 }),
 		];
-		for (const q of '[num: "1.5e2"];[day: 2026-10];[flag: true];[multi: (alpha AND -two)];[multi: (/^alpha/ AND -/two$/)]'.split(
+		for (const q of '[num: /1\\.5e2/];[day: 2026-10];[day: @today];[day: (@today OR @yesterday)];[day: /^2026-10/];[flag: true];[multi: (alpha AND -two)];[multi: (/^alpha/ AND -/two$/)];[tags: #work/urgent];[tags: work/urgent];[tags = #project];[tags = project]'.split(
 			';',
 		)) {
 			assertEval(docs, q, config, ['raw1.md']);
 		}
+		for (const q of '[num: 150];[num: 1.5e2];[num: (150 OR 200)];[tags: #work];[tags: work];[tags: /^work/]'.split(
+			';',
+		)) {
+			assertEval(docs, q, config, ['raw1.md', 'raw2.md']);
+		}
+		assertEval(docs, '[tags = #work]', config, ['raw2.md']);
+		assertEval(docs, '[tags = work]', config, ['raw2.md']);
 		assertEval(docs, '[flag: false]', config, ['raw2.md']);
 		assertEval(docs, '[multi: (alpha AND beta)]', config, []);
 		assertEval(docs, '[multi: (beta OR gamma)]', config, ['raw1.md', 'raw2.md']);
@@ -245,16 +254,29 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 	it('enforces defensive kind guards in production evaluator when typedValues are manually corrupted', () => {
 		const config = makeConfig();
 		const corruptedDoc = makeDoc(config, 'corrupt.md', {
-			frontmatter: { num: 10, flag: true, day: '2026-10-22', label: 'hello' },
+			frontmatter: {
+				num: 10,
+				flag: true,
+				day: '2026-10-22',
+				label: 'hello',
+				tags: ['work'],
+			},
 		});
 		corruptedDoc.propertyOccurrences[0]!.typedValues = [{ kind: 'text', value: '10' }];
 		corruptedDoc.propertyOccurrences[1]!.typedValues = [{ kind: 'number', value: 1, raw: '1' }];
 		corruptedDoc.propertyOccurrences[2]!.typedValues = [{ kind: 'number', value: 0, raw: '0' }];
 		corruptedDoc.propertyOccurrences[3]!.typedValues = [{ kind: 'number', value: 5, raw: '5' }];
+		corruptedDoc.propertyOccurrences[4]!.typedValues = [{ kind: 'number', value: 7, raw: '7' }];
 
 		expect(evaluateDoc(corruptedDoc, prepare('[num = 10]', config))).toBe(false);
+		expect(evaluateDoc(corruptedDoc, prepare('[num: 10]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[flag = true]', config))).toBe(false);
+		expect(evaluateDoc(corruptedDoc, prepare('[flag: true]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[day = 2026-10-22]', config))).toBe(false);
+		expect(evaluateDoc(corruptedDoc, prepare('[day: 2026-10-22]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[label = 5]', config))).toBe(false);
+		expect(evaluateDoc(corruptedDoc, prepare('[label: 5]', config))).toBe(false);
+		expect(evaluateDoc(corruptedDoc, prepare('[tags = work]', config))).toBe(false);
+		expect(evaluateDoc(corruptedDoc, prepare('[tags: work]', config))).toBe(false);
 	});
 });

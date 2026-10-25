@@ -1,9 +1,11 @@
-import { collectReferencedPropertyKeys, containsRegexLeaf } from './ast-utils';
+import { collectReferencedPropertyKeys } from './ast-utils';
 import { validateRegexLiteral } from './literals';
 import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
+import { normalizeTagBody } from './scopes';
 import { parseTemporalExpr } from './temporal';
 import type {
 	DateInterval,
+	ObsidianPropertyType,
 	PreparedQuery,
 	PropertyOperator,
 	ResolvedEngineConfig,
@@ -22,6 +24,24 @@ export type CompiledValueExprNode =
 	| { readonly type: 'VALUE_LEAF_REGEX'; readonly regex: RegExp }
 	| { readonly type: 'VALUE_LEAF_STRING'; readonly value: string; readonly quoted: boolean };
 
+export type CompiledPropertyColonNode =
+	| {
+			readonly type: 'COLON_LOGICAL';
+			readonly operator: 'AND' | 'OR';
+			readonly children: readonly CompiledPropertyColonNode[];
+	  }
+	| { readonly type: 'COLON_NOT'; readonly child: CompiledPropertyColonNode }
+	| {
+			readonly type: 'COLON_REGEX';
+			readonly propType: ObsidianPropertyType;
+			readonly regex: RegExp;
+	  }
+	| { readonly type: 'COLON_NUMBER'; readonly rhsNum: number }
+	| { readonly type: 'COLON_CHECKBOX'; readonly rhsBool: boolean }
+	| { readonly type: 'COLON_TEMPORAL'; readonly rhsInterval: DateInterval }
+	| { readonly type: 'COLON_TAG'; readonly rhsRaw: string }
+	| { readonly type: 'COLON_TEXT'; readonly value: string; readonly quoted: boolean };
+
 export type CompiledPropertyComparison =
 	| { readonly kind: 'number'; readonly operator: PropertyOperator; readonly rhsNum: number }
 	| { readonly kind: 'checkbox'; readonly operator: PropertyOperator; readonly rhsBool: boolean }
@@ -30,6 +50,7 @@ export type CompiledPropertyComparison =
 			readonly operator: PropertyOperator;
 			readonly rhsInterval: DateInterval;
 	  }
+	| { readonly kind: 'tags'; readonly operator: PropertyOperator; readonly rhsTag: string }
 	| { readonly kind: 'text'; readonly operator: PropertyOperator; readonly rhsLower: string };
 
 export type CompiledSearchNode =
@@ -51,8 +72,8 @@ export type CompiledSearchNode =
 	| {
 			readonly type: 'PROPERTY_COLON';
 			readonly lowerKey: string;
-			readonly hasRegex: boolean;
-			readonly expr: CompiledValueExprNode;
+			readonly propType: ObsidianPropertyType;
+			readonly expr: CompiledPropertyColonNode;
 	  }
 	| {
 			readonly type: 'PROPERTY_COMPARE';
@@ -101,8 +122,88 @@ function compileValueExpr(expr: ValueExprAST): CompiledValueExprNode {
 	}
 }
 
+function compilePropertyColonExpr(
+	expr: ValueExprAST,
+	propType: ObsidianPropertyType,
+	resolvedConfig: ResolvedEngineConfig,
+	referenceTimeMs: number,
+): CompiledPropertyColonNode {
+	switch (expr.type) {
+		case 'VALUE_LOGICAL':
+			return {
+				type: 'COLON_LOGICAL',
+				operator: expr.operator,
+				children: expr.children.map((c) =>
+					compilePropertyColonExpr(c, propType, resolvedConfig, referenceTimeMs),
+				),
+			};
+		case 'VALUE_NOT':
+			return {
+				type: 'COLON_NOT',
+				child: compilePropertyColonExpr(
+					expr.child,
+					propType,
+					resolvedConfig,
+					referenceTimeMs,
+				),
+			};
+		case 'VALUE_LEAF': {
+			if (expr.matcher.kind === 'regex') {
+				return {
+					type: 'COLON_REGEX',
+					propType,
+					regex: compileRegexOrThrow(expr.matcher.pattern, expr.matcher.flags),
+				};
+			}
+			const { value: rhsRaw, quoted } = expr.matcher;
+			switch (propType) {
+				case 'number': {
+					const trimmed = rhsRaw.trim();
+					const rhsNum = Number(trimmed);
+					if (quoted || !STRICT_NUMBER_RE.test(trimmed) || !Number.isFinite(rhsNum)) {
+						throw new Error(
+							`Unvalidated number literal reached execution plan: ${rhsRaw}`,
+						);
+					}
+					return { type: 'COLON_NUMBER', rhsNum };
+				}
+				case 'checkbox': {
+					const lower = rhsRaw.trim().toLowerCase();
+					if (quoted || (lower !== 'true' && lower !== 'false')) {
+						throw new Error(
+							`Unvalidated checkbox literal reached execution plan: ${rhsRaw}`,
+						);
+					}
+					return { type: 'COLON_CHECKBOX', rhsBool: lower === 'true' };
+				}
+				case 'date':
+				case 'datetime': {
+					const res = parseTemporalExpr(rhsRaw, {
+						allowYearOnly: true,
+						allowRelative: true,
+						timeZone: resolvedConfig.timeZone,
+						referenceTimeMs,
+					});
+					if (!res.ok) {
+						throw new Error(
+							`Unvalidated temporal literal reached execution plan: ${rhsRaw}`,
+						);
+					}
+					return { type: 'COLON_TEMPORAL', rhsInterval: res.interval };
+				}
+				case 'tags':
+					return { type: 'COLON_TAG', rhsRaw };
+				case 'text':
+				case 'multitext':
+					return { type: 'COLON_TEXT', value: rhsRaw, quoted };
+			}
+		}
+	}
+}
+
 function compilePropertyComparison(
 	lowerKey: string,
+	propType: ObsidianPropertyType,
 	operator: PropertyOperator,
 	valueExpr: ValueExprAST | undefined,
 	resolvedConfig: ResolvedEngineConfig,
@@ -112,7 +213,6 @@ function compilePropertyComparison(
 		throw new Error(`Invalid comparison expression for property "${lowerKey}".`);
 	}
 	const { value: rhsRaw, quoted } = valueExpr.matcher;
-	const propType = resolveQueryPropertyType(lowerKey, resolvedConfig.propertyTypes);
 
 	switch (propType) {
 		case 'number': {
@@ -143,9 +243,10 @@ function compilePropertyComparison(
 			}
 			return { kind: 'temporal', operator, rhsInterval: res.interval };
 		}
+		case 'tags':
+			return { kind: 'tags', operator, rhsTag: normalizeTagBody(rhsRaw) };
 		case 'text':
 		case 'multitext':
-		case 'tags':
 			return { kind: 'text', operator, rhsLower: rhsRaw.toLowerCase() };
 	}
 }
@@ -198,6 +299,7 @@ function compileSearchNode(
 			if (ast.operator === 'EXISTS') {
 				return { type: 'PROPERTY_EXISTS', lowerKey };
 			}
+			const propType = resolveQueryPropertyType(lowerKey, resolvedConfig.propertyTypes);
 			if (ast.operator === ':') {
 				if (!ast.valueExpr) {
 					throw new Error(`Missing valueExpr on PROPERTY_FILTER ":" for "${lowerKey}"`);
@@ -205,8 +307,13 @@ function compileSearchNode(
 				return {
 					type: 'PROPERTY_COLON',
 					lowerKey,
-					hasRegex: containsRegexLeaf(ast.valueExpr),
-					expr: compileValueExpr(ast.valueExpr),
+					propType,
+					expr: compilePropertyColonExpr(
+						ast.valueExpr,
+						propType,
+						resolvedConfig,
+						referenceTimeMs,
+					),
 				};
 			}
 			return {
@@ -214,6 +321,7 @@ function compileSearchNode(
 				lowerKey,
 				comparison: compilePropertyComparison(
 					lowerKey,
+					propType,
 					ast.operator,
 					ast.valueExpr,
 					resolvedConfig,

@@ -75,16 +75,7 @@ export const scopeArb = fc.constantFrom(
 	'block',
 	'task',
 );
-export const colonPropertyArb = fc.constantFrom(
-	'status',
-	'labels',
-	'topics',
-	'tags',
-	'aliases',
-	'score',
-	'due',
-	'meeting',
-);
+export const colonPropertyArb = fc.constantFrom('status', 'labels', 'topics', 'tags', 'aliases');
 export const temporalLiteralArb = fc.constantFrom(
 	'2026',
 	'2026-10',
@@ -111,6 +102,13 @@ export const temporalLiteralArb = fc.constantFrom(
 	'@today-7d..@today',
 	'@thisyear..@today',
 );
+const numberColonLeafArb = fc.oneof(
+	fc.integer({ min: 0, max: 300 }).map((tenths) => String(tenths / 10)),
+	regexArb,
+);
+const numberColonExprArb = nestedQuery(numberColonLeafArb, 1);
+const temporalColonLeafArb = fc.oneof(temporalLiteralArb, regexArb);
+const temporalColonExprArb = nestedQuery(temporalColonLeafArb, 1);
 
 const comparisonOperatorArb = fc.constantFrom('=', '!=', '<', '>', '<=', '>=');
 const numberComparisonArb = fc
@@ -147,9 +145,13 @@ const textComparisonArb = fc
 		textArb,
 	)
 	.map(([key, op, value]) => `[${key} ${op} ${quoteQueryString(value)}]`);
-const propertyColonArb = fc
-	.tuple(colonPropertyArb, valueExprArb)
-	.map(([key, expr]) => `[${key}: (${expr})]`);
+const propertyColonArb = fc.oneof(
+	fc.tuple(colonPropertyArb, valueExprArb).map(([key, expr]) => `[${key}: (${expr})]`),
+	numberColonExprArb.map((expr) => `[score: (${expr})]`),
+	fc
+		.tuple(fc.constantFrom('due', 'meeting'), temporalColonExprArb)
+		.map(([key, expr]) => `[${key}: (${expr})]`),
+);
 const checkboxColonArb = nestedQuery(fc.constantFrom('true', 'false'), 1).map(
 	(expr) => `[done: (${expr})]`,
 );

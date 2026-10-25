@@ -1,11 +1,12 @@
 import {
 	getExecutionPlan,
+	type CompiledPropertyColonNode,
 	type CompiledPropertyComparison,
 	type CompiledSearchNode,
 	type CompiledValueExprNode,
 } from './execution-plan';
 import { getTypedPropertyEntries } from './oracle';
-import { substringStringMatch } from './scopes';
+import { hierarchicalTagMatch, normalizeTagBody, substringStringMatch } from './scopes';
 import { compareDateIntervals } from './temporal';
 import type {
 	DocumentDiagnostic,
@@ -15,10 +16,6 @@ import type {
 	TypedPropertyValue,
 	VaultEvaluationReport,
 } from './types';
-
-const PROPERTY_COLON_MATCHER: Pick<ScopeDefinition, 'matchString'> = {
-	matchString: substringStringMatch,
-};
 
 function evalCompiledValueExpr(
 	target: string,
@@ -36,6 +33,41 @@ function evalCompiledValueExpr(
 			return expr.regex.test(target);
 		case 'VALUE_LEAF_STRING':
 			return scopeDef.matchString(target, expr.value, expr.quoted);
+	}
+}
+
+function evalCompiledColonExpr(
+	entry: Exclude<TypedPropertyValue, { kind: 'null' } | { kind: 'invalid' }>,
+	expr: CompiledPropertyColonNode,
+): boolean {
+	switch (expr.type) {
+		case 'COLON_LOGICAL':
+			return expr.operator === 'AND'
+				? expr.children.every((c) => evalCompiledColonExpr(entry, c))
+				: expr.children.some((c) => evalCompiledColonExpr(entry, c));
+		case 'COLON_NOT':
+			return !evalCompiledColonExpr(entry, expr.child);
+		case 'COLON_REGEX': {
+			if (expr.propType === 'checkbox' || entry.kind === 'checkbox') return false;
+			if (expr.propType === 'tags') {
+				return entry.kind === 'text' && expr.regex.test(normalizeTagBody(entry.value));
+			}
+			const target = entry.kind === 'text' ? entry.value : entry.raw;
+			return expr.regex.test(target);
+		}
+		case 'COLON_NUMBER':
+			return entry.kind === 'number' && entry.value === expr.rhsNum;
+		case 'COLON_CHECKBOX':
+			return entry.kind === 'checkbox' && entry.value === expr.rhsBool;
+		case 'COLON_TEMPORAL':
+			return (
+				(entry.kind === 'date' || entry.kind === 'datetime') &&
+				compareDateIntervals(entry.interval, '=', expr.rhsInterval)
+			);
+		case 'COLON_TAG':
+			return entry.kind === 'text' && hierarchicalTagMatch(entry.value, expr.rhsRaw);
+		case 'COLON_TEXT':
+			return entry.kind === 'text' && substringStringMatch(entry.value, expr.value);
 	}
 }
 
@@ -80,6 +112,27 @@ function evalCompiledComparisonOnEntry(
 				comparison.operator,
 				comparison.rhsInterval,
 			);
+		}
+		case 'tags': {
+			if (entry.kind !== 'text') return false;
+			const a = normalizeTagBody(entry.value);
+			const b = comparison.rhsTag;
+			switch (comparison.operator) {
+				case '=':
+					return a === b;
+				case '!=':
+					return a !== b;
+				case '<':
+					return a < b;
+				case '>':
+					return a > b;
+				case '<=':
+					return a <= b;
+				case '>=':
+					return a >= b;
+				default:
+					return false;
+			}
 		}
 		case 'text': {
 			if (entry.kind !== 'text') return false;
@@ -135,14 +188,7 @@ function evalCompiledSearchNode(doc: NormalizedDocument, node: CompiledSearchNod
 			const entries = getTypedPropertyEntries(doc, node.lowerKey);
 			return entries.some((entry) => {
 				if (entry.kind === 'null' || entry.kind === 'invalid') return false;
-				if (entry.kind === 'checkbox' && node.hasRegex) return false;
-				const rawStr =
-					entry.kind === 'text'
-						? entry.value
-						: entry.kind === 'checkbox'
-							? String(entry.value)
-							: entry.raw;
-				return evalCompiledValueExpr(rawStr, node.expr, PROPERTY_COLON_MATCHER);
+				return evalCompiledColonExpr(entry, node.expr);
 			});
 		}
 		case 'PROPERTY_COMPARE': {

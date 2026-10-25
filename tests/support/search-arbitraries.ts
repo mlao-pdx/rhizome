@@ -6,6 +6,7 @@ import {
 	VIRTUAL_FILE_KEYS_LIST,
 	type LeafMatcher,
 	type NormalizedDocument,
+	type ObsidianPropertyType,
 	type PreparedQuery,
 	type PropertyFilterNode,
 	type PropertyOperator,
@@ -23,10 +24,12 @@ import {
 	evaluatorVault,
 } from './search-evaluator-documents';
 import {
+	buildCustomValueExprArb,
 	buildValueExprArb,
 	printableTemporalLiteralArb,
 	quotedValueArb,
 	rhsLeafMatcherArb,
+	structuralRegexMatcherArb,
 	unquotedIdentifierArb,
 	unsignedLeafMatcherArb,
 } from './search-leaf-arbitraries';
@@ -72,6 +75,75 @@ export function printableScopedFilterArb(
 		});
 }
 
+export const unsignedNumberLiteralArb = fc
+	.tuple(
+		fc.integer({ min: 0, max: 99999 }),
+		fc.option(fc.integer({ min: 0, max: 999 }), { nil: null }),
+	)
+	.map(([integer, fraction]) => `${integer}${fraction !== null ? `.${fraction}` : ''}`);
+
+export const signedNumberLiteralArb = fc
+	.tuple(fc.boolean(), unsignedNumberLiteralArb)
+	.map(([negative, numStr]) => (negative && Number(numStr) > 0 ? `-${numStr}` : numStr));
+
+export function printableColonValueExprArb(
+	propType: ObsidianPropertyType,
+	resolvedConfig: ResolvedEngineConfig,
+	refMs: number,
+): fc.Arbitrary<ValueExprAST> {
+	const temporalLiteralArb = printableTemporalLiteralArb(resolvedConfig, refMs);
+	if (propType === 'checkbox') {
+		const boolLeafArb: fc.Arbitrary<LeafMatcher> = fc
+			.constantFrom('true', 'false')
+			.map((value) => ({
+				kind: 'string' as const,
+				value,
+				quoted: false,
+			}));
+		return buildCustomValueExprArb(boolLeafArb, 1);
+	}
+	if (propType === 'number') {
+		const unsignedNumLeafArb: fc.Arbitrary<LeafMatcher> = fc.oneof(
+			unsignedNumberLiteralArb.map((value) => ({
+				kind: 'string' as const,
+				value,
+				quoted: false,
+			})),
+			structuralRegexMatcherArb,
+		);
+		const topNumLeafArb: fc.Arbitrary<LeafMatcher> = fc.oneof(
+			signedNumberLiteralArb.map((value) => ({
+				kind: 'string' as const,
+				value,
+				quoted: false,
+			})),
+			structuralRegexMatcherArb,
+		);
+		return fc.oneof(
+			topNumLeafArb.map((matcher): ValueExprAST => ({ type: 'VALUE_LEAF', matcher })),
+			buildCustomValueExprArb(unsignedNumLeafArb, 1),
+		);
+	}
+	if (propType === 'date' || propType === 'datetime') {
+		const tempLeafArb: fc.Arbitrary<LeafMatcher> = fc.oneof(
+			temporalLiteralArb.map((value) => ({
+				kind: 'string' as const,
+				value,
+				quoted: false,
+			})),
+			structuralRegexMatcherArb,
+		);
+		return buildCustomValueExprArb(tempLeafArb, 1);
+	}
+	return fc.oneof(
+		rhsLeafMatcherArb.map((matcher): ValueExprAST => ({
+			type: 'VALUE_LEAF',
+			matcher,
+		})),
+		printableValueExprArb,
+	);
+}
+
 function printablePropertyFilterArb(
 	resolvedConfig: ResolvedEngineConfig,
 	refMs: number,
@@ -84,17 +156,6 @@ function printablePropertyFilterArb(
 		'Due Date',
 		...VIRTUAL_FILE_KEYS_LIST,
 	];
-	const numberLiteralArb = fc
-		.tuple(
-			fc.boolean(),
-			fc.integer({ min: 0, max: 99999 }),
-			fc.option(fc.integer({ min: 0, max: 999 }), { nil: null }),
-		)
-		.map(([negative, integer, fraction]) => {
-			const sign =
-				negative && (integer > 0 || (fraction !== null && fraction > 0)) ? '-' : '';
-			return `${sign}${integer}${fraction !== null ? `.${fraction}` : ''}`;
-		});
 	const temporalLiteralArb = printableTemporalLiteralArb(resolvedConfig, refMs);
 	const propOperatorArb: fc.Arbitrary<PropertyOperator> = fc.constantFrom(
 		'EXISTS',
@@ -125,31 +186,20 @@ function printablePropertyFilterArb(
 				});
 			}
 			if (op === ':') {
-				const valueArb =
-					propType === 'checkbox'
-						? fc.constantFrom('true', 'false').map((value): ValueExprAST => ({
-								type: 'VALUE_LEAF',
-								matcher: { kind: 'string', value, quoted: false },
-							}))
-						: fc.oneof(
-								rhsLeafMatcherArb.map((matcher): ValueExprAST => ({
-									type: 'VALUE_LEAF',
-									matcher,
-								})),
-								printableValueExprArb,
-							);
-				return valueArb.map((valueExpr) => ({
-					type: 'PROPERTY_FILTER' as const,
-					key,
-					rawKey,
-					operator: ':' as const,
-					valueExpr,
-				}));
+				return printableColonValueExprArb(propType, resolvedConfig, refMs).map(
+					(valueExpr) => ({
+						type: 'PROPERTY_FILTER' as const,
+						key,
+						rawKey,
+						operator: ':' as const,
+						valueExpr,
+					}),
+				);
 			}
 
 			let matcherArb: fc.Arbitrary<LeafMatcher>;
 			if (propType === 'number') {
-				matcherArb = numberLiteralArb.map((value) => ({
+				matcherArb = signedNumberLiteralArb.map((value) => ({
 					kind: 'string' as const,
 					value,
 					quoted: false,

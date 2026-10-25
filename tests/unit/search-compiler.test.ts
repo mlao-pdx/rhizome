@@ -371,6 +371,47 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 		});
 		expect(revIso.diagnostics[0]?.span).not.toBeNull();
 	});
+
+	it('validates non-regex leaves in property colon (:) identically to (=) while permitting regex leaves on non-checkbox properties', () => {
+		for (const validQ of [
+			'[due: @thisyear]',
+			'[due: (@today OR @yesterday)]',
+			'[due: /^2026/]',
+			'[due: (@thisyear OR /^2025/)]',
+			'[score: 150]',
+			'[score: (10 OR 20)]',
+			'[score: /^1\\.5/]',
+			'[done: (true OR false)]',
+			'[tags: #work]',
+			'[tags: work]',
+		]) {
+			const res = compileQuery(validQ, config, PINNED_REF_MS);
+			expect(res.executable).toBe(true);
+			expect(res.diagnostics).toEqual([]);
+		}
+
+		for (const invalidTypeQ of [
+			'[due: invalid-date]',
+			'[score: high]',
+			'[score: "10"]',
+			'[done: maybe]',
+			'[done: "true"]',
+		]) {
+			const res = compileQuery(invalidTypeQ, config, PINNED_REF_MS);
+			expect(res.executable).toBe(false);
+			expect(res.ast).toBeNull();
+			expect(res.prepared).toBeNull();
+			expect(res.diagnostics).toHaveLength(1);
+			expect(res.diagnostics[0]?.code).toBe('ERROR_TYPE_MISMATCH');
+		}
+
+		const revColon = compileQuery('[due: @today..@today-7d]', config, PINNED_REF_MS);
+		expect(revColon.executable).toBe(false);
+		expect(revColon.ast).toBeNull();
+		expect(revColon.prepared).toBeNull();
+		expect(revColon.diagnostics).toHaveLength(1);
+		expect(revColon.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
+	});
 });
 
 describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {

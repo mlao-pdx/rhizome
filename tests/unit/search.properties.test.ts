@@ -26,13 +26,18 @@ import {
 	printableScopedFilterArb,
 	printableValueExprArb,
 	queryCaseArb,
+	unsignedNumberLiteralArb,
 } from '../support/search-arbitraries';
 import {
 	evaluationCaseArb,
 	evaluatorConfig,
 	evaluatorQuery,
 } from '../support/search-evaluator-documents';
-import { printableTemporalLiteralArb } from '../support/search-leaf-arbitraries';
+import {
+	buildCustomValueExprArb,
+	printableTemporalLiteralArb,
+	structuralRegexMatcherArb,
+} from '../support/search-leaf-arbitraries';
 import { printAST } from '../support/search-printer';
 
 const evaluators = [evaluateVault, oracleEvaluateVault] as const;
@@ -100,14 +105,42 @@ function distributionCaseArb(kind: 'scope' | 'property') {
 							rawKey,
 						}));
 		const astsArb = targetArb.chain((target) => {
-			const valueArb =
-				target.type === 'PROPERTY_FILTER' &&
-				resolveQueryPropertyType(target.key, config.propertyTypes) === 'checkbox'
-					? fc.constantFrom('true', 'false').map((value): ValueExprAST => ({
-							type: 'VALUE_LEAF',
-							matcher: { kind: 'string', value, quoted: false },
-						}))
-					: printableValueExprArb;
+			let valueArb: fc.Arbitrary<ValueExprAST> = printableValueExprArb;
+			if (target.type === 'PROPERTY_FILTER') {
+				const propType = resolveQueryPropertyType(target.key, config.propertyTypes);
+				if (propType === 'checkbox') {
+					valueArb = fc.constantFrom('true', 'false').map((value): ValueExprAST => ({
+						type: 'VALUE_LEAF',
+						matcher: { kind: 'string', value, quoted: false },
+					}));
+				} else if (propType === 'number') {
+					valueArb = buildCustomValueExprArb(
+						fc.oneof(
+							unsignedNumberLiteralArb.map((value) => ({
+								kind: 'string' as const,
+								value,
+								quoted: false,
+							})),
+							structuralRegexMatcherArb,
+						),
+						1,
+					);
+				} else if (propType === 'date' || propType === 'datetime') {
+					valueArb = buildCustomValueExprArb(
+						fc.oneof(
+							printableTemporalLiteralArb(config, sample.referenceTimeMs).map(
+								(value) => ({
+									kind: 'string' as const,
+									value,
+									quoted: false,
+								}),
+							),
+							structuralRegexMatcherArb,
+						),
+						1,
+					);
+				}
+			}
 			return boundedCompositionsArb(
 				fc.tuple(valueArb, valueArb).map(([a, b]) => distributionASTs(target, a, b)),
 			);

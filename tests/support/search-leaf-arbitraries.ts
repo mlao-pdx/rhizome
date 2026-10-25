@@ -27,12 +27,12 @@ export const quotedValueArb: fc.Arbitrary<string> = fc.oneof(
 	),
 );
 
-const regexAtomArb: fc.Arbitrary<string> = fc.oneof(
+export const regexAtomArb: fc.Arbitrary<string> = fc.oneof(
 	fc.constantFrom('note', 'sprint', 'work', '[a-z]', '[0-9]', '\\.', '\\/', '\\-'),
 	fc.stringMatching(/^[a-zA-Z0-9]{1,6}$/),
 );
 
-const structuralRegexMatcherArb: fc.Arbitrary<Extract<LeafMatcher, { kind: 'regex' }>> = fc
+export const structuralRegexMatcherArb: fc.Arbitrary<Extract<LeafMatcher, { kind: 'regex' }>> = fc
 	.tuple(
 		fc.boolean(),
 		fc.array(regexAtomArb, { minLength: 1, maxLength: 3 }),
@@ -61,13 +61,16 @@ export const rhsLeafMatcherArb: fc.Arbitrary<LeafMatcher> = fc.oneof(
 	})),
 );
 
-export function buildValueExprArb(maxDepth: number): fc.Arbitrary<ValueExprAST> {
-	const leafArb: fc.Arbitrary<ValueExprAST> = unsignedLeafMatcherArb.map((matcher) => ({
+export function buildCustomValueExprArb(
+	leafMatcherArb: fc.Arbitrary<LeafMatcher>,
+	maxDepth: number,
+): fc.Arbitrary<ValueExprAST> {
+	const leafArb: fc.Arbitrary<ValueExprAST> = leafMatcherArb.map((matcher) => ({
 		type: 'VALUE_LEAF' as const,
 		matcher,
 	}));
 	if (maxDepth <= 0) return leafArb;
-	const subArb = buildValueExprArb(maxDepth - 1);
+	const subArb = buildCustomValueExprArb(leafMatcherArb, maxDepth - 1);
 	const notArb: fc.Arbitrary<ValueExprAST> = fc
 		.tuple(fc.constantFrom('NOT' as const, '-' as const), subArb)
 		.map(([syntax, child]) => ({ type: 'VALUE_NOT' as const, syntax, child }));
@@ -78,6 +81,10 @@ export function buildValueExprArb(maxDepth: number): fc.Arbitrary<ValueExprAST> 
 		)
 		.map(([operator, children]) => ({ type: 'VALUE_LOGICAL' as const, operator, children }));
 	return fc.oneof({ weight: 3, arbitrary: leafArb }, notArb, logicalArb);
+}
+
+export function buildValueExprArb(maxDepth: number): fc.Arbitrary<ValueExprAST> {
+	return buildCustomValueExprArb(unsignedLeafMatcherArb, maxDepth);
 }
 
 export function printableTemporalLiteralArb(

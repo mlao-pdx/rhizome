@@ -480,7 +480,7 @@ describe('search conformance matrix', () => {
 			const plan = getExecutionPlan(prepared);
 			expect(regex).toHaveBeenCalledTimes(4);
 			expect(date).toHaveBeenCalledTimes(1);
-			expect(type).toHaveBeenCalledTimes(3);
+			expect(type).toHaveBeenCalledTimes(4);
 			expect(keys).toHaveBeenCalledTimes(1);
 			expect(getScope).toHaveBeenCalledTimes(2);
 			expect(evaluateDoc(doc, prepared)).toBe(true);
@@ -488,7 +488,7 @@ describe('search conformance matrix', () => {
 			expect(getExecutionPlan(prepared)).toBe(plan);
 			expect(regex).toHaveBeenCalledTimes(4);
 			expect(date).toHaveBeenCalledTimes(1);
-			expect(type).toHaveBeenCalledTimes(3);
+			expect(type).toHaveBeenCalledTimes(4);
 			expect(keys).toHaveBeenCalledTimes(1);
 			expect(getScope).toHaveBeenCalledTimes(2);
 		} finally {

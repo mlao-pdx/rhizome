@@ -677,13 +677,14 @@ SignedIdentifier  ::= HyphenNot? Identifier
      - **Step 4a (Operator / Matcher Kind Compatibility First)**:
        - If `node.operator` is `=`, `!=`, `<`, `>`, `<=`, or `>=`, and `valueExpr` contains a valid `regex` leaf $\to$ emit `ERROR_INVALID_OPERATOR_FOR_TYPE` and **stop validating this `PropertyFilterNode`**.
        - If `propType === 'checkbox'` and (`node.operator` is `<, >, <=, >=` OR (`node.operator === ':'` and `valueExpr` contains a valid `regex` leaf)) $\to$ emit `ERROR_INVALID_OPERATOR_FOR_TYPE` and **stop validating this `PropertyFilterNode`**.
-     - **Step 4b (Leaf Literal Value Validation for `=`, `!=`, `<`, `>`, `<=`, `>=`)**:
-       - If `propType === 'checkbox'`: leaf must be unquoted `"true"` or `"false"` (case-insensitive), else emit `ERROR_TYPE_MISMATCH`.
-       - If `propType === 'number'`: leaf must be unquoted, match `/^[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/`, and parse to a finite number, else emit `ERROR_TYPE_MISMATCH`.
-       - If `propType === 'date' || propType === 'datetime'`:
-         Call `res = parseTemporalExpr(leaf.value, { allowYearOnly: true, allowRelative: true, timeZone: resolvedConfig.timeZone, referenceTimeMs })`:
-         - If `!res.ok && res.reason === 'REVERSED_RANGE'`, emit **`SYNTAX_ERROR`** with `issue: "The left endpoint '${res.leftRaw}' starts on or after the exclusive end contributed by the right endpoint '${res.rightRaw}'."` and `hint: res.hint`.
-         - If `!res.ok` (any other reason), emit **`ERROR_TYPE_MISMATCH`**.
+     - **Step 4b (Leaf Literal Value Validation for `:`, `=`, `!=`, `<`, `>`, `<=`, `>=`)**:
+       - For every `{ kind: 'string' }` leaf in `node.valueExpr` (regex leaves in `:` are already validated in Step 2 and Step 4a):
+         - If `propType === 'checkbox'`: leaf must be unquoted `"true"` or `"false"` (case-insensitive), else emit `ERROR_TYPE_MISMATCH`.
+         - If `propType === 'number'`: leaf must be unquoted, match `/^[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/`, and parse to a finite number, else emit `ERROR_TYPE_MISMATCH`.
+         - If `propType === 'date' || propType === 'datetime'`:
+           Call `res = parseTemporalExpr(leaf.value, { allowYearOnly: true, allowRelative: true, timeZone: resolvedConfig.timeZone, referenceTimeMs })`:
+           - If `!res.ok && res.reason === 'REVERSED_RANGE'`, emit **`SYNTAX_ERROR`** with `issue: "The left endpoint '${res.leftRaw}' starts on or after the exclusive end contributed by the right endpoint '${res.rightRaw}'."` and `hint: res.hint`.
+           - If `!res.ok` (any other reason), emit **`ERROR_TYPE_MISMATCH`**.
 5. **Run Non-Blocking Linter Pass** (Section 4.3).
 6. **Enforce Global Compile Gate & Deeply Freeze `PreparedQuery`**:
 
@@ -709,10 +710,16 @@ SignedIdentifier  ::= HyphenNot? Identifier
    - The reference oracle (`oracleEvaluateVault` / `oracleEvaluateDoc`) consumes the same `PreparedQuery` (guaranteeing identical `resolvedConfig` and `referenceTimeMs`) and may repeat regex construction and literal parsing per candidate for simplicity.
 2. **Document Normalization Compatibility Check**:
    - Before evaluating any document `doc` in `docs`, both `evaluateVault` and `oracleEvaluateVault` verify `doc.normalizationFingerprint === prepared.resolvedConfig.normalizationFingerprint`. If any document has a mismatched fingerprint, evaluation throws an Error.
-3. **Existential Property Quantifier**: `[key op rhs]` evaluates `doc.propertyOccurrences` (or virtual `file.*` entries) for `key`, discarding `{ kind: 'null' }` and `{ kind: 'invalid' }`. Returns `true` iff **at least one** valid entry satisfies `op` against `rhs`.
+3. **Existential Property Quantifier & Type-Directed `:` / `tags` Semantics**:
+   - `[key op rhs]` evaluates `doc.propertyOccurrences` (or virtual `file.*` entries) for `key`, discarding `{ kind: 'null' }` and `{ kind: 'invalid' }`. Returns `true` iff **at least one** valid entry satisfies `op` against `rhs`.
+   - For `operator === ':'`:
+     - On `date`, `datetime`, `number`, and `checkbox` properties, non-regex leaves act as syntactic sugar for typed `=` equality (`compareDateIntervals(entry.interval, '=', rhsInterval)` for temporal properties, `entry.value === rhsNum` for numbers, `entry.value === rhsBool` for checkboxes), while regex leaves on `date`, `datetime`, and `number` match `entry.raw`.
+     - On `tags` properties (`tags` / `tag` or any user property configured with type `'tags'`), non-regex leaves strip leading `#` (`normalizeTagBody(s) = s.trim().replace(/^#+/, '').toLowerCase()`) and apply hierarchical tag matching (`hierarchicalTagMatch`: `t === q || t.startsWith(q + '/')`, returning `false` when either side normalizes to `""`), while regex leaves test `normalizeTagBody(entry.value)`.
+     - On `text` and `multitext` properties (including `aliases`), non-regex leaves perform case-insensitive substring matching (`substringStringMatch`), and regex leaves test `entry.value`.
+   - For comparison operators (`=`, `!=`, `<`, `>`, `<=`, `>=`) on `tags` properties, both `entry.value` and `rhs` are normalized via `normalizeTagBody` before comparison so leading `#` is optional (`[tags = #work]` and `[tags = work]` are equivalent).
 4. **Per-Entry Property `:` Groups**: `[status: (draft AND active)]` evaluates `draft AND active` against **one single property value** at a time.
 5. **Per-Target Scoped Groups**: `scope:(expr)` extracts `targets = scopeDef.extract(doc)` and returns `true` iff **at least one single string $t \in \text{targets}$** satisfies the entire `expr`. If `targets` is empty, `scope:(expr)` is **always `false`** (even when `expr` contains negation).
-6. **Quoting Policy**: Quoting affects token grouping and escaping (and disallows numeric/boolean coercion on `=`, `!=`, `<`, `>`, `<=`, `>=`), **not** the scope’s matching policy. Each scope retains its registered `matchString` policy.
+6. **Quoting Policy**: Quoting affects token grouping and escaping (and disallows numeric/boolean coercion on `:`, `=`, `!=`, `<`, `>`, `<=`, `>=`), **not** the scope’s matching policy. Each scope retains its registered `matchString` policy.
 7. **Deterministic Input-Order Preservation & Query-Scoped Diagnostic Collection**:
    - `evaluateVault(docs, prepared)` preserves the exact input order of `docs` in `report.matches`.
    - `collectReferencedPropertyKeys(prepared.ast)` traverses the entire `SearchAST` (including `[key]` existence filters, negated branches, and short-circuited branches) and collects all `PropertyFilterNode.key` values where `isVirtualFileKey(key) === false`.
@@ -876,6 +883,16 @@ export function decodeWikiLinkValue(rawTokenText: string): string {
 const substringStringMatch = (target: string, queryValue: string): boolean =>
   target.toLowerCase().includes(queryValue.toLowerCase());
 
+export const normalizeTagBody = (raw: string): string =>
+  raw.trim().replace(/^#+/, '').toLowerCase();
+
+export const hierarchicalTagMatch = (target: string, queryValue: string): boolean => {
+  const t = normalizeTagBody(target);
+  const q = normalizeTagBody(queryValue);
+  if (!t || !q) return false;
+  return t === q || t.startsWith(`${q}/`);
+};
+
 export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
   [
     {
@@ -904,12 +921,7 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
       canonicalName: 'tag',
       aliases: Object.freeze(['tag']),
       extract: (doc: NormalizedDocument) => doc.tags,
-      matchString: (target: string, queryValue: string) => {
-        const q = queryValue.toLowerCase();
-        const normQ = q.startsWith('#') ? q : `#${q}`;
-        const t = target.toLowerCase();
-        return t === normQ || t.startsWith(`${normQ}/`);
-      }
+      matchString: hierarchicalTagMatch
     },
     {
       canonicalName: 'aliases',
@@ -2028,12 +2040,14 @@ function evalAstNode(
       return targets.some((target) => evalValueExprOnTarget(target, ast.expr, def));
     }
     case 'PROPERTY_FILTER': {
-      const entries = getTypedPropertyEntries(doc, ast.key.toLowerCase());
+      const lowerKey = ast.key.trim().toLowerCase();
+      const entries = getTypedPropertyEntries(doc, lowerKey);
       const validEntries = entries.filter((e) => e.kind !== 'null' && e.kind !== 'invalid');
       if (validEntries.length === 0) return false;
       if (ast.operator === 'EXISTS') return true;
+      const propType = resolveQueryPropertyType(lowerKey, resolvedConfig.propertyTypes);
       return validEntries.some((entry) =>
-        evalPropertyEntry(entry, ast.operator, ast.valueExpr!, resolvedConfig.timeZone, referenceTimeMs)
+        evalPropertyEntry(entry, propType, ast.operator, ast.valueExpr!, resolvedConfig.timeZone, referenceTimeMs)
       );
     }
   }
@@ -2081,12 +2095,72 @@ function getTypedPropertyEntries(doc: NormalizedDocument, lowerKey: string): Typ
     .flatMap((occ) => occ.typedValues);
 }
 
-const PROPERTY_COLON_MATCHER: Pick<ScopeDefinition, 'matchString'> = {
-  matchString: substringStringMatch
-};
+function evalColonExprOnEntry(
+  entry: Exclude<TypedPropertyValue, { kind: 'null' } | { kind: 'invalid' }>,
+  propType: ObsidianPropertyType,
+  expr: ValueExprAST,
+  timeZone: string,
+  referenceTimeMs: number
+): boolean {
+  switch (expr.type) {
+    case 'VALUE_LOGICAL':
+      return expr.operator === 'AND'
+        ? expr.children.every((c) => evalColonExprOnEntry(entry, propType, c, timeZone, referenceTimeMs))
+        : expr.children.some((c) => evalColonExprOnEntry(entry, propType, c, timeZone, referenceTimeMs));
+    case 'VALUE_NOT':
+      return !evalColonExprOnEntry(entry, propType, expr.child, timeZone, referenceTimeMs);
+    case 'VALUE_LEAF': {
+      if (expr.matcher.kind === 'regex') {
+        if (propType === 'checkbox' || entry.kind === 'checkbox') return false;
+        if (propType === 'tags') {
+          return entry.kind === 'text' && testRegex(normalizeTagBody(entry.value), expr.matcher);
+        }
+        const target = entry.kind === 'text' ? entry.value : entry.raw;
+        return testRegex(target, expr.matcher);
+      }
+      const { value: rhsRaw, quoted } = expr.matcher;
+      switch (propType) {
+        case 'number': {
+          if (entry.kind !== 'number') return false;
+          const trimmed = rhsRaw.trim();
+          if (quoted || !STRICT_NUMBER_RE.test(trimmed)) return false;
+          const rhsNum = Number(trimmed);
+          if (!Number.isFinite(rhsNum)) return false;
+          return entry.value === rhsNum;
+        }
+        case 'checkbox': {
+          if (entry.kind !== 'checkbox' || quoted) return false;
+          const lower = rhsRaw.trim().toLowerCase();
+          if (lower !== 'true' && lower !== 'false') return false;
+          return entry.value === (lower === 'true');
+        }
+        case 'date':
+        case 'datetime': {
+          if (entry.kind !== 'date' && entry.kind !== 'datetime') return false;
+          const res = parseTemporalExpr(rhsRaw, {
+            allowYearOnly: true,
+            allowRelative: true,
+            timeZone,
+            referenceTimeMs
+          });
+          if (!res.ok) {
+            throw new Error(`Unvalidated temporal literal reached evaluator: ${rhsRaw}`);
+          }
+          return compareDateIntervals(entry.interval, '=', res.interval);
+        }
+        case 'tags':
+          return entry.kind === 'text' && hierarchicalTagMatch(entry.value, rhsRaw);
+        case 'text':
+        case 'multitext':
+          return entry.kind === 'text' && substringStringMatch(entry.value, rhsRaw);
+      }
+    }
+  }
+}
 
 function evalPropertyEntry(
   entry: TypedPropertyValue,
+  propType: ObsidianPropertyType,
   op: PropertyOperator,
   expr: ValueExprAST,
   timeZone: string,
@@ -2094,16 +2168,7 @@ function evalPropertyEntry(
 ): boolean {
   if (entry.kind === 'null' || entry.kind === 'invalid') return false;
   if (op === ':') {
-    if (entry.kind === 'checkbox' && containsRegexLeaf(expr)) return false;
-    const rawStr =
-      entry.kind === 'text'
-        ? entry.value
-        : entry.kind === 'checkbox'
-        ? entry.value
-          ? 'true'
-          : 'false'
-        : entry.raw;
-    return evalValueExprOnTarget(rawStr, expr, PROPERTY_COLON_MATCHER);
+    return evalColonExprOnEntry(entry, propType, expr, timeZone, referenceTimeMs);
   }
   if (expr.type !== 'VALUE_LEAF' || expr.matcher.kind === 'regex') return false;
   const { value: rhsRaw, quoted } = expr.matcher;
@@ -2146,8 +2211,8 @@ function evalPropertyEntry(
       return compareDateIntervals(entry.interval, op, res.interval);
     }
     case 'text': {
-      const a = entry.value.toLowerCase();
-      const b = rhsRaw.toLowerCase();
+      const a = propType === 'tags' ? normalizeTagBody(entry.value) : entry.value.toLowerCase();
+      const b = propType === 'tags' ? normalizeTagBody(rhsRaw) : rhsRaw.toLowerCase();
       switch (op) {
         case '=':  return a === b;
         case '!=': return a !== b;
@@ -2159,12 +2224,6 @@ function evalPropertyEntry(
       }
     }
   }
-}
-
-function containsRegexLeaf(expr: ValueExprAST): boolean {
-  if (expr.type === 'VALUE_LEAF') return expr.matcher.kind === 'regex';
-  if (expr.type === 'VALUE_NOT') return containsRegexLeaf(expr.child);
-  return expr.children.some(containsRegexLeaf);
 }
 
 export function normalizeValueExprAST(expr: ValueExprAST): ValueExprAST {

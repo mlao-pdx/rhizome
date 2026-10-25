@@ -4,6 +4,17 @@ export function substringStringMatch(target: string, queryValue: string): boolea
 	return target.toLowerCase().includes(queryValue.toLowerCase());
 }
 
+export function normalizeTagBody(raw: string): string {
+	return raw.trim().replace(/^#+/, '').toLowerCase();
+}
+
+export function hierarchicalTagMatch(target: string, queryValue: string): boolean {
+	const t = normalizeTagBody(target);
+	const q = normalizeTagBody(queryValue);
+	if (!t || !q) return false;
+	return t === q || t.startsWith(`${q}/`);
+}
+
 /**
  * The 9 built-in per-note metadata scopes (`file`, `path`, `ext`, `tag`, `aliases`,
  * `headings`, `links`, `embeds`, `blocks`). Backlinks and `resolvedLinks` are not supported.
@@ -36,12 +47,7 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
 			canonicalName: 'tag',
 			aliases: Object.freeze(['tag']),
 			extract: (doc: NormalizedDocument) => doc.tags,
-			matchString: (target: string, queryValue: string) => {
-				const q = queryValue.toLowerCase();
-				const normQ = q.startsWith('#') ? q : `#${q}`;
-				const t = target.toLowerCase();
-				return t === normQ || t.startsWith(`${normQ}/`);
-			},
+			matchString: hierarchicalTagMatch,
 		},
 		{
 			canonicalName: 'aliases',

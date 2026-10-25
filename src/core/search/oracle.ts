@@ -1,11 +1,12 @@
-import { collectReferencedPropertyKeys, containsRegexLeaf } from './ast-utils';
+import { collectReferencedPropertyKeys } from './ast-utils';
 import { testRegex } from './literals';
-import { STRICT_NUMBER_RE } from './property-coercion';
-import { substringStringMatch } from './scopes';
+import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
+import { hierarchicalTagMatch, normalizeTagBody, substringStringMatch } from './scopes';
 import { compareDateIntervals, parseTemporalExpr } from './temporal';
 import type {
 	DocumentDiagnostic,
 	NormalizedDocument,
+	ObsidianPropertyType,
 	PreparedQuery,
 	PropertyOperator,
 	ResolvedEngineConfig,
@@ -15,10 +16,6 @@ import type {
 	ValueExprAST,
 	VaultEvaluationReport,
 } from './types';
-
-const PROPERTY_COLON_MATCHER: Pick<ScopeDefinition, 'matchString'> = {
-	matchString: substringStringMatch,
-};
 
 export function getTypedPropertyEntries(
 	doc: NormalizedDocument,
@@ -69,8 +66,82 @@ function evalValueExprOnTarget(
 	}
 }
 
+function evalColonExprOnEntry(
+	entry: Exclude<TypedPropertyValue, { kind: 'null' } | { kind: 'invalid' }>,
+	propType: ObsidianPropertyType,
+	expr: ValueExprAST,
+	timeZone: string,
+	referenceTimeMs: number,
+): boolean {
+	switch (expr.type) {
+		case 'VALUE_LOGICAL':
+			return expr.operator === 'AND'
+				? expr.children.every((c) =>
+						evalColonExprOnEntry(entry, propType, c, timeZone, referenceTimeMs),
+					)
+				: expr.children.some((c) =>
+						evalColonExprOnEntry(entry, propType, c, timeZone, referenceTimeMs),
+					);
+		case 'VALUE_NOT':
+			return !evalColonExprOnEntry(entry, propType, expr.child, timeZone, referenceTimeMs);
+		case 'VALUE_LEAF': {
+			if (expr.matcher.kind === 'regex') {
+				if (propType === 'checkbox' || entry.kind === 'checkbox') return false;
+				if (propType === 'tags') {
+					return (
+						entry.kind === 'text' &&
+						testRegex(normalizeTagBody(entry.value), expr.matcher)
+					);
+				}
+				const target = entry.kind === 'text' ? entry.value : entry.raw;
+				return testRegex(target, expr.matcher);
+			}
+			const { value: rhsRaw, quoted } = expr.matcher;
+			switch (propType) {
+				case 'number': {
+					if (entry.kind !== 'number') return false;
+					const trimmed = rhsRaw.trim();
+					if (quoted || !STRICT_NUMBER_RE.test(trimmed)) return false;
+					const rhsNum = Number(trimmed);
+					if (!Number.isFinite(rhsNum)) return false;
+					return entry.value === rhsNum;
+				}
+				case 'checkbox': {
+					if (entry.kind !== 'checkbox') return false;
+					if (quoted) return false;
+					const lower = rhsRaw.trim().toLowerCase();
+					if (lower !== 'true' && lower !== 'false') return false;
+					return entry.value === (lower === 'true');
+				}
+				case 'date':
+				case 'datetime': {
+					if (entry.kind !== 'date' && entry.kind !== 'datetime') return false;
+					const res = parseTemporalExpr(rhsRaw, {
+						allowYearOnly: true,
+						allowRelative: true,
+						timeZone,
+						referenceTimeMs,
+					});
+					if (!res.ok) {
+						throw new Error(
+							`Unvalidated temporal literal reached evaluator: ${rhsRaw}`,
+						);
+					}
+					return compareDateIntervals(entry.interval, '=', res.interval);
+				}
+				case 'tags':
+					return entry.kind === 'text' && hierarchicalTagMatch(entry.value, rhsRaw);
+				case 'text':
+				case 'multitext':
+					return entry.kind === 'text' && substringStringMatch(entry.value, rhsRaw);
+			}
+		}
+	}
+}
+
 function evalPropertyEntry(
 	entry: TypedPropertyValue,
+	propType: ObsidianPropertyType,
 	op: PropertyOperator,
 	expr: ValueExprAST,
 	timeZone: string,
@@ -78,14 +149,7 @@ function evalPropertyEntry(
 ): boolean {
 	if (entry.kind === 'null' || entry.kind === 'invalid') return false;
 	if (op === ':') {
-		if (entry.kind === 'checkbox' && containsRegexLeaf(expr)) return false;
-		const rawStr =
-			entry.kind === 'text'
-				? entry.value
-				: entry.kind === 'checkbox'
-					? String(entry.value)
-					: entry.raw;
-		return evalValueExprOnTarget(rawStr, expr, PROPERTY_COLON_MATCHER);
+		return evalColonExprOnEntry(entry, propType, expr, timeZone, referenceTimeMs);
 	}
 	if (expr.type !== 'VALUE_LEAF' || expr.matcher.kind === 'regex') return false;
 	const { value: rhsRaw, quoted } = expr.matcher;
@@ -135,8 +199,9 @@ function evalPropertyEntry(
 			return compareDateIntervals(entry.interval, op, res.interval);
 		}
 		case 'text': {
-			const a = entry.value.toLowerCase();
-			const b = rhsRaw.toLowerCase();
+			const a =
+				propType === 'tags' ? normalizeTagBody(entry.value) : entry.value.toLowerCase();
+			const b = propType === 'tags' ? normalizeTagBody(rhsRaw) : rhsRaw.toLowerCase();
 			switch (op) {
 				case '=':
 					return a === b;
@@ -190,15 +255,18 @@ function evalAstNode(
 			return targets.some((target) => evalValueExprOnTarget(target, ast.expr, def));
 		}
 		case 'PROPERTY_FILTER': {
-			const entries = getTypedPropertyEntries(doc, ast.key.trim().toLowerCase());
+			const lowerKey = ast.key.trim().toLowerCase();
+			const entries = getTypedPropertyEntries(doc, lowerKey);
 			const validEntries = entries.filter((e) => e.kind !== 'null' && e.kind !== 'invalid');
 			if (validEntries.length === 0) return false;
 			if (ast.operator === 'EXISTS') return true;
 			const valueExpr = ast.valueExpr;
 			if (!valueExpr) return false;
+			const propType = resolveQueryPropertyType(lowerKey, resolvedConfig.propertyTypes);
 			return validEntries.some((entry) =>
 				evalPropertyEntry(
 					entry,
+					propType,
 					ast.operator,
 					valueExpr,
 					resolvedConfig.timeZone,

@@ -356,21 +356,19 @@ export function validateQueryAST(
 					return;
 				}
 
-				// Step 4b: Leaf literal value validation for =, !=, <, >, <=, >=
-				if (node.operator !== ':') {
-					for (const matcher of collectValueExprLeaves(node.valueExpr)) {
-						if (matcher.kind === 'string') {
-							const valid = validateComparisonLeaf(
-								matcher,
-								propType,
-								node,
-								resolvedConfig,
-								referenceTimeMs,
-								diagnostics,
-							);
-							if (!valid) {
-								invalidPropertyNodes.add(node);
-							}
+				// Step 4b: Leaf literal value validation for :, =, !=, <, >, <=, >=
+				for (const matcher of collectValueExprLeaves(node.valueExpr)) {
+					if (matcher.kind === 'string') {
+						const valid = validateComparisonLeaf(
+							matcher,
+							propType,
+							node,
+							resolvedConfig,
+							referenceTimeMs,
+							diagnostics,
+						);
+						if (!valid) {
+							invalidPropertyNodes.add(node);
 						}
 					}
 				}
