@@ -12,3 +12,6 @@ export * from './parser';
 export * from './validator';
 export * from './linter';
 export * from './compiler';
+export * from './oracle';
+export * from './execution-plan';
+export * from './evaluator';
