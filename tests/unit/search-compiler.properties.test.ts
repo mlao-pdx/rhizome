@@ -4,12 +4,14 @@ import {
 	BUILT_IN_SCOPES,
 	compileQuery,
 	initEngineConfig,
+	levenshteinDistance,
 	MAX_QUERY_LENGTH,
 	MAX_SAFE_EPOCH_MS,
 	MAX_SYNTACTIC_DEPTH,
 	normalizeAST,
 	parseTemporalExpr,
 	resolveQueryPropertyType,
+	suggestScopeHint,
 	validateRegexLiteral,
 	VIRTUAL_FILE_KEYS_LIST,
 	type LeafMatcher,
@@ -518,18 +520,33 @@ function createTestResolvedConfig(): ResolvedEngineConfig {
 
 function assertValueExprDeepFrozen(expr: ValueExprAST): void {
 	expect(Object.isFrozen(expr)).toBe(true);
+	expect(() => {
+		(expr as { type: string }).type = 'MUTATED';
+	}).toThrow(TypeError);
 	if (expr.type === 'VALUE_LEAF') {
 		expect(Object.isFrozen(expr.matcher)).toBe(true);
+		expect(() => {
+			(expr.matcher as { kind: string }).kind = 'MUTATED';
+		}).toThrow(TypeError);
 	} else if (expr.type === 'VALUE_NOT') {
 		assertValueExprDeepFrozen(expr.child);
 	} else {
 		expect(Object.isFrozen(expr.children)).toBe(true);
+		expect(() => {
+			(expr.children as ValueExprAST[]).push({
+				type: 'VALUE_LEAF',
+				matcher: { kind: 'string', value: 'x', quoted: false },
+			});
+		}).toThrow(TypeError);
 		for (const c of expr.children) assertValueExprDeepFrozen(c);
 	}
 }
 
 function assertAstDeepFrozen(ast: SearchAST): void {
 	expect(Object.isFrozen(ast)).toBe(true);
+	expect(() => {
+		(ast as { type: string }).type = 'MUTATED';
+	}).toThrow(TypeError);
 	if ('span' in ast && ast.span) {
 		expect(Object.isFrozen(ast.span)).toBe(true);
 	}
@@ -538,6 +555,9 @@ function assertAstDeepFrozen(ast: SearchAST): void {
 			return;
 		case 'TEXT_MATCH':
 			expect(Object.isFrozen(ast.matcher)).toBe(true);
+			expect(() => {
+				(ast.matcher as { kind: string }).kind = 'MUTATED';
+			}).toThrow(TypeError);
 			return;
 		case 'NOT':
 			assertAstDeepFrozen(ast.child);
@@ -550,8 +570,24 @@ function assertAstDeepFrozen(ast: SearchAST): void {
 			return;
 		case 'LOGICAL':
 			expect(Object.isFrozen(ast.children)).toBe(true);
+			expect(() => {
+				(ast.children as SearchAST[]).push({ type: 'MATCH_ALL' });
+			}).toThrow(TypeError);
 			for (const c of ast.children) assertAstDeepFrozen(c);
 			return;
+	}
+}
+
+function countDocTextMatchNodes(ast: SearchAST): number {
+	switch (ast.type) {
+		case 'TEXT_MATCH':
+			return 1;
+		case 'NOT':
+			return countDocTextMatchNodes(ast.child);
+		case 'LOGICAL':
+			return ast.children.reduce((sum, c) => sum + countDocTextMatchNodes(c), 0);
+		default:
+			return 0;
 	}
 }
 
@@ -689,6 +725,93 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 
 				expect(JSON.parse(JSON.stringify(res.diagnostics))).toEqual(res.diagnostics);
 			}),
+		);
+	});
+
+	it('enforces Step 2 -> Step 4a -> Step 4b short-circuit precedence, negation non-suppression, and TextMatchNode lint partitioning', async () => {
+		const propKeyArb = fc.constantFrom(
+			'score',
+			'priority',
+			'meeting',
+			'due',
+			'status',
+			'done',
+			'file.mtime',
+			'file.size',
+			'file.ext',
+		);
+		const compOpArb = fc.constantFrom('=', '!=', '<', '>', '<=', '>=');
+
+		await assertProperty(
+			'search/compiler__short-circuit-precedence-and-negation-invariance',
+			fc.property(propKeyArb, compOpArb, fc.boolean(), (key, op, negate) => {
+				const wrap = (q: string): string => (negate ? `NOT (${q})` : q);
+
+				// 1. Invalid regex leaf in comparison: ONLY SYNTAX_ERROR (never Step 4a/4b or HINT_PROP_NEQ_EXISTENCE)
+				const invalidRegexRes = compileQuery(
+					wrap(`[${key} ${op} /unclosed(/]`),
+					resolvedConfig,
+					PINNED_REF_MS,
+				);
+				expect(invalidRegexRes.executable).toBe(false);
+				expect(invalidRegexRes.diagnostics.map((d) => d.code)).toEqual(['SYNTAX_ERROR']);
+
+				// 2. Valid regex leaf in comparison: ONLY ERROR_INVALID_OPERATOR_FOR_TYPE (never Step 4b or HINT_PROP_NEQ_EXISTENCE)
+				const validRegexRes = compileQuery(
+					wrap(`[${key} ${op} /^abc$/i]`),
+					resolvedConfig,
+					PINNED_REF_MS,
+				);
+				expect(validRegexRes.executable).toBe(false);
+				expect(validRegexRes.diagnostics.map((d) => d.code)).toEqual([
+					'ERROR_INVALID_OPERATOR_FOR_TYPE',
+				]);
+			}),
+		);
+	});
+
+	it('satisfies Levenshtein metric axioms, 1-edit scope suggestion recovery, and document-level TextMatchNode diagnostic partitioning', async () => {
+		const shortAsciiArb = fc.stringMatching(/^[a-z]{0,8}$/);
+		await assertProperty(
+			'search/compiler__levenshtein-metric-and-text-match-lint-partition',
+			fc.property(
+				shortAsciiArb,
+				shortAsciiArb,
+				shortAsciiArb,
+				queryFuzzArb,
+				(a, b, c, fuzzQuery) => {
+					// 1. Levenshtein metric space axioms
+					expect(levenshteinDistance(a, a)).toBe(0);
+					expect(levenshteinDistance(a, b) === 0).toBe(a === b);
+					expect(levenshteinDistance(a, b)).toBe(levenshteinDistance(b, a));
+					expect(levenshteinDistance(a, c)).toBeLessThanOrEqual(
+						levenshteinDistance(a, b) + levenshteinDistance(b, c),
+					);
+
+					// 2. 1-character prefix insertion on any built-in scope name has edit distance 1 -> always suggests a scope
+					for (const s of BUILT_IN_SCOPES) {
+						const typo = `x${s.canonicalName}`;
+						if (!resolvedConfig.getScope(typo)) {
+							const hint = suggestScopeHint(typo, resolvedConfig);
+							expect(hint).not.toBeNull();
+							expect(hint?.startsWith('Did you mean "')).toBe(true);
+						}
+					}
+
+					// 3. Exhaustive & mutually exclusive partitioning of document-level TextMatchNodes
+					const res = compileQuery(fuzzQuery, resolvedConfig, PINNED_REF_MS);
+					if (res.executable && res.ast) {
+						const textNodeCount = countDocTextMatchNodes(res.ast);
+						const textDiagCount = res.diagnostics.filter(
+							(d) =>
+								d.code === 'HINT_BARE_TEXT_NO_BODY' ||
+								d.code === 'WARN_LOWERCASE_BOOLEAN' ||
+								d.code === 'WARN_DANGEROUS_SPACED_HYPHEN',
+						).length;
+						expect(textDiagCount).toBe(textNodeCount);
+					}
+				},
+			),
 		);
 	});
 });
