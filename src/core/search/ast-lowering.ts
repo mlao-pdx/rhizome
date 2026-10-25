@@ -1,4 +1,5 @@
 import type { CstElement, CstNode, IToken } from 'chevrotain';
+import { createUnquotedMultiwordScopeWarning, createWikilinkBracketsHint } from './linter';
 import { decodeQuotedString, decodeRegexLiteral, decodeWikiLinkValue } from './literals';
 import { BUILT_IN_SCOPES } from './scopes';
 import type {
@@ -146,6 +147,16 @@ function resolveScopeCanonicalName(
 	return def ? def.canonicalName : trimmed;
 }
 
+function isKnownScope(rawScope: string, resolvedConfig?: ResolvedEngineConfig): boolean {
+	if (rawScope === '#') return true;
+	const trimmed = rawScope.trim();
+	return Boolean(
+		resolvedConfig
+			? resolvedConfig.getScope(trimmed)
+			: BUILT_IN_SCOPE_MAP.get(trimmed.toLowerCase()),
+	);
+}
+
 /**
  * Lowers a Chevrotain `query` CST node into a `SearchAST` and collects lowering-time diagnostics.
  */
@@ -200,13 +211,7 @@ export function lowerQueryCst(
 				span,
 			});
 		} else {
-			diagnostics.push({
-				code: 'HINT_WIKILINK_BRACKETS_IN_SCOPE',
-				severity: 'hint',
-				issue: 'Wikilink brackets "[[...]]" are not needed.',
-				hint: 'Stripped "[[...]]" automatically.',
-				span,
-			});
+			diagnostics.push(createWikilinkBracketsHint(span));
 		}
 		return {
 			expr: {
@@ -502,7 +507,8 @@ export function lowerQueryCst(
 				isBareTextNotExpr(rightNotCst) &&
 				left.expr.type === 'VALUE_LEAF' &&
 				left.expr.matcher.kind === 'string' &&
-				!left.expr.matcher.quoted
+				!left.expr.matcher.quoted &&
+				isKnownScope(left.rawScope, resolvedConfig)
 			) {
 				const hasExplicitAnd = andTokens.some(
 					(t) =>
@@ -512,13 +518,14 @@ export function lowerQueryCst(
 				if (!hasExplicitAnd) {
 					const leftVal = left.expr.matcher.value;
 					const nextVal = right.rawText;
-					diagnostics.push({
-						code: 'WARN_UNQUOTED_MULTIWORD_SCOPE',
-						severity: 'warning',
-						issue: `"${nextVal}" is searched as a separate term, not inside "${left.scope}:".`,
-						hint: `Use ${left.scope}:"${leftVal} ${nextVal}"`,
-						span: mergeSpans(left.span, right.span),
-					});
+					diagnostics.push(
+						createUnquotedMultiwordScopeWarning(
+							left.scope,
+							leftVal,
+							nextVal,
+							mergeSpans(left.span, right.span),
+						),
+					);
 				}
 			}
 		}

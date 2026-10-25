@@ -9,3 +9,6 @@ export * from './literals';
 export * from './ast-utils';
 export * from './ast-lowering';
 export * from './parser';
+export * from './validator';
+export * from './linter';
+export * from './compiler';
