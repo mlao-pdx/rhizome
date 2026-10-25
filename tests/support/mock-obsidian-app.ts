@@ -174,13 +174,23 @@ export class FileSystemAdapter {
 	getFullPath(normalizedPath: string): string {
 		return normalizedPath === '' ? '/mock/vault' : `/mock/vault/${normalizedPath}`;
 	}
+
+	async read(_normalizedPath: string): Promise<string> {
+		throw new Error('File not found');
+	}
 }
 
-/** A minimal `app` value sufficient for `RhizomePlugin`'s current `onload()`. */
+/** A minimal `app` value sufficient for `RhizomePlugin`'s current `onload()` and `query()`. */
 export function createMockApp(): unknown {
 	return {
 		vault: {
+			configDir: 'mock-config',
 			adapter: new FileSystemAdapter(),
+			getMarkdownFiles: () => [],
+		},
+		metadataCache: {
+			getFileCache: () => null,
+			getFirstLinkpathDest: () => null,
 		},
 	};
 }

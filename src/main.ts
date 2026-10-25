@@ -2,6 +2,11 @@ import { FileSystemAdapter, Plugin } from 'obsidian';
 import { DexiePersistenceAdapter } from './adapters/dexie-persistence-adapter';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
 import { PluginDataStore } from './adapters/plugin-data-store';
+import {
+	runVaultQuery,
+	type VaultQueryOptions,
+	type VaultQueryResult,
+} from './adapters/vault-query-runner';
 import { DEFAULT_SETTINGS, type RhizomeSettings, RhizomeSettingTab } from './settings';
 
 export default class RhizomePlugin extends Plugin {
@@ -63,5 +68,9 @@ export default class RhizomePlugin extends Plugin {
 
 	async saveSettings() {
 		await this.dataStore.saveSettings(this.settings);
+	}
+
+	async query(input: string = '', options?: VaultQueryOptions): Promise<VaultQueryResult> {
+		return runVaultQuery(this.app, input, options);
 	}
 }
