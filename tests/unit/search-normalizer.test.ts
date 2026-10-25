@@ -4,7 +4,6 @@ import {
 	coercePropertyValue,
 	FORBIDDEN_KEYS,
 	initEngineConfig,
-	isCleanSanitizedScalar,
 	MAX_SAFE_EPOCH_MS,
 	normalizeObsidianMetadata,
 	resolveQueryPropertyType,
@@ -50,18 +49,7 @@ function makeFile(overrides: Partial<ObsidianFileInput> = {}): ObsidianFileInput
 }
 
 describe('property-coercion helpers', () => {
-	it('identifies clean SanitizedScalar values and sanitizes non-clean scalars', () => {
-		expect(isCleanSanitizedScalar('hello')).toBe(true);
-		expect(isCleanSanitizedScalar(42)).toBe(true);
-		expect(isCleanSanitizedScalar(false)).toBe(true);
-		expect(isCleanSanitizedScalar(null)).toBe(true);
-
-		expect(isCleanSanitizedScalar(undefined)).toBe(false);
-		expect(isCleanSanitizedScalar(Number.NaN)).toBe(false);
-		expect(isCleanSanitizedScalar(Number.POSITIVE_INFINITY)).toBe(false);
-		expect(isCleanSanitizedScalar(new Date(0))).toBe(false);
-		expect(isCleanSanitizedScalar({})).toBe(false);
-
+	it('sanitizes non-clean scalars', () => {
 		expect(sanitizeScalar(undefined)).toEqual({ valid: true, scalar: null });
 		expect(sanitizeScalar(null)).toEqual({ valid: true, scalar: null });
 		expect(sanitizeScalar(Number.NaN)).toEqual({ valid: true, scalar: null });
@@ -224,7 +212,6 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			},
 			config,
 			[],
-			{},
 			resolveLinkPath,
 		);
 
@@ -387,7 +374,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		});
 	});
 
-	it('normalizes tags, aliases, headings, embeds, blocks, referencedLinks, and root parent', () => {
+	it('normalizes tags, aliases, headings, embeds, blocks, and root parent', () => {
 		const config = getStandardConfig();
 		const doc = normalizeObsidianMetadata(
 			makeFile({
@@ -417,12 +404,6 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				{ key: 'tag', value: 'extra-tag', line: 10 },
 				{ key: 'alias', value: 'Second Alias', line: 11 },
 			],
-			{
-				'Other.md': { 'RootNote.md': 2 },
-				'ZeroRef.md': { 'RootNote.md': 0 },
-				'Unrelated.md': { 'Notes/A.md': 1 },
-				'Alpha.md': { 'RootNote.md': 1 },
-			},
 		);
 
 		expect(doc.file.parent).toBe('');
@@ -454,7 +435,6 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			},
 		]);
 		expect(doc.blocks).toEqual(['block-one', 'block-two']);
-		expect(doc.referencedLinks).toEqual(['Alpha.md', 'Other.md']);
 		expect(doc.propertyKeys).not.toContain('position');
 	});
 
@@ -483,55 +463,6 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				config,
 			),
 		).toThrow(/Invalid file stat size/);
-	});
-
-	it('shares clean metadataCache references directly and lazily materializes derived views with copy-on-write safety', () => {
-		const config = getStandardConfig();
-		const tfile = makeFile();
-		const fmTags = ['alpha', 'beta'];
-		const fmMulti = ['fm1', 'fm2'];
-		const resolveLinkPath = vi.fn(() => 'Resolved.md');
-
-		const doc = normalizeObsidianMetadata(
-			tfile,
-			{
-				frontmatter: {
-					tags: fmTags,
-					multi: fmMulti,
-				},
-				links: [{ link: 'TargetNote' }],
-			},
-			config,
-			[{ key: 'multi', value: 'inline3', line: 4 }],
-			{},
-			resolveLinkPath,
-		);
-
-		// 1. Direct reference sharing for tfile.stat
-		expect(doc.file.stat).toBe(tfile.stat);
-
-		// 2. Direct reference sharing for clean frontmatter array in propertyOccurrences
-		expect(doc.propertyOccurrences[0]?.rawValue).toBe(fmTags);
-		expect(doc.propertyOccurrences[1]?.rawValue).toBe(fmMulti);
-
-		// 3. Lazy link resolution: resolveLinkPath is NOT called until doc.links is accessed
-		expect(resolveLinkPath).not.toHaveBeenCalled();
-		const firstLinksRead = doc.links;
-		expect(resolveLinkPath).toHaveBeenCalledTimes(1);
-		// Second read returns the memoized array without re-invoking resolveLinkPath
-		expect(doc.links).toBe(firstLinksRead);
-		expect(resolveLinkPath).toHaveBeenCalledTimes(1);
-
-		// 4. Single-occurrence array is shared directly on doc.properties without cloning
-		expect(doc.properties['tags']).toBe(fmTags);
-
-		// 5. Multi-occurrence array uses copy-on-write without mutating cache.frontmatter
-		expect(doc.properties['multi']).toEqual(['fm1', 'fm2', 'inline3']);
-		expect(doc.properties['multi']).not.toBe(fmMulti);
-		expect(fmMulti).toEqual(['fm1', 'fm2']);
-
-		// 6. JSON round-trip equivalence (Invariant 2a)
-		expect(JSON.parse(JSON.stringify(doc))).toEqual(doc);
 	});
 
 	it('strips forbidden prototype-pollution keys in both normalizeObsidianMetadata and buildPropertiesViews', () => {
@@ -565,5 +496,106 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			},
 		]);
 		expect(manualViews.propertyKeys).toEqual([]);
+	});
+
+	it('normalizes metadata eagerly as an isolated snapshot (resolveLinkPath called during normalization; post-call cache mutations ignored)', () => {
+		const config = getStandardConfig();
+		const resolveLinkPath = vi.fn(() => 'People/Alice.md');
+		const cacheTags = [{ tag: '#initial' }];
+		const cacheHeadings = [{ heading: 'Initial Heading', level: 2 }];
+
+		const doc = normalizeObsidianMetadata(
+			makeFile(),
+			{
+				tags: cacheTags,
+				headings: cacheHeadings,
+				links: [{ link: 'Alice' }],
+			},
+			config,
+			[],
+			resolveLinkPath,
+		);
+
+		// resolveLinkPath must be invoked eagerly during normalizeObsidianMetadata before any property read
+		expect(resolveLinkPath).toHaveBeenCalledTimes(1);
+		expect(resolveLinkPath).toHaveBeenCalledWith('Alice', 'Notes/A.md');
+
+		// Mutate inputs after normalizeObsidianMetadata returns, before reading doc fields
+		cacheTags.push({ tag: '#mutated' });
+		cacheHeadings[0]!.heading = 'Mutated Heading';
+
+		expect(doc.tags).toEqual(['#initial']);
+		expect(doc.headings).toEqual([{ text: 'Initial Heading', level: 2 }]);
+	});
+
+	it('produces plain POJO data descriptors (no getters) and supports structuredClone without pre-warming', () => {
+		const config = getStandardConfig();
+		const doc = normalizeObsidianMetadata(
+			makeFile(),
+			{
+				frontmatter: {
+					aliases: ['Alpha'],
+					tags: ['work'],
+					status: 'active',
+				},
+				headings: [{ heading: 'Intro', level: 1 }],
+				links: [{ link: 'Target' }],
+				embeds: [{ link: 'Image.png' }],
+				blocks: { '^b1': { id: 'b1' } },
+			},
+			config,
+		);
+
+		for (const field of [
+			'aliases',
+			'tags',
+			'headings',
+			'links',
+			'embeds',
+			'blocks',
+			'propertyKeys',
+			'properties',
+		] as const) {
+			const desc = Object.getOwnPropertyDescriptor(doc, field);
+			expect(desc).toBeDefined();
+			expect(Object.prototype.hasOwnProperty.call(desc, 'get')).toBe(false);
+			expect('value' in (desc ?? {})).toBe(true);
+		}
+
+		const cloned = structuredClone(doc);
+		expect(cloned).toEqual(doc);
+	});
+
+	it('defensively copies tfile.stat, frontmatter arrays, occurrence.rawValue, and single-occurrence array views in doc.properties', () => {
+		const config = getStandardConfig();
+		const inputStat = { ctime: 1700000000000, mtime: 1700000005000, size: 512 };
+		const tfile = makeFile({ stat: inputStat });
+		const fmList = ['alpha', 'beta'];
+
+		const doc = normalizeObsidianMetadata(
+			tfile,
+			{
+				frontmatter: {
+					tags: fmList,
+				},
+			},
+			config,
+		);
+
+		expect(doc.file.stat).not.toBe(tfile.stat);
+		expect(doc.propertyOccurrences[0]?.rawValue).not.toBe(fmList);
+		expect(doc.properties['tags']).not.toBe(fmList);
+		expect(doc.properties['tags']).not.toBe(doc.propertyOccurrences[0]?.rawValue);
+
+		// Mutating caller inputs must not affect the normalized document
+		inputStat.size = 999999;
+		fmList.push('mutated-input');
+		expect(doc.file.stat.size).toBe(512);
+		expect(doc.propertyOccurrences[0]?.rawValue).toEqual(['alpha', 'beta']);
+		expect(doc.properties['tags']).toEqual(['alpha', 'beta']);
+
+		// Mutating doc.properties[key] array must not corrupt doc.propertyOccurrences[0].rawValue
+		(doc.properties['tags'] as unknown[]).push('mutated-view');
+		expect(doc.propertyOccurrences[0]?.rawValue).toEqual(['alpha', 'beta']);
 	});
 });

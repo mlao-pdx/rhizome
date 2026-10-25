@@ -4,8 +4,8 @@ import { decodeQuotedString, decodeRegexLiteral, decodeWikiLinkValue } from './l
 import { BUILT_IN_SCOPES } from './scopes';
 import type {
 	LeafMatcher,
+	PropertyFilterNode,
 	PropertyOperator,
-	ResolvedEngineConfig,
 	ScopeDefinition,
 	SearchAST,
 	SearchDiagnostic,
@@ -16,6 +16,12 @@ import type {
 export interface ParseQueryResult {
 	ast: SearchAST | null;
 	diagnostics: SearchDiagnostic[];
+}
+
+export interface LoweredQueryResult {
+	ast: SearchAST;
+	diagnostics: SearchDiagnostic[];
+	invalidPropertyNodes: ReadonlySet<PropertyFilterNode>;
 }
 
 interface LoweredValueExpr {
@@ -116,55 +122,12 @@ function asTokens(elems: CstElement[] | undefined): IToken[] {
 	return (elems ?? []) as IToken[];
 }
 
-function isUnquotedSimpleScopedNotExpr(notNode: CstNode): boolean {
-	const nch = notNode.children;
-	if (asTokens(nch.Not).length > 0 || asTokens(nch.HyphenNot).length > 0) return false;
-	const primary = asNodes(nch.primary)[0];
-	if (!primary) return false;
-	const scoped = asNodes(primary.children.scopedOperator)[0];
-	if (!scoped) return false;
-	const rhs = asNodes(scoped.children.scopeOrPropRhs)[0];
-	if (!rhs || asTokens(rhs.children.LParen).length > 0) return false;
-	return true;
-}
-
-function isBareTextNotExpr(notNode: CstNode): boolean {
-	const nch = notNode.children;
-	if (asTokens(nch.Not).length > 0 || asTokens(nch.HyphenNot).length > 0) return false;
-	const primary = asNodes(nch.primary)[0];
-	if (!primary) return false;
-	return asNodes(primary.children.bareLeafValue).length > 0;
-}
-
-function resolveScopeCanonicalName(
-	rawScope: string,
-	resolvedConfig?: ResolvedEngineConfig,
-): string {
-	const trimmed = rawScope.trim();
-	const def = resolvedConfig
-		? resolvedConfig.getScope(trimmed)
-		: BUILT_IN_SCOPE_MAP.get(trimmed.toLowerCase());
-	return def ? def.canonicalName : trimmed;
-}
-
-function isKnownScope(rawScope: string, resolvedConfig?: ResolvedEngineConfig): boolean {
-	if (rawScope === '#') return true;
-	const trimmed = rawScope.trim();
-	return Boolean(
-		resolvedConfig
-			? resolvedConfig.getScope(trimmed)
-			: BUILT_IN_SCOPE_MAP.get(trimmed.toLowerCase()),
-	);
-}
-
 /**
  * Lowers a Chevrotain `query` CST node into a `SearchAST` and collects lowering-time diagnostics.
  */
-export function lowerQueryCst(
-	cst: CstNode,
-	resolvedConfig?: ResolvedEngineConfig,
-): ParseQueryResult {
+export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 	const diagnostics: SearchDiagnostic[] = [];
+	const invalidPropertyNodes = new Set<PropertyFilterNode>();
 
 	function lowerLeafTokens(ch: Record<string, CstElement[]>): {
 		matcher: LeafMatcher;
@@ -377,6 +340,7 @@ export function lowerQueryCst(
 
 		const prop = asNodes(ch.propertyFilter)[0];
 		if (prop) {
+			const diagCountBefore = diagnostics.length;
 			const lbracket = asTokens(prop.children.LBracket)[0]!;
 			const rbracket = asTokens(prop.children.RBracket)[0]!;
 			const span = mergeSpans(tokenToSpan(lbracket), tokenToSpan(rbracket));
@@ -396,9 +360,10 @@ export function lowerQueryCst(
 			}
 			const colon = asTokens(prop.children.Colon)[0];
 			const compOp = asTokens(prop.children.CompOp)[0];
+			let propNode: PropertyFilterNode;
 			if (colon) {
 				const rhs = lowerScopeOrPropRhs(asNodes(prop.children.scopeOrPropRhs)[0]!);
-				return {
+				propNode = {
 					type: 'PROPERTY_FILTER',
 					key,
 					rawKey,
@@ -406,10 +371,9 @@ export function lowerQueryCst(
 					valueExpr: rhs.expr,
 					span,
 				};
-			}
-			if (compOp) {
+			} else if (compOp) {
 				const rhs = lowerRhsLeafValue(asNodes(prop.children.rhsLeafValue)[0]!);
-				return {
+				propNode = {
 					type: 'PROPERTY_FILTER',
 					key,
 					rawKey,
@@ -417,14 +381,22 @@ export function lowerQueryCst(
 					valueExpr: rhs.expr,
 					span,
 				};
+			} else {
+				propNode = {
+					type: 'PROPERTY_FILTER',
+					key,
+					rawKey,
+					operator: 'EXISTS',
+					span,
+				};
 			}
-			return {
-				type: 'PROPERTY_FILTER',
-				key,
-				rawKey,
-				operator: 'EXISTS',
-				span,
-			};
+			for (let i = diagCountBefore; i < diagnostics.length; i++) {
+				if (diagnostics[i]?.severity === 'error') {
+					invalidPropertyNodes.add(propNode);
+					break;
+				}
+			}
+			return propNode;
 		}
 
 		const scoped = asNodes(ch.scopedOperator)[0];
@@ -432,7 +404,9 @@ export function lowerQueryCst(
 			const scopeNameNode = asNodes(scoped.children.scopeName)[0]!;
 			const scopeTok = asTokens(scopeNameNode.children.Identifier)[0]!;
 			const rawScope = scopeTok.image;
-			const scope = resolveScopeCanonicalName(rawScope, resolvedConfig);
+			const trimmedScope = rawScope.trim();
+			const scope =
+				BUILT_IN_SCOPE_MAP.get(trimmedScope.toLowerCase())?.canonicalName ?? trimmedScope;
 			const rhs = lowerScopeOrPropRhs(asNodes(scoped.children.scopeOrPropRhs)[0]!);
 			return {
 				type: 'SCOPED_FILTER',
@@ -495,20 +469,17 @@ export function lowerQueryCst(
 		for (let i = 0; i < children.length - 1; i++) {
 			const left = children[i]!;
 			const right = children[i + 1]!;
-			const leftNotCst = notNodes[i]!;
-			const rightNotCst = notNodes[i + 1]!;
 			if (
 				left.type === 'SCOPED_FILTER' &&
 				right.type === 'TEXT_MATCH' &&
 				left.span &&
 				right.span &&
 				left.span.startLine === right.span.startLine &&
-				isUnquotedSimpleScopedNotExpr(leftNotCst) &&
-				isBareTextNotExpr(rightNotCst) &&
 				left.expr.type === 'VALUE_LEAF' &&
 				left.expr.matcher.kind === 'string' &&
 				!left.expr.matcher.quoted &&
-				isKnownScope(left.rawScope, resolvedConfig)
+				right.matcher.kind === 'string' &&
+				!right.matcher.quoted
 			) {
 				const hasExplicitAnd = andTokens.some(
 					(t) =>
@@ -561,13 +532,9 @@ export function lowerQueryCst(
 
 	const orNode = asNodes(cst.children.orExpression)[0];
 	if (!orNode) {
-		return { ast: { type: 'MATCH_ALL' }, diagnostics: [] };
+		return { ast: { type: 'MATCH_ALL' }, diagnostics: [], invalidPropertyNodes };
 	}
 
 	const ast = lowerOrExpression(orNode);
-	const errorDiagnostics = diagnostics.filter((d) => d.severity === 'error');
-	if (errorDiagnostics.length > 0) {
-		return { ast: null, diagnostics: errorDiagnostics };
-	}
-	return { ast, diagnostics };
+	return { ast, diagnostics, invalidPropertyNodes };
 }

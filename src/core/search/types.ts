@@ -160,7 +160,6 @@ export interface NormalizedDocument {
 	headings: NormalizedHeading[];
 	links: NormalizedLink[]; // Outgoing links (body + frontmatterLinks, excluding embeds)
 	embeds: NormalizedLink[]; // Outgoing embeds
-	referencedLinks: string[]; // Sorted, deduplicated source paths where resolvedLinks[src][path] > 0
 	blocks: string[]; // Lowercase block IDs with any leading '^' stripped
 	propertyOccurrences: PropertyOccurrence[]; // Cache-level occurrence stream
 	propertyKeys: string[]; // Exact first-seen order of normalized property keys

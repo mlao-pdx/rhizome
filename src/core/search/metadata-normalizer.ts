@@ -2,7 +2,6 @@ import {
 	buildPropertiesViews,
 	coercePropertyValue,
 	FORBIDDEN_KEYS,
-	isCleanSanitizedScalar,
 	resolveUserPropertyType,
 	sanitizeLineNumber,
 	sanitizeScalar,
@@ -55,10 +54,6 @@ export interface InlinePropertyInput {
 	readonly line?: number | null | undefined;
 }
 
-export type ResolvedLinksSnapshotInput = Readonly<
-	Record<string, Readonly<Record<string, number>> | undefined>
->;
-
 export type ResolveLinkPathFn = (rawTarget: string, sourcePath: string) => string | null;
 
 function validateIntegerTimestampMs(val: number, fieldName: string): number {
@@ -66,35 +61,6 @@ function validateIntegerTimestampMs(val: number, fieldName: string): number {
 		throw new Error(`Invalid file stat ${fieldName}: ${val}`);
 	}
 	return val === 0 ? 0 : val;
-}
-
-function defineLazyProperty<K extends keyof NormalizedDocument>(
-	target: NormalizedDocument,
-	key: K,
-	compute: () => NormalizedDocument[K],
-): void {
-	Object.defineProperty(target, key, {
-		get(): NormalizedDocument[K] {
-			const val = compute();
-			Object.defineProperty(target, key, {
-				value: val,
-				writable: true,
-				enumerable: true,
-				configurable: true,
-			});
-			return val;
-		},
-		set(val: NormalizedDocument[K]): void {
-			Object.defineProperty(target, key, {
-				value: val,
-				writable: true,
-				enumerable: true,
-				configurable: true,
-			});
-		},
-		enumerable: true,
-		configurable: true,
-	});
 }
 
 function normalizeLinkItem(
@@ -141,20 +107,15 @@ function normalizeLinkItem(
 }
 
 /**
- * Normalizes an Obsidian `TFile`, `CachedMetadata`, inline properties, and `resolvedLinks`
- * into a self-contained `NormalizedDocument` bound to `resolvedConfig`.
- *
- * @remarks
- * Shares clean `tfile.stat` and frontmatter scalar arrays by reference without mutation,
- * and lazily materializes derived collections (`tags`, `aliases`, `headings`, `links`,
- * `embeds`, `referencedLinks`, `blocks`, `propertyKeys`, `properties`) on first read.
+ * Normalizes an Obsidian `TFile`, `CachedMetadata`, and inline properties
+ * into a self-contained plain POJO `NormalizedDocument` bound to `resolvedConfig`.
+ * Does not ingest `resolvedLinks` or compute backlinks.
  */
 export function normalizeObsidianMetadata(
 	tfile: ObsidianFileInput,
 	cache: ObsidianMetadataCacheInput | null,
 	resolvedConfig: ResolvedEngineConfig,
 	inlineProperties: readonly InlinePropertyInput[] = [],
-	resolvedLinksSnapshot: ResolvedLinksSnapshotInput = {},
 	resolveLinkPath?: ResolveLinkPathFn,
 ): NormalizedDocument {
 	const ctime = validateIntegerTimestampMs(tfile.stat.ctime, 'ctime');
@@ -221,15 +182,12 @@ export function normalizeObsidianMetadata(
 		const occurrenceIndex = propertyOccurrences.length;
 
 		if (Array.isArray(val)) {
-			const canShareArray = val.every(isCleanSanitizedScalar);
-			const sanitizedList: SanitizedScalar[] = canShareArray ? val : [];
+			const sanitizedList: SanitizedScalar[] = [];
 			const typedValues: TypedPropertyValue[] = [];
 			for (const item of val as readonly unknown[]) {
-				if (!canShareArray) {
-					const s = sanitizeScalar(item);
-					if (!s.valid) continue;
-					sanitizedList.push(s.scalar);
-				}
+				const s = sanitizeScalar(item);
+				if (!s.valid) continue;
+				sanitizedList.push(s.scalar);
 				const valueIndex = typedValues.length;
 				const tv = coercePropertyValue(item, propertyType, timeZone);
 				typedValues.push(tv);
@@ -276,15 +234,59 @@ export function normalizeObsidianMetadata(
 		addOccurrence(inline.key, inline.value, 'inline', inline.line);
 	}
 
-	const size = tfile.stat.size === 0 ? 0 : tfile.stat.size;
-	const canShareStat =
-		Object.keys(tfile.stat).length === 3 &&
-		!Object.is(tfile.stat.ctime, -0) &&
-		!Object.is(tfile.stat.mtime, -0) &&
-		!Object.is(tfile.stat.size, -0);
-	const stat = canShareStat ? tfile.stat : { ctime, mtime, size };
+	const { propertyKeys, properties } = buildPropertiesViews(propertyOccurrences);
 
-	const doc = {
+	const aliases: string[] = [];
+	for (const occ of propertyOccurrences) {
+		if (occ.key === 'aliases' || occ.key === 'alias') {
+			for (const tv of occ.typedValues) {
+				if (tv.kind === 'text') aliases.push(tv.value);
+			}
+		}
+	}
+
+	const tagSet = new Set<string>();
+	for (const t of cache?.tags ?? []) {
+		const body = t.tag.trim().replace(/^#+/, '').toLowerCase();
+		if (body) tagSet.add(`#${body}`);
+	}
+	for (const occ of propertyOccurrences) {
+		if (occ.key === 'tags' || occ.key === 'tag') {
+			for (const tv of occ.typedValues) {
+				if (tv.kind === 'text') {
+					const body = tv.value.trim().replace(/^#+/, '').toLowerCase();
+					if (body) tagSet.add(`#${body}`);
+				}
+			}
+		}
+	}
+
+	const headings: NormalizedHeading[] = (cache?.headings ?? []).map((h) => ({
+		text: h.heading,
+		level: (Number.isFinite(h.level) ? Math.min(6, Math.max(1, Math.trunc(h.level))) : 1) as
+			1 | 2 | 3 | 4 | 5 | 6,
+	}));
+
+	const links: NormalizedLink[] = [
+		...(cache?.links ?? []).map((l) =>
+			normalizeLinkItem(l, 'body', tfile.path, resolveLinkPath),
+		),
+		...(cache?.frontmatterLinks ?? []).map((l) =>
+			normalizeLinkItem(l, 'frontmatter', tfile.path, resolveLinkPath),
+		),
+	];
+
+	const embeds: NormalizedLink[] = (cache?.embeds ?? []).map((e) =>
+		normalizeLinkItem(e, 'embed', tfile.path, resolveLinkPath),
+	);
+
+	const blocks = Object.keys(cache?.blocks ?? {}).map((b) =>
+		b.startsWith('^') ? b.slice(1).toLowerCase() : b.toLowerCase(),
+	);
+
+	const size = tfile.stat.size === 0 ? 0 : tfile.stat.size;
+
+	return {
 		normalizationFingerprint,
 		file: {
 			path: tfile.path,
@@ -292,108 +294,21 @@ export function normalizeObsidianMetadata(
 			basename: tfile.basename,
 			extension: tfile.extension,
 			parent: tfile.parent?.path && tfile.parent.path !== '/' ? tfile.parent.path : '',
-			stat,
+			stat: {
+				ctime,
+				mtime,
+				size,
+			},
 		},
-	} as NormalizedDocument;
-
-	defineLazyProperty(doc, 'aliases', () => {
-		const aliases: string[] = [];
-		for (const occ of propertyOccurrences) {
-			if (occ.key === 'aliases' || occ.key === 'alias') {
-				for (const tv of occ.typedValues) {
-					if (tv.kind === 'text') aliases.push(tv.value);
-				}
-			}
-		}
-		return aliases;
-	});
-
-	defineLazyProperty(doc, 'tags', () => {
-		const tagSet = new Set<string>();
-		for (const t of cache?.tags ?? []) {
-			const body = t.tag.trim().replace(/^#+/, '').toLowerCase();
-			if (body) tagSet.add(`#${body}`);
-		}
-		for (const occ of propertyOccurrences) {
-			if (occ.key === 'tags' || occ.key === 'tag') {
-				for (const tv of occ.typedValues) {
-					if (tv.kind === 'text') {
-						const body = tv.value.trim().replace(/^#+/, '').toLowerCase();
-						if (body) tagSet.add(`#${body}`);
-					}
-				}
-			}
-		}
-		return Array.from(tagSet).sort();
-	});
-
-	defineLazyProperty(doc, 'headings', (): NormalizedHeading[] =>
-		(cache?.headings ?? []).map((h) => ({
-			text: h.heading,
-			level: (Number.isFinite(h.level)
-				? Math.min(6, Math.max(1, Math.trunc(h.level)))
-				: 1) as 1 | 2 | 3 | 4 | 5 | 6,
-		})),
-	);
-
-	defineLazyProperty(doc, 'links', (): NormalizedLink[] => [
-		...(cache?.links ?? []).map((l) =>
-			normalizeLinkItem(l, 'body', tfile.path, resolveLinkPath),
-		),
-		...(cache?.frontmatterLinks ?? []).map((l) =>
-			normalizeLinkItem(l, 'frontmatter', tfile.path, resolveLinkPath),
-		),
-	]);
-
-	defineLazyProperty(doc, 'embeds', (): NormalizedLink[] =>
-		(cache?.embeds ?? []).map((e) =>
-			normalizeLinkItem(e, 'embed', tfile.path, resolveLinkPath),
-		),
-	);
-
-	defineLazyProperty(doc, 'referencedLinks', () => {
-		const incomingSet = new Set<string>();
-		for (const [sourcePath, targets] of Object.entries(resolvedLinksSnapshot)) {
-			const count = targets?.[tfile.path];
-			if (typeof count === 'number' && count > 0) {
-				incomingSet.add(sourcePath);
-			}
-		}
-		return Array.from(incomingSet).sort();
-	});
-
-	defineLazyProperty(doc, 'blocks', () =>
-		Object.keys(cache?.blocks ?? {}).map((b) =>
-			b.startsWith('^') ? b.slice(1).toLowerCase() : b.toLowerCase(),
-		),
-	);
-
-	doc.propertyOccurrences = propertyOccurrences;
-
-	const materializePropertyViews = (): {
-		propertyKeys: string[];
-		properties: Record<string, unknown>;
-	} => {
-		const views = buildPropertiesViews(propertyOccurrences);
-		Object.defineProperty(doc, 'propertyKeys', {
-			value: views.propertyKeys,
-			writable: true,
-			enumerable: true,
-			configurable: true,
-		});
-		Object.defineProperty(doc, 'properties', {
-			value: views.properties,
-			writable: true,
-			enumerable: true,
-			configurable: true,
-		});
-		return views;
+		aliases,
+		tags: Array.from(tagSet).sort(),
+		headings,
+		links,
+		embeds,
+		blocks,
+		propertyOccurrences,
+		propertyKeys,
+		properties,
+		diagnostics,
 	};
-
-	defineLazyProperty(doc, 'propertyKeys', () => materializePropertyViews().propertyKeys);
-	defineLazyProperty(doc, 'properties', () => materializePropertyViews().properties);
-
-	doc.diagnostics = diagnostics;
-
-	return doc;
 }

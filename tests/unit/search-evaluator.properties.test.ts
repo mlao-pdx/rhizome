@@ -49,7 +49,7 @@ describe('Phase 6 evaluator invariants', () => {
 		);
 	});
 
-	it('Invariant 2a: reports are JSON-safe and evaluating cold or warm lazy documents preserves their JSON content', async () => {
+	it('Invariant 2a: reports are JSON-safe and evaluating cold or warm documents preserves their JSON content', async () => {
 		await assertProperty(
 			'search/evaluator__report-json-and-nonmutation',
 			fc.property(evaluationCaseArb, rootQueryArb, (sample, input) => {
@@ -60,10 +60,12 @@ describe('Phase 6 evaluator invariants', () => {
 				for (const evaluate of evaluators) {
 					for (const warm of [false, true]) {
 						const docs = evaluatorVault(sample.documents, config);
-						for (const doc of docs)
-							expect(
-								typeof Object.getOwnPropertyDescriptor(doc, 'aliases')?.get,
-							).toBe('function');
+						for (const doc of docs) {
+							const descriptor = Object.getOwnPropertyDescriptor(doc, 'aliases');
+							expect(Object.prototype.hasOwnProperty.call(descriptor, 'get')).toBe(
+								false,
+							);
+						}
 						if (warm) expect(JSON.stringify(docs)).toBe(expectedJson);
 						const report = evaluate(docs, prepared);
 						expect(JSON.parse(JSON.stringify(report))).toEqual(report);

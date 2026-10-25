@@ -20,7 +20,7 @@ import {
 	TagLiteral,
 	WikiLinkValue,
 } from './tokens';
-import type { ResolvedEngineConfig, SearchDiagnostic } from './types';
+import type { PropertyFilterNode, SearchAST, SearchDiagnostic } from './types';
 
 export const MAX_QUERY_LENGTH = 4096;
 export const MAX_SYNTACTIC_DEPTH = 32;
@@ -284,10 +284,19 @@ function recognitionExceptionToDiagnostic(
 	};
 }
 
+const EMPTY_INVALID_PROP_NODES: ReadonlySet<PropertyFilterNode> = new Set();
+
+export interface ParseAndLowerResult {
+	readonly ast: SearchAST | null;
+	readonly diagnostics: SearchDiagnostic[];
+	readonly invalidPropertyNodes: ReadonlySet<PropertyFilterNode>;
+}
+
 /**
- * Lexes, parses, and lowers `input` into a `SearchAST` with syntactic limit enforcement (`4096` chars, depth `32`).
+ * Internal helper that lexes, parses, and lowers `input` into a `SearchAST` while retaining
+ * the lowered AST and `invalidPropertyNodes` when lowering-time `SYNTAX_ERROR`s occur.
  */
-export function parseQuery(input: string, resolvedConfig?: ResolvedEngineConfig): ParseQueryResult {
+export function parseAndLowerQuery(input: string): ParseAndLowerResult {
 	if (input.length > MAX_QUERY_LENGTH) {
 		return {
 			ast: null,
@@ -305,6 +314,7 @@ export function parseQuery(input: string, resolvedConfig?: ResolvedEngineConfig)
 					},
 				},
 			],
+			invalidPropertyNodes: EMPTY_INVALID_PROP_NODES,
 		};
 	}
 
@@ -324,6 +334,7 @@ export function parseQuery(input: string, resolvedConfig?: ResolvedEngineConfig)
 					startColumn: err.column ?? 1,
 				},
 			})),
+			invalidPropertyNodes: EMPTY_INVALID_PROP_NODES,
 		};
 	}
 
@@ -338,9 +349,10 @@ export function parseQuery(input: string, resolvedConfig?: ResolvedEngineConfig)
 				diagnostics: sharedParser.errors.map((err) =>
 					recognitionExceptionToDiagnostic(err, input, lexResult.tokens),
 				),
+				invalidPropertyNodes: EMPTY_INVALID_PROP_NODES,
 			};
 		}
-		return lowerQueryCst(cst, resolvedConfig);
+		return lowerQueryCst(cst);
 	} catch (err) {
 		if (err instanceof MaxDepthExceededError) {
 			return {
@@ -358,6 +370,7 @@ export function parseQuery(input: string, resolvedConfig?: ResolvedEngineConfig)
 						),
 					},
 				],
+				invalidPropertyNodes: EMPTY_INVALID_PROP_NODES,
 			};
 		}
 		return {
@@ -371,6 +384,19 @@ export function parseQuery(input: string, resolvedConfig?: ResolvedEngineConfig)
 					span: endOfInputSpan(input),
 				},
 			],
+			invalidPropertyNodes: EMPTY_INVALID_PROP_NODES,
 		};
 	}
+}
+
+/**
+ * Lexes, parses, and lowers `input` into a `SearchAST` with syntactic limit enforcement (`4096` chars, depth `32`).
+ */
+export function parseQuery(input: string): ParseQueryResult {
+	const res = parseAndLowerQuery(input);
+	const hasError = res.diagnostics.some((d) => d.severity === 'error');
+	return {
+		ast: hasError ? null : res.ast,
+		diagnostics: res.diagnostics,
+	};
 }

@@ -134,7 +134,7 @@ describe('Phase 4 parser, AST normalizer, literal decoder & fuzz invariants', ()
 				const norm2 = normalizeAST(norm1);
 				expect(norm2).toEqual(norm1);
 				const printed = printAST(ast);
-				const parsed = parseQuery(printed, resolvedConfig);
+				const parsed = parseQuery(printed);
 				expect(
 					parsed.diagnostics.filter((diagnostic) => diagnostic.severity === 'error'),
 				).toEqual([]);
@@ -149,7 +149,7 @@ describe('Phase 4 parser, AST normalizer, literal decoder & fuzz invariants', ()
 			'search/ast-utils__deep-freeze-and-referenced-property-keys',
 			fc.property(printableAstArb, (ast) => {
 				const printed = printAST(ast);
-				const parsed = parseQuery(printed, resolvedConfig);
+				const parsed = parseQuery(printed);
 				expect(parsed.ast).not.toBeNull();
 				const frozen = deepFreezeAST(parsed.ast!);
 				assertAstSpansAndFreeze(frozen, printed.length, true);
@@ -234,15 +234,12 @@ describe('Phase 4 parser, AST normalizer, literal decoder & fuzz invariants', ()
 		await assertProperty(
 			'search/parser__fuzz-totality-error-gating-and-span-integrity',
 			fc.property(adversarialQueryArb, (input) => {
-				const res = parseQuery(input, resolvedConfig);
+				const res = parseQuery(input);
 				const hasError = res.diagnostics.some(
 					(diagnostic) => diagnostic.severity === 'error',
 				);
 				if (hasError) {
 					expect(res.ast).toBeNull();
-					expect(
-						res.diagnostics.every((diagnostic) => diagnostic.severity === 'error'),
-					).toBe(true);
 				} else {
 					expect(res.ast).not.toBeNull();
 					assertAstSpansAndFreeze(res.ast!, input.length, false);

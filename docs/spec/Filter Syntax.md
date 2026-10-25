@@ -9,7 +9,7 @@
 
 ### 1.1 Core Architectural Pillars
 
-1. **No Full-Text Body Search**: Queries operate strictly against file metadata (`TFile` attributes + normalized `CachedMetadata` + properties). Bare words without an operator match against `file.basename`, `file.path`, `aliases`, and `tags` (and emit `HINT_BARE_TEXT_NO_BODY`).
+1. **No Full-Text Body Search, `resolvedLinks`, or Backlinks**: Queries operate strictly against per-note file metadata (`TFile` attributes + normalized per-note `CachedMetadata` + properties). The DSL and normalizer do not ingest `MetadataCache.resolvedLinks` and do not support backlink queries (`backlink:`, `backlinks:`, `referencedLinks:`); only outgoing `links` and `embeds` recorded on the note itself are indexed. Bare words without an operator match against `file.basename`, `file.path`, `aliases`, and `tags` (and emit `HINT_BARE_TEXT_NO_BODY`).
 2. **Authorized Queries & Native ECMAScript `RegExp`**: This engine is intended for queries the vault owner has authorized for execution. It uses native ECMAScript regular expressions (`new RegExp(pattern, flags)` with stateless flags `i`, `m`, `s`, `u`) and deliberately provides no execution deadline or protection against pathological backtracking. Metadata strings are not length-bounded. Integrations must not treat imported or shared query text as trusted solely because it resides in a local vault.
 3. **Centralized, Runtime-Immutable Configuration & Normalization Fingerprinting (`initEngineConfig`)**:
    - Timezone validation, property-type registry normalization, and custom scope deduplication happen once in `initEngineConfig(rawConfig)`, returning a deeply frozen `ResolvedEngineConfig` closure.
@@ -201,7 +201,6 @@ export interface NormalizedDocument {
   headings: NormalizedHeading[];
   links: NormalizedLink[];                   // Outgoing links (body + frontmatterLinks, excluding embeds)
   embeds: NormalizedLink[];                  // Outgoing embeds
-  referencedLinks: string[];                 // Sorted, deduplicated source paths where resolvedLinks[src][path] > 0
   blocks: string[];                          // Lowercase block IDs with any leading '^' stripped
   propertyOccurrences: PropertyOccurrence[]; // Cache-level occurrence stream
   propertyKeys: string[];                    // Exact first-seen order of normalized property keys
@@ -416,8 +415,9 @@ export interface VaultEvaluationReport {
 | `headings`               | `headings`, `heading`, `header`, `headers` | `doc.headings.map(h => h.text)`                                                                                                        | Case-insensitive substring.                                                                     |
 | `links`                  | `links`, `link`, `outlink`, `outlinks`     | `doc.links.flatMap(l => l.resolvedPath ? [l.link, l.rawTarget, l.resolvedPath, l.displayText] : [l.link, l.rawTarget, l.displayText])` | Case-insensitive substring.                                                                     |
 | `embeds`                 | `embeds`, `embed`                          | `doc.embeds.flatMap(e => e.resolvedPath ? [e.link, e.rawTarget, e.resolvedPath] : [e.link, e.rawTarget])`                              | Case-insensitive substring.                                                                     |
-| `referencedLinks`        | `referencedlinks`, `backlink`, `backlinks` | `doc.referencedLinks`                                                                                                                  | Case-insensitive substring.                                                                     |
 | `blocks`                 | `blocks`, `block`                          | `doc.blocks`                                                                                                                           | Strips optional leading `^` from `queryValue`; case-insensitive **exact** equality (`t === q`). |
+
+- **No `resolvedLinks` or Backlink Scopes**: The DSL does not support `resolvedLinks` or backlink scopes (`backlink:`, `backlinks:`, `referencedLinks:`). Normalization and scoped filtering operate strictly on per-note metadata (`links` and `embeds` inspect only outgoing references from the note's own `CachedMetadata`).
 
 ### 2.4 Extended Temporal Model: ISO Literals, Relative `@` Anchors, Day Offsets & Positional Ranges (`[s1, e2)` Iff $s_1 < e_2$)
 
@@ -941,12 +941,6 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
         doc.embeds.flatMap((e) =>
           e.resolvedPath ? [e.link, e.rawTarget, e.resolvedPath] : [e.link, e.rawTarget]
         ),
-      matchString: substringStringMatch
-    },
-    {
-      canonicalName: 'referencedLinks',
-      aliases: Object.freeze(['referencedlinks', 'backlink', 'backlinks']),
-      extract: (doc: NormalizedDocument) => doc.referencedLinks,
       matchString: substringStringMatch
     },
     {
@@ -1723,7 +1717,6 @@ export function normalizeObsidianMetadata(
   } | null,
   resolvedConfig: ResolvedEngineConfig,
   inlineProperties: Array<{ key: string; value: unknown; line?: number | null }> = [],
-  resolvedLinksSnapshot: Record<string, Record<string, number>> = {},
   resolveLinkPath?: (rawTarget: string, sourcePath: string) => string | null
 ): NormalizedDocument {
   const { timeZone, propertyTypes, normalizationFingerprint } = resolvedConfig;
@@ -1902,13 +1895,6 @@ export function normalizeObsidianMetadata(
   ];
   const embeds = (cache?.embeds ?? []).map((e) => normalizeLink(e, 'embed'));
 
-  const incomingSet = new Set<string>();
-  for (const [sourcePath, targets] of Object.entries(resolvedLinksSnapshot)) {
-    if (targets && typeof targets[tfile.path] === 'number' && targets[tfile.path] > 0) {
-      incomingSet.add(sourcePath);
-    }
-  }
-
   const ctime = validateIntegerTimestampMs(tfile.stat.ctime, 'ctime');
   const mtime = validateIntegerTimestampMs(tfile.stat.mtime, 'mtime');
   if (!Number.isSafeInteger(tfile.stat.size) || tfile.stat.size < 0) {
@@ -1933,7 +1919,6 @@ export function normalizeObsidianMetadata(
     })),
     links,
     embeds,
-    referencedLinks: Array.from(incomingSet).sort(),
     blocks: Object.keys(cache?.blocks ?? {}).map((b) =>
       b.startsWith('^') ? b.slice(1).toLowerCase() : b.toLowerCase()
     ),

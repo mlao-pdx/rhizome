@@ -14,6 +14,7 @@ import type {
 } from './types';
 
 export interface ValidationResult {
+	readonly ast: SearchAST;
 	readonly diagnostics: SearchDiagnostic[];
 	readonly invalidPropertyNodes: ReadonlySet<PropertyFilterNode>;
 }
@@ -202,10 +203,11 @@ export function validateQueryAST(
 	ast: SearchAST,
 	resolvedConfig: ResolvedEngineConfig,
 	referenceTimeMs: number,
+	initialInvalidPropertyNodes?: ReadonlySet<PropertyFilterNode>,
 ): ValidationResult {
 	const diagnostics: SearchDiagnostic[] = [];
-	const invalidRegexPropNodes = new Set<PropertyFilterNode>();
-	const invalidPropertyNodes = new Set<PropertyFilterNode>();
+	const invalidRegexPropNodes = new Set<PropertyFilterNode>(initialInvalidPropertyNodes);
+	const invalidPropertyNodes = new Set<PropertyFilterNode>(initialInvalidPropertyNodes);
 
 	// Step 2: Validate every RegexLiteral leaf first (short-circuiting Step 4 on invalid regex in PropertyFilterNode)
 	function step2Traverse(node: SearchAST): void {
@@ -250,8 +252,8 @@ export function validateQueryAST(
 		}
 	}
 
-	// Step 3: Validate scopes
-	function step3Traverse(node: SearchAST): void {
+	// Step 3: Validate and canonicalize scopes
+	function step3Traverse(node: SearchAST): SearchAST {
 		switch (node.type) {
 			case 'SCOPED_FILTER': {
 				if (node.rawScope !== '#') {
@@ -264,18 +266,50 @@ export function validateQueryAST(
 							hint: suggestScopeHint(node.rawScope, resolvedConfig),
 							span: node.span ?? null,
 						});
+						return node;
+					}
+					if (node.scope !== scopeDef.canonicalName) {
+						return {
+							type: 'SCOPED_FILTER',
+							scope: scopeDef.canonicalName,
+							rawScope: node.rawScope,
+							expr: node.expr,
+							...(node.span ? { span: node.span } : {}),
+						};
 					}
 				}
-				return;
+				return node;
 			}
-			case 'NOT':
-				step3Traverse(node.child);
-				return;
-			case 'LOGICAL':
-				for (const child of node.children) step3Traverse(child);
-				return;
+			case 'NOT': {
+				const nextChild = step3Traverse(node.child);
+				if (nextChild === node.child) return node;
+				return {
+					type: 'NOT',
+					syntax: node.syntax,
+					child: nextChild,
+					...(node.span ? { span: node.span } : {}),
+				};
+			}
+			case 'LOGICAL': {
+				let changed = false;
+				const nextChildren = node.children.map((child) => {
+					const next = step3Traverse(child);
+					if (next !== child) changed = true;
+					return next;
+				});
+				if (!changed) return node;
+				return {
+					type: 'LOGICAL',
+					operator: node.operator,
+					children: nextChildren,
+					...(node.parenthesized !== undefined
+						? { parenthesized: node.parenthesized }
+						: {}),
+					...(node.span ? { span: node.span } : {}),
+				};
+			}
 			default:
-				return;
+				return node;
 		}
 	}
 
@@ -354,8 +388,8 @@ export function validateQueryAST(
 	}
 
 	step2Traverse(ast);
-	step3Traverse(ast);
-	step4Traverse(ast);
+	const resolvedAst = step3Traverse(ast);
+	step4Traverse(resolvedAst);
 
-	return { diagnostics, invalidPropertyNodes };
+	return { ast: resolvedAst, diagnostics, invalidPropertyNodes };
 }

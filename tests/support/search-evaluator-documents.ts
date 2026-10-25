@@ -100,7 +100,6 @@ export const documentInputArb = fc.record({
 	links: fc.array(linkArb, { maxLength: 3 }),
 	embeds: fc.array(linkArb, { maxLength: 3 }),
 	blocks: fc.array(textArb, { maxLength: 3 }),
-	backlinks: fc.array(fc.constantFrom('alpha.md', 'beta.md', 'work.md'), { maxLength: 3 }),
 });
 
 export type DocumentInput = typeof documentInputArb extends fc.Arbitrary<infer T> ? T : never;
@@ -185,7 +184,6 @@ export function evaluatorVault(
 					},
 			config,
 			input.inline,
-			Object.fromEntries(input.backlinks.map((source) => [source, { [path]: 1 }])),
 			(rawTarget) => (rawTarget === 'Missing' ? null : `Resolved/${rawTarget}.md`),
 		);
 	});

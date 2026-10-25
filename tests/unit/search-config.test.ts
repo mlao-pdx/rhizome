@@ -69,7 +69,6 @@ function createFixtureDoc(): NormalizedDocument {
 				source: 'embed',
 			},
 		],
-		referencedLinks: ['Index.md', 'Journal/2026-10-22.md'],
 		blocks: ['summary-block', 'decision-1'],
 		propertyOccurrences: [],
 		propertyKeys: [],
@@ -142,7 +141,7 @@ describe('BUILT_IN_SCOPES & substringStringMatch', () => {
 		expect(substringStringMatch('Projects/Active/Sprint-12.md', 'ARCHIVE')).toBe(false);
 	});
 
-	it('resolves all 10 built-in scopes and their aliases case-insensitively', () => {
+	it('resolves all 9 built-in scopes and their aliases case-insensitively', () => {
 		const res = initEngineConfig();
 		expect(res.ok).toBe(true);
 		if (!res.ok) return;
@@ -156,7 +155,6 @@ describe('BUILT_IN_SCOPES & substringStringMatch', () => {
 			['headings', ['headings', 'heading', 'header', 'headers']],
 			['links', ['links', 'link', 'outlink', 'outlinks']],
 			['embeds', ['embeds', 'embed']],
-			['referencedLinks', ['referencedlinks', 'backlink', 'backlinks']],
 			['blocks', ['blocks', 'block']],
 		];
 
@@ -169,6 +167,9 @@ describe('BUILT_IN_SCOPES & substringStringMatch', () => {
 			}
 		}
 		expect(res.config.getScope('nonexistent')).toBeUndefined();
+		expect(res.config.getScope('backlink')).toBeUndefined();
+		expect(res.config.getScope('backlinks')).toBeUndefined();
+		expect(res.config.getScope('referencedLinks')).toBeUndefined();
 	});
 
 	it('extracts and matches file, path, and ext scopes accurately', () => {
@@ -206,7 +207,7 @@ describe('BUILT_IN_SCOPES & substringStringMatch', () => {
 		expect(tagScope.matchString('#project', 'proj', false)).toBe(false);
 	});
 
-	it('extracts and matches aliases, headings, links, embeds, referencedLinks, and blocks', () => {
+	it('extracts and matches aliases, headings, links, embeds, and blocks', () => {
 		const res = initEngineConfig();
 		if (!res.ok) throw new Error('Expected ok config');
 
@@ -239,10 +240,6 @@ describe('BUILT_IN_SCOPES & substringStringMatch', () => {
 			'MissingEmbed.png',
 		]);
 		expect(embedsScope.matchString('Assets/Diagrams/Arch.png', 'arch.png', false)).toBe(true);
-
-		const backlinksScope = res.config.getScope('backlink')!;
-		expect(backlinksScope.extract(doc)).toEqual(['Index.md', 'Journal/2026-10-22.md']);
-		expect(backlinksScope.matchString('Journal/2026-10-22.md', 'journal/', false)).toBe(true);
 
 		const blocksScope = res.config.getScope('block')!;
 		expect(blocksScope.extract(doc)).toEqual(['summary-block', 'decision-1']);

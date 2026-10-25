@@ -4,7 +4,6 @@ import {
 	coercePropertyValue,
 	FORBIDDEN_KEYS,
 	initEngineConfig,
-	isCleanSanitizedScalar,
 	isVirtualFileKey,
 	normalizeObsidianMetadata,
 	resolveQueryPropertyType,
@@ -13,7 +12,6 @@ import {
 	VIRTUAL_FILE_KEYS_LIST,
 	type DocumentDiagnostic,
 	type InlinePropertyInput,
-	type NormalizedDocument,
 	type ObsidianPropertyType,
 	type PropertyTypeRegistry,
 } from '../../src/core/search';
@@ -166,7 +164,6 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						},
 						resolvedConfig,
 						inlineProps,
-						{ 'Source.md': { 'Folder/Note.md': 1 } },
 						(target) => (target === 'Missing' ? null : `${target}.md`),
 					);
 
@@ -262,12 +259,15 @@ describe('search metadata normalizer & property coercion invariants', () => {
 				}
 				expect(doc.propertyKeys).toEqual(expectedKeys);
 
-				// 2. Single-occurrence vs multi-occurrence aggregation & reference sharing
+				// 2. Single-occurrence vs multi-occurrence aggregation & defensive copying
 				for (const k of doc.propertyKeys) {
 					const occs = occsByKey.get(k)!;
 					if (occs.length === 1) {
 						const singleOcc = occs[0]!;
-						expect(doc.properties[k]).toBe(singleOcc.rawValue);
+						expect(doc.properties[k]).toEqual(singleOcc.rawValue);
+						if (Array.isArray(singleOcc.rawValue)) {
+							expect(doc.properties[k]).not.toBe(singleOcc.rawValue);
+						}
 					} else {
 						const expectedConcat: unknown[] = [];
 						for (const occ of occs) {
@@ -282,16 +282,14 @@ describe('search metadata normalizer & property coercion invariants', () => {
 				}
 
 				// 3. Input frontmatter arrays are never mutated by multi-occurrence promotion,
-				//    and clean frontmatter arrays are shared by reference on their occurrence.
+				//    and occurrence.rawValue always defensively copies the input array.
 				for (const [rawKey, { ref, snapshot }] of originalFmArrays.entries()) {
 					expect(ref).toEqual(snapshot);
-					if (ref.every(isCleanSanitizedScalar)) {
-						const fmOcc = doc.propertyOccurrences.find(
-							(o) => o.source === 'frontmatter' && o.rawKey === rawKey,
-						);
-						if (fmOcc) {
-							expect(fmOcc.rawValue).toBe(ref);
-						}
+					const fmOcc = doc.propertyOccurrences.find(
+						(o) => o.source === 'frontmatter' && o.rawKey === rawKey,
+					);
+					if (fmOcc) {
+						expect(fmOcc.rawValue).not.toBe(ref);
 					}
 				}
 			}),
@@ -428,93 +426,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 		);
 	});
 
-	it('Lazy Getter Access-Order Independence & Memoization Invariant: all read orders produce identical documents and memoize references', async () => {
-		const configRes = initEngineConfig({
-			timeZone: 'UTC',
-			propertyTypes: { score: 'number', due: 'date' },
-		});
-		if (!configRes.ok) throw new Error('Expected valid config');
-		const resolvedConfig = configRes.config;
-
-		const lazyKeys = [
-			'aliases',
-			'tags',
-			'headings',
-			'links',
-			'embeds',
-			'referencedLinks',
-			'blocks',
-			'propertyKeys',
-			'properties',
-		] as const satisfies ReadonlyArray<keyof NormalizedDocument>;
-
-		const frontmatterEntriesArb = fc.array(
-			fc.tuple(fc.constantFrom('tags', 'aliases', 'score', 'due', 'foo'), propertyValueArb),
-			{ maxLength: 5 },
-		);
-		const inlineEntriesArb = fc.array(inlinePropArb, { maxLength: 5 });
-		const permArb = fc.shuffledSubarray([...lazyKeys], {
-			minLength: lazyKeys.length,
-			maxLength: lazyKeys.length,
-		});
-
-		await assertProperty(
-			'search/normalizer__lazy-getter-access-order-independence-and-memoization',
-			fc.property(
-				frontmatterEntriesArb,
-				inlineEntriesArb,
-				permArb,
-				(fmEntries, inlineProps, order) => {
-					const makeDoc = (): NormalizedDocument => {
-						const frontmatter: Record<string, unknown> = {};
-						for (const [k, v] of fmEntries) {
-							frontmatter[k] = Array.isArray(v) ? (v as unknown[]).slice() : v;
-						}
-						return normalizeObsidianMetadata(
-							{
-								path: 'Notes/Lazy.md',
-								name: 'Lazy.md',
-								basename: 'Lazy',
-								extension: 'md',
-								parent: { path: 'Notes' },
-								stat: { ctime: 1000, mtime: 2000, size: 64 },
-							},
-							{
-								frontmatter,
-								tags: [{ tag: 'TagA' }, { tag: '#TagB' }],
-								headings: [{ heading: 'Intro', level: 2 }],
-								links: [{ link: '#Intro' }, { link: 'Target#Sec' }],
-								embeds: [{ link: 'Img.png' }],
-								blocks: { '^blk-1': { id: 'blk-1' } },
-							},
-							resolvedConfig,
-							inlineProps,
-							{ 'Back.md': { 'Notes/Lazy.md': 1 } },
-							(raw) => `${raw}.md`,
-						);
-					};
-
-					const docPermuted = makeDoc();
-					const firstReads = new Map<keyof NormalizedDocument, unknown>();
-					for (const k of order) {
-						firstReads.set(k, docPermuted[k]);
-					}
-					// Second read of every lazy getter must return the exact same memoized reference
-					for (const k of lazyKeys) {
-						expect(docPermuted[k]).toBe(firstReads.get(k));
-					}
-
-					// Compare against a fresh doc materialized via JSON.stringify first (and properties-before-propertyKeys)
-					const docJsonFirst = makeDoc();
-					const jsonSnapshot = JSON.parse(JSON.stringify(docJsonFirst)) as unknown;
-					expect(docPermuted).toEqual(jsonSnapshot);
-					expect(Object.keys(docPermuted)).toEqual(Object.keys(docJsonFirst));
-				},
-			),
-		);
-	});
-
-	it('Normalized Collection & Link Split Invariant: tags, headings, blocks, referencedLinks, links, and embeds satisfy structural bounds', async () => {
+	it('Normalized Collection & Link Split Invariant: tags, headings, blocks, links, and embeds satisfy structural bounds', async () => {
 		const configRes = initEngineConfig({ timeZone: 'UTC', propertyTypes: {} });
 		if (!configRes.ok) throw new Error('Expected valid config');
 		const resolvedConfig = configRes.config;
@@ -553,12 +465,6 @@ describe('search metadata normalizer & property coercion invariants', () => {
 			fc.constant({ id: 'x' }),
 			{ maxKeys: 6 },
 		);
-		const backlinksArb = fc.dictionary(
-			fc.string({ minLength: 1, maxLength: 12 }),
-			fc.record({ 'Notes/Doc.md': fc.integer({ min: -2, max: 5 }) }),
-			{ maxKeys: 6 },
-		);
-
 		await assertProperty(
 			'search/normalizer__collection-and-link-split-invariants',
 			fc.property(
@@ -567,8 +473,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 				headingsArb,
 				linksArb,
 				blocksArb,
-				backlinksArb,
-				(tags, fmTags, headings, links, blocks, resolvedLinks) => {
+				(tags, fmTags, headings, links, blocks) => {
 					const doc = normalizeObsidianMetadata(
 						{
 							path: 'Notes/Doc.md',
@@ -588,7 +493,6 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						},
 						resolvedConfig,
 						[],
-						resolvedLinks,
 						(target) => `Resolved/${target}.md`,
 					);
 
@@ -615,16 +519,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						expect(b).toBe(b.toLowerCase());
 					}
 
-					// 4. referencedLinks: strictly sorted & deduplicated, and only includes positive counts
-					for (let i = 0; i < doc.referencedLinks.length; i++) {
-						const src = doc.referencedLinks[i]!;
-						expect(resolvedLinks[src]?.['Notes/Doc.md']).toBeGreaterThan(0);
-						if (i > 0) {
-							expect(doc.referencedLinks[i - 1]! < src).toBe(true);
-						}
-					}
-
-					// 5. links & embeds: self-link vs target+subpath decomposition
+					// 4. links & embeds: self-link vs target+subpath decomposition
 					for (const l of [...doc.links, ...doc.embeds]) {
 						if (l.link.startsWith('#') || l.link.startsWith('^')) {
 							expect(l.rawTarget).toBe('Notes/Doc.md');

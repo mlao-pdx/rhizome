@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	ALL_TOKENS,
 	collectReferencedPropertyKeys,
+	compileQuery,
 	containsRegexLeaf,
 	decodeQuotedString,
 	decodeRegexLiteral,
@@ -238,7 +239,7 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 		).toBe(true);
 	});
 
-	it('resolves scope aliases using resolvedConfig when provided and preserves unknown scope names for Phase 5 validation', () => {
+	it('normalizes built-in aliases during parsing and custom aliases during compilation', () => {
 		const cfgRes = initEngineConfig({
 			timeZone: 'UTC',
 			propertyTypes: {},
@@ -253,8 +254,19 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 		});
 		if (!cfgRes.ok) throw new Error('Expected valid config');
 
-		const customRes = parseQuery('todo:urgent', cfgRes.config);
+		const customRes = parseQuery('todo:urgent');
 		expect(customRes.ast).toMatchObject({
+			type: 'SCOPED_FILTER',
+			scope: 'todo',
+			rawScope: 'todo',
+		});
+		const compiled = compileQuery(
+			'todo:urgent',
+			cfgRes.config,
+			Date.parse('2026-10-22T15:30:00.000Z'),
+		);
+		expect(compiled.executable).toBe(true);
+		expect(compiled.ast).toMatchObject({
 			type: 'SCOPED_FILTER',
 			scope: 'tasks',
 			rawScope: 'todo',
@@ -267,7 +279,7 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 			rawScope: 'filename',
 		});
 
-		const unknownRes = parseQuery('unknownScope:val', cfgRes.config);
+		const unknownRes = parseQuery('unknownScope:val');
 		expect(unknownRes.ast).toMatchObject({
 			type: 'SCOPED_FILTER',
 			scope: 'unknownScope',
@@ -387,19 +399,25 @@ describe('Resource Limits & Syntax Error Boundaries', () => {
 		});
 	});
 
-	it('rejects empty WikiLinkValue targets and empty PropertyKeys with SYNTAX_ERROR and discards non-error hints', () => {
+	it('rejects empty WikiLinkValue targets and empty PropertyKeys with SYNTAX_ERROR and preserves non-error hints', () => {
 		for (const badWiki of [
 			'links:[[]]',
 			'links:[[   ]]',
 			'links:[[|Custom Label]]',
 			'links:[[   |Label]]',
-			'links:[[Notes/A]] AND links:[[|alias]]',
 		]) {
 			const res = parseQuery(badWiki);
 			expect(res.ast).toBeNull();
 			expect(res.diagnostics).toHaveLength(1);
 			expect(res.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
 		}
+
+		const mixedWiki = parseQuery('links:[[Notes/A]] AND links:[[|alias]]');
+		expect(mixedWiki.ast).toBeNull();
+		expect(mixedWiki.diagnostics.map((d) => d.code)).toEqual([
+			'HINT_WIKILINK_BRACKETS_IN_SCOPE',
+			'SYNTAX_ERROR',
+		]);
 
 		for (const badProp of ['[""]', '["   " = 1]', "['']"]) {
 			const res = parseQuery(badProp);
@@ -427,19 +445,30 @@ describe('Resource Limits & Syntax Error Boundaries', () => {
 			},
 		]);
 
-		// Suppressed cases: explicit AND, quoted scope value, parenthesized scope, parenthesized RHS, tag shorthand, next line
+		// Suppressed cases: explicit AND, quoted scope value, parenthesized scope, next line
 		for (const cleanQuery of [
 			'headings:Action AND Items',
 			'headings:"Action Items"',
-			'(headings:Action) Items',
-			'headings:(Action) Items',
-			'#work urgent',
 			'headings:Action\nItems',
 		]) {
 			const res = parseQuery(cleanQuery);
 			expect(res.ast).not.toBeNull();
 			expect(res.diagnostics).toEqual([]);
 		}
+	});
+
+	it('emits WARN_UNQUOTED_MULTIWORD_SCOPE from AST structure alone (including custom/unverified scopes and parenthesized unquoted leaf)', () => {
+		const customScopeRes = parseQuery('task:Action Items');
+		expect(customScopeRes.ast).not.toBeNull();
+		expect(customScopeRes.diagnostics.map((d) => d.code)).toEqual([
+			'WARN_UNQUOTED_MULTIWORD_SCOPE',
+		]);
+
+		const parenLeafRes = parseQuery('headings:(Action) Items');
+		expect(parenLeafRes.ast).not.toBeNull();
+		expect(parenLeafRes.diagnostics.map((d) => d.code)).toEqual([
+			'WARN_UNQUOTED_MULTIWORD_SCOPE',
+		]);
 	});
 });
 

@@ -168,7 +168,7 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 	it('keeps empty scopes false under inner NOT while outer NOT negates the empty scope result', () => {
 		const config = makeConfig();
 		const docs = [makeDoc(config, 'empty.md')];
-		for (const q of 'headings:(NOT intro);links:(-target);embeds:(-diagram);blocks:(-blk);aliases:(-aka);tag:(-work);backlinks:(-source)'.split(
+		for (const q of 'headings:(NOT intro);links:(-target);embeds:(-diagram);blocks:(-blk);aliases:(-aka);tag:(-work)'.split(
 			';',
 		)) {
 			assertEval(docs, q, config, []);

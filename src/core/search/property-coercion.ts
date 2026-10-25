@@ -50,19 +50,6 @@ function invalidValue(
 }
 
 /**
- * Checks whether a value is already a clean `SanitizedScalar` (`string`, finite `number`,
- * `boolean`, or `null`) that can be shared without allocation or conversion.
- */
-export function isCleanSanitizedScalar(item: unknown): item is SanitizedScalar {
-	return (
-		item === null ||
-		typeof item === 'string' ||
-		typeof item === 'boolean' ||
-		(typeof item === 'number' && Number.isFinite(item) && !Object.is(item, -0))
-	);
-}
-
-/**
  * Sanitizes an arbitrary property value or list item into a JSON-safe `SanitizedScalar`.
  * Non-scalar objects, nested arrays, functions, and symbols return `{ valid: false, scalar: null }`.
  */
@@ -263,7 +250,7 @@ export function resolveQueryPropertyType(
 
 /**
  * Builds the `propertyKeys` and null-prototype `properties` views from `propertyOccurrences`.
- * Shares single-occurrence array values by reference and promotes multi-occurrence keys via copy-on-write.
+ * Defensively copies single-occurrence array values and promotes multi-occurrence keys into 1-level concatenated arrays.
  */
 export function buildPropertiesViews(occurrences: readonly PropertyOccurrence[]): {
 	propertyKeys: string[];
@@ -277,17 +264,18 @@ export function buildPropertiesViews(occurrences: readonly PropertyOccurrence[])
 		if (FORBIDDEN_KEYS.has(key)) continue;
 		if (!(key in out)) {
 			propertyKeys.push(key);
-			out[key] = rawValue;
-		} else {
-			let targetArr: unknown[];
-			if (promotedKeys.has(key)) {
-				targetArr = out[key] as unknown[];
+			if (Array.isArray(rawValue)) {
+				out[key] = [...rawValue];
+				promotedKeys.add(key);
 			} else {
-				const prev = out[key];
-				targetArr = Array.isArray(prev) ? (prev as unknown[]).slice() : [prev];
-				out[key] = targetArr;
+				out[key] = rawValue;
+			}
+		} else {
+			if (!promotedKeys.has(key)) {
+				out[key] = [out[key]];
 				promotedKeys.add(key);
 			}
+			const targetArr = out[key] as unknown[];
 			if (Array.isArray(rawValue)) {
 				for (const item of rawValue) targetArr.push(item);
 			} else {

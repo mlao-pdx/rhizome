@@ -4,6 +4,10 @@ export function substringStringMatch(target: string, queryValue: string): boolea
 	return target.toLowerCase().includes(queryValue.toLowerCase());
 }
 
+/**
+ * The 9 built-in per-note metadata scopes (`file`, `path`, `ext`, `tag`, `aliases`,
+ * `headings`, `links`, `embeds`, `blocks`). Backlinks and `resolvedLinks` are not supported.
+ */
 export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
 	[
 		{
@@ -69,12 +73,6 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
 				doc.embeds.flatMap((e) =>
 					e.resolvedPath ? [e.link, e.rawTarget, e.resolvedPath] : [e.link, e.rawTarget],
 				),
-			matchString: substringStringMatch,
-		},
-		{
-			canonicalName: 'referencedLinks',
-			aliases: Object.freeze(['referencedlinks', 'backlink', 'backlinks']),
-			extract: (doc: NormalizedDocument) => doc.referencedLinks,
 			matchString: substringStringMatch,
 		},
 		{

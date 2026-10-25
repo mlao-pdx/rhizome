@@ -97,6 +97,36 @@ describe('Step 1 & 2: SYNTAX_ERROR diagnostics', () => {
 		}
 	});
 
+	it('preserves non-error diagnostics alongside lowering-time SYNTAX_ERRORs and short-circuits invalid PropertyFilterNodes', () => {
+		const wikiAndErr = compileQuery(
+			'links:[[Notes/A|Alias]] AND links:[[|alias]]',
+			config,
+			PINNED_REF_MS,
+		);
+		expect(wikiAndErr.executable).toBe(false);
+		expect(wikiAndErr.ast).toBeNull();
+		expect(wikiAndErr.prepared).toBeNull();
+		expect(wikiAndErr.diagnostics.map((d) => d.code)).toEqual([
+			'HINT_WIKILINK_BRACKETS_IN_SCOPE',
+			'SYNTAX_ERROR',
+		]);
+
+		const bareTextAndErr = compileQuery('roadmap AND [""]', config, PINNED_REF_MS);
+		expect(bareTextAndErr.executable).toBe(false);
+		expect(bareTextAndErr.ast).toBeNull();
+		expect(bareTextAndErr.prepared).toBeNull();
+		expect(bareTextAndErr.diagnostics.map((d) => d.code)).toEqual([
+			'SYNTAX_ERROR',
+			'HINT_BARE_TEXT_NO_BODY',
+		]);
+
+		const emptyKeyNeq = compileQuery('["" != high]', config, PINNED_REF_MS);
+		expect(emptyKeyNeq.executable).toBe(false);
+		expect(emptyKeyNeq.ast).toBeNull();
+		expect(emptyKeyNeq.prepared).toBeNull();
+		expect(emptyKeyNeq.diagnostics.map((d) => d.code)).toEqual(['SYNTAX_ERROR']);
+	});
+
 	it('Conformance Test 4: disambiguates path:"/projects/active" vs path:/projects/active vs path:Projects/Active/Archive', () => {
 		const quotedRes = compileQuery('path:"/projects/active"', config, PINNED_REF_MS);
 		expect(quotedRes.executable).toBe(true);
@@ -159,15 +189,16 @@ describe('Step 3: Scope resolution & suggestions (ERROR_UNKNOWN_SCOPE)', () => {
 		expect(suggestScopeHint('zzzzzz', config)).toBeNull();
 	});
 
-	it('emits ERROR_UNKNOWN_SCOPE without spurious WARN_UNQUOTED_MULTIWORD_SCOPE on unknown scopes', () => {
+	it('emits ERROR_UNKNOWN_SCOPE with lowering and linter diagnostics on unknown scopes', () => {
 		const typoRes = compileQuery('hedings:Action Items', config, PINNED_REF_MS);
 		expect(typoRes.executable).toBe(false);
 		expect(typoRes.ast).toBeNull();
 		expect(typoRes.prepared).toBeNull();
-		expect(typoRes.diagnostics.some((d) => d.code === 'ERROR_UNKNOWN_SCOPE')).toBe(true);
-		expect(typoRes.diagnostics.some((d) => d.code === 'WARN_UNQUOTED_MULTIWORD_SCOPE')).toBe(
-			false,
-		);
+		expect(typoRes.diagnostics.map((d) => d.code)).toEqual([
+			'WARN_UNQUOTED_MULTIWORD_SCOPE',
+			'ERROR_UNKNOWN_SCOPE',
+			'HINT_BARE_TEXT_NO_BODY',
+		]);
 		const scopeErr = typoRes.diagnostics.find((d) => d.code === 'ERROR_UNKNOWN_SCOPE')!;
 		expect(scopeErr.issue).toBe('Unknown search scope "hedings:".');
 		expect(scopeErr.hint).toBe('Did you mean "headings:"?');

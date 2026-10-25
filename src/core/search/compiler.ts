@@ -1,6 +1,6 @@
 import { deepFreezeAST } from './ast-utils';
 import { lintQueryAST } from './linter';
-import { parseQuery } from './parser';
+import { parseAndLowerQuery } from './parser';
 import { isValidReferenceTimeMs } from './temporal';
 import type { CompileResult, PreparedQuery, ResolvedEngineConfig } from './types';
 import { validateQueryAST } from './validator';
@@ -32,9 +32,8 @@ export function compileQuery(
 	}
 
 	// Step 1: Check length & lex/parse
-	const parsed = parseQuery(input, resolvedConfig);
-	const hasParseError = parsed.diagnostics.some((d) => d.severity === 'error');
-	if (!parsed.ast || hasParseError) {
+	const parsed = parseAndLowerQuery(input);
+	if (!parsed.ast) {
 		return {
 			ast: null,
 			prepared: null,
@@ -44,14 +43,14 @@ export function compileQuery(
 	}
 
 	// Steps 2-4: Semantic validation
-	const { diagnostics: valDiagnostics, invalidPropertyNodes } = validateQueryAST(
-		parsed.ast,
-		resolvedConfig,
-		referenceTimeMs,
-	);
+	const {
+		ast: resolvedAst,
+		diagnostics: valDiagnostics,
+		invalidPropertyNodes,
+	} = validateQueryAST(parsed.ast, resolvedConfig, referenceTimeMs, parsed.invalidPropertyNodes);
 
 	// Step 5: Non-blocking linter pass
-	const lintDiagnostics = lintQueryAST(parsed.ast, invalidPropertyNodes);
+	const lintDiagnostics = lintQueryAST(resolvedAst, invalidPropertyNodes);
 
 	// Step 6: Global compile gate & deep freeze
 	const diagnostics = [...parsed.diagnostics, ...valDiagnostics, ...lintDiagnostics];
@@ -65,7 +64,7 @@ export function compileQuery(
 		};
 	}
 
-	const frozenAst = deepFreezeAST(parsed.ast);
+	const frozenAst = deepFreezeAST(resolvedAst);
 	const prepared: PreparedQuery = Object.freeze({
 		__brand: 'PreparedQuery' as const,
 		ast: frozenAst,
