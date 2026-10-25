@@ -60,7 +60,11 @@ const scalarArb = fc.oneof(
 		' TRUE ',
 	),
 );
-const rawValueArb = fc.oneof(scalarArb, fc.array(scalarArb, { maxLength: 4 }));
+const rawValueArb = fc.oneof(
+	scalarArb,
+	fc.array(scalarArb, { maxLength: 4 }),
+	fc.array(fc.array(scalarArb, { maxLength: 2 }), { maxLength: 2 }),
+);
 const linkArb = fc.record({
 	link: fc.oneof(
 		textArb,
