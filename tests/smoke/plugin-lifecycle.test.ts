@@ -43,7 +43,7 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		expect(plugin.loggerAdapter.logsFolderPath).toBe('_rhizome/logs');
 	});
 
-	it('query() evaluates against the vault and returns matches and paths', async () => {
+	it('query() evaluates against the vault and returns { context, diagnostics, matches }', async () => {
 		const app = createMockApp() as App;
 		const mockFile = {
 			path: 'notes/alpha.md',
@@ -63,7 +63,50 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		const plugin = new RhizomePlugin(app, manifest);
 		await plugin.onload();
 
-		const result = await plugin.query('#project [status: active]');
+		const result = await plugin.query('#project [status: active]', {
+			timeZone: 'UTC',
+			referenceTimeMs: 1700000000000,
+		});
+		expect(result.context).toEqual({
+			timeZone: 'UTC',
+			referenceTimeMs: 1700000000000,
+			propertyTypes: {},
+		});
+		expect(result.diagnostics).toEqual({
+			executable: true,
+			findings: [],
+		});
+		expect(result.matches).toHaveLength(1);
+		expect(result.matches[0]?.file.path).toBe('notes/alpha.md');
+		expect('paths' in result).toBe(false);
+		expect('propertyDiagnostics' in result).toBe(false);
+
+		const matchAllResult = await plugin.query();
+		expect(matchAllResult.diagnostics.executable).toBe(true);
+		expect(matchAllResult.matches.map((doc) => doc.file.path)).toEqual(['notes/alpha.md']);
+	});
+
+	it('diagnoseQuery() evaluates against the vault and returns matches, paths, and propertyDiagnostics', async () => {
+		const app = createMockApp() as App;
+		const mockFile = {
+			path: 'notes/alpha.md',
+			name: 'alpha.md',
+			basename: 'alpha',
+			extension: 'md',
+			parent: { path: 'notes' },
+			stat: { ctime: 1700000000000, mtime: 1700000000000, size: 120 },
+		};
+		app.vault.getMarkdownFiles = () => [mockFile as never];
+		app.metadataCache.getFileCache = () => ({
+			frontmatter: { status: 'active' },
+			tags: [{ tag: '#project', position: {} as never }],
+		});
+
+		const manifest = createMockManifest() as PluginManifest;
+		const plugin = new RhizomePlugin(app, manifest);
+		await plugin.onload();
+
+		const result = await plugin.diagnoseQuery('#project [status: active]');
 		expect(result.executable).toBe(true);
 		expect(result.paths).toEqual(['notes/alpha.md']);
 		expect(result.matches).toHaveLength(1);
@@ -71,7 +114,7 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		expect(result.diagnostics).toEqual([]);
 		expect(result.propertyDiagnostics).toEqual([]);
 
-		const matchAllResult = await plugin.query();
+		const matchAllResult = await plugin.diagnoseQuery();
 		expect(matchAllResult.executable).toBe(true);
 		expect(matchAllResult.paths).toEqual(['notes/alpha.md']);
 	});

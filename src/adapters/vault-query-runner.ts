@@ -6,6 +6,7 @@ import {
 	FORBIDDEN_KEYS,
 	initEngineConfig,
 	isValidPropertyType,
+	isValidReferenceTimeMs,
 	type NormalizedDocument,
 	normalizeObsidianMetadata,
 	type PropertyTypeRegistry,
@@ -16,21 +17,58 @@ import {
 const BUILTIN_PROPERTY_KEYS: ReadonlySet<string> = new Set(['alias', 'aliases', 'tag', 'tags']);
 
 /**
- * Options for running a vault query via `runVaultQuery` or `plugin.query`.
+ * Options for running or diagnosing a vault query.
  */
 export interface VaultQueryOptions {
 	/** Optional IANA timezone override (defaults to system timezone, falling back to 'UTC'). */
-	readonly timeZone?: string;
+	readonly timeZone?: string | undefined;
 	/** Optional property-type overrides merged on top of `.obsidian/types.json`. */
-	readonly propertyTypes?: PropertyTypeRegistry;
+	readonly propertyTypes?: PropertyTypeRegistry | undefined;
 	/** Optional reference timestamp in UTC epoch ms for `@` relative date anchors (defaults to `Date.now()`). */
-	readonly referenceTimeMs?: number;
+	readonly referenceTimeMs?: number | undefined;
+}
+
+/**
+ * Run-level environment context returned by `runVaultQuery` and `plugin.query`.
+ */
+export interface VaultQueryContext {
+	/** Resolved IANA timezone used for query compilation and date coercion (trimmed). */
+	readonly timeZone: string;
+	/**
+	 * Reference timestamp in UTC epoch ms for `@` relative date anchors,
+	 * or `null` if an invalid `referenceTimeMs` override was supplied.
+	 */
+	readonly referenceTimeMs: number | null;
+	/** Active normalized property-type registry (merged `.obsidian/types.json` and `options.propertyTypes`). */
+	readonly propertyTypes: Readonly<PropertyTypeRegistry>;
+}
+
+/**
+ * Query compilation and lint diagnostics returned by `runVaultQuery` and `plugin.query`.
+ */
+export interface QueryDiagnostics {
+	/** Whether the engine config and query compiled without errors and was evaluated against the vault. */
+	readonly executable: boolean;
+	/** Query lexer, parser, validator, config, and linter findings. */
+	readonly findings: SearchDiagnostic[];
 }
 
 /**
  * Result returned by `runVaultQuery` and `plugin.query`.
  */
 export interface VaultQueryResult {
+	/** Run-level environment context (frozen, JSON-safe POJO). */
+	readonly context: VaultQueryContext;
+	/** Query compilation and lint diagnostics. */
+	readonly diagnostics: QueryDiagnostics;
+	/** Matched Markdown notes in vault evaluation order. */
+	readonly matches: NormalizedDocument[];
+}
+
+/**
+ * Exhaustive query and document diagnostic result returned by `diagnoseVaultQuery` and `plugin.diagnoseQuery`.
+ */
+export interface DiagnoseVaultQueryResult {
 	/** Whether the query compiled without errors and was evaluated against the vault. */
 	readonly executable: boolean;
 	/** Vault-relative paths of all matching Markdown notes, in vault evaluation order. */
@@ -111,6 +149,59 @@ function resolveDefaultTimeZone(): string {
 	}
 }
 
+function mergePropertyTypes(
+	vaultTypes: PropertyTypeRegistry,
+	overrides?: PropertyTypeRegistry,
+): PropertyTypeRegistry {
+	if (overrides === undefined || typeof overrides !== 'object' || overrides === null) {
+		return vaultTypes;
+	}
+
+	const shadowedKeys = new Set<string>();
+	for (const rawKey of Object.keys(overrides)) {
+		const normalizedKey = rawKey.trim().toLowerCase();
+		if (normalizedKey && !FORBIDDEN_KEYS.has(normalizedKey) && !FORBIDDEN_KEYS.has(rawKey)) {
+			shadowedKeys.add(normalizedKey);
+		}
+	}
+
+	const merged = Object.create(null) as PropertyTypeRegistry;
+	for (const [key, val] of Object.entries(vaultTypes)) {
+		if (!shadowedKeys.has(key.trim().toLowerCase())) {
+			merged[key] = val;
+		}
+	}
+	for (const [rawKey, val] of Object.entries(overrides)) {
+		const normalizedKey = rawKey.trim().toLowerCase();
+		if (FORBIDDEN_KEYS.has(rawKey) || FORBIDDEN_KEYS.has(normalizedKey)) {
+			continue;
+		}
+		merged[rawKey] = val;
+	}
+
+	return merged;
+}
+
+function sanitizeFallbackPropertyTypes(
+	rawTypes: PropertyTypeRegistry,
+): Readonly<PropertyTypeRegistry> {
+	const fallback = Object.create(null) as PropertyTypeRegistry;
+	for (const [rawKey, propType] of Object.entries(rawTypes)) {
+		const key = rawKey.trim().toLowerCase();
+		if (!key || FORBIDDEN_KEYS.has(key) || FORBIDDEN_KEYS.has(rawKey)) {
+			continue;
+		}
+		if (!isValidPropertyType(propType)) {
+			continue;
+		}
+		if (Object.prototype.hasOwnProperty.call(fallback, key)) {
+			continue;
+		}
+		fallback[key] = propType;
+	}
+	return Object.freeze(fallback);
+}
+
 /**
  * Compiles a search query, normalizes all Markdown notes in the vault, and evaluates the query.
  */
@@ -120,11 +211,88 @@ export async function runVaultQuery(
 	options?: VaultQueryOptions,
 ): Promise<VaultQueryResult> {
 	const timeZone = options?.timeZone !== undefined ? options.timeZone : resolveDefaultTimeZone();
+	const rawRefTimeMs = options?.referenceTimeMs ?? Date.now();
+	const validRefTimeMs = isValidReferenceTimeMs(rawRefTimeMs) ? rawRefTimeMs : null;
+
 	const vaultTypes = await loadVaultPropertyTypes(app);
-	const mergedTypes: PropertyTypeRegistry =
-		options?.propertyTypes !== undefined
-			? { ...vaultTypes, ...options.propertyTypes }
-			: vaultTypes;
+	const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
+
+	const configResult = initEngineConfig({
+		timeZone,
+		propertyTypes: mergedTypes,
+	});
+	if (!configResult.ok) {
+		const context: VaultQueryContext = Object.freeze({
+			timeZone: typeof timeZone === 'string' ? timeZone.trim() : '',
+			referenceTimeMs: validRefTimeMs,
+			propertyTypes: sanitizeFallbackPropertyTypes(mergedTypes),
+		});
+		return {
+			context,
+			diagnostics: {
+				executable: false,
+				findings: [...configResult.diagnostics],
+			},
+			matches: [],
+		};
+	}
+
+	const context: VaultQueryContext = Object.freeze({
+		timeZone: configResult.config.timeZone,
+		referenceTimeMs: validRefTimeMs,
+		propertyTypes: configResult.config.propertyTypes,
+	});
+
+	const compileResult = compileQuery(input, configResult.config, rawRefTimeMs);
+	if (!compileResult.executable || !compileResult.prepared) {
+		return {
+			context,
+			diagnostics: {
+				executable: false,
+				findings: compileResult.diagnostics,
+			},
+			matches: [],
+		};
+	}
+
+	const resolveLinkPath: ResolveLinkPathFn = (rawTarget, sourcePath) =>
+		app.metadataCache.getFirstLinkpathDest(rawTarget, sourcePath)?.path ?? null;
+
+	const docs: NormalizedDocument[] = app.vault
+		.getMarkdownFiles()
+		.map((file) =>
+			normalizeObsidianMetadata(
+				file,
+				app.metadataCache.getFileCache(file),
+				configResult.config,
+				[],
+				resolveLinkPath,
+			),
+		);
+
+	const report = evaluateVault(docs, compileResult.prepared);
+
+	return {
+		context,
+		diagnostics: {
+			executable: true,
+			findings: compileResult.diagnostics,
+		},
+		matches: report.matches,
+	};
+}
+
+/**
+ * Compiles a search query, evaluates it against the vault, and returns exhaustive query and document property diagnostics.
+ */
+export async function diagnoseVaultQuery(
+	app: App,
+	input: string = '',
+	options?: VaultQueryOptions,
+): Promise<DiagnoseVaultQueryResult> {
+	const timeZone = options?.timeZone !== undefined ? options.timeZone : resolveDefaultTimeZone();
+	const vaultTypes = await loadVaultPropertyTypes(app);
+	const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
 
 	const configResult = initEngineConfig({
 		timeZone,

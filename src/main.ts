@@ -3,6 +3,8 @@ import { DexiePersistenceAdapter } from './adapters/dexie-persistence-adapter';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
 import { PluginDataStore } from './adapters/plugin-data-store';
 import {
+	diagnoseVaultQuery,
+	type DiagnoseVaultQueryResult,
 	runVaultQuery,
 	type VaultQueryOptions,
 	type VaultQueryResult,
@@ -72,5 +74,12 @@ export default class RhizomePlugin extends Plugin {
 
 	async query(input: string = '', options?: VaultQueryOptions): Promise<VaultQueryResult> {
 		return runVaultQuery(this.app, input, options);
+	}
+
+	async diagnoseQuery(
+		input: string = '',
+		options?: VaultQueryOptions,
+	): Promise<DiagnoseVaultQueryResult> {
+		return diagnoseVaultQuery(this.app, input, options);
 	}
 }

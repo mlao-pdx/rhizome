@@ -3,7 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 
-import { parseObsidianTypesJson, runVaultQuery } from '../../src/adapters/vault-query-runner';
+import {
+	diagnoseVaultQuery,
+	parseObsidianTypesJson,
+	runVaultQuery,
+} from '../../src/adapters/vault-query-runner';
 
 interface MockNoteSpec {
 	path: string;
@@ -145,7 +149,7 @@ describe('parseObsidianTypesJson', () => {
 	});
 });
 
-describe('runVaultQuery', () => {
+describe('diagnoseVaultQuery', () => {
 	it('evaluates queries across frontmatter, tags, links, and types.json definitions', async () => {
 		const app = makeMockApp({
 			typesJson: JSON.stringify({
@@ -193,7 +197,7 @@ describe('runVaultQuery', () => {
 			],
 		});
 
-		const res = await runVaultQuery(
+		const res = await diagnoseVaultQuery(
 			app,
 			'#work [priority < 3] [due <= 2026-10-25] [done = false] link:"projects/roadmap.md"',
 			{ timeZone: 'UTC' },
@@ -219,7 +223,7 @@ describe('runVaultQuery', () => {
 			],
 		});
 
-		const res = await runVaultQuery(app, '[category: research]');
+		const res = await diagnoseVaultQuery(app, '[category: research]');
 		expect(res.executable).toBe(true);
 		expect(res.paths).toEqual(['inbox/idea.md']);
 	});
@@ -231,7 +235,7 @@ describe('runVaultQuery', () => {
 		});
 		app.vault.getMarkdownFiles = getMarkdownFilesSpy;
 
-		const res = await runVaultQuery(app, '[priority = "not-a-number"]');
+		const res = await diagnoseVaultQuery(app, '[priority = "not-a-number"]');
 		expect(res.executable).toBe(false);
 		expect(res.paths).toEqual([]);
 		expect(res.matches).toEqual([]);
@@ -255,7 +259,7 @@ describe('runVaultQuery', () => {
 			],
 		});
 
-		const res = await runVaultQuery(app, '[priority > 1]');
+		const res = await diagnoseVaultQuery(app, '[priority > 1]');
 		expect(res.executable).toBe(true);
 		expect(res.paths).toEqual(['notes/valid.md']);
 		expect(res.propertyDiagnostics).toHaveLength(1);
@@ -280,7 +284,7 @@ describe('runVaultQuery', () => {
 		});
 
 		const referenceTimeMs = Date.UTC(2026, 9, 25, 12, 0, 0);
-		const res = await runVaultQuery(app, '[due = @today]', {
+		const res = await diagnoseVaultQuery(app, '[due = @today]', {
 			timeZone: 'UTC',
 			propertyTypes: { due: 'date' },
 			referenceTimeMs,
@@ -292,12 +296,159 @@ describe('runVaultQuery', () => {
 
 	it('returns config diagnostics when an invalid timeZone override is passed', async () => {
 		const app = makeMockApp({});
-		const res = await runVaultQuery(app, 'note', {
+		const res = await diagnoseVaultQuery(app, 'note', {
 			timeZone: 'Invalid/Time_Zone_Name',
 		});
 
 		expect(res.executable).toBe(false);
 		expect(res.paths).toEqual([]);
 		expect(res.diagnostics[0]?.code).toBe('ERROR_INVALID_CONFIG');
+	});
+});
+
+describe('runVaultQuery', () => {
+	it('returns the reshaped { context, diagnostics, matches } envelope without paths or propertyDiagnostics', async () => {
+		const app = makeMockApp({
+			typesJson: JSON.stringify({
+				types: {
+					aliases: 'aliases',
+					tags: 'tags',
+					priority: 'number',
+					due: 'date',
+					done: 'checkbox',
+				},
+			}),
+			linkMap: {
+				Roadmap: 'projects/roadmap.md',
+			},
+			notes: [
+				{
+					path: 'tasks/task-1.md',
+					cache: {
+						frontmatter: {
+							priority: 1,
+							due: '2026-10-20',
+							done: false,
+						},
+						tags: [{ tag: '#work', position: {} as never }],
+						links: [
+							{
+								link: 'Roadmap#Q4',
+								original: '[[Roadmap#Q4]]',
+								position: {} as never,
+							},
+						],
+					},
+				},
+				{
+					path: 'tasks/task-2.md',
+					cache: {
+						frontmatter: {
+							priority: 5,
+							due: '2026-11-15',
+							done: true,
+						},
+						tags: [{ tag: '#work', position: {} as never }],
+					},
+				},
+			],
+		});
+
+		const referenceTimeMs = Date.UTC(2026, 9, 25, 12, 0, 0);
+		const res = await runVaultQuery(
+			app,
+			'#work [priority < 3] [due <= 2026-10-25] [done = false] link:"projects/roadmap.md"',
+			{ timeZone: 'UTC', referenceTimeMs },
+		);
+
+		expect(res.context).toEqual({
+			timeZone: 'UTC',
+			referenceTimeMs,
+			propertyTypes: {
+				priority: 'number',
+				due: 'date',
+				done: 'checkbox',
+			},
+		});
+		expect(Object.isFrozen(res.context)).toBe(true);
+		expect(Object.isFrozen(res.context.propertyTypes)).toBe(true);
+		expect(res.diagnostics).toEqual({
+			executable: true,
+			findings: [],
+		});
+		expect(res.matches).toHaveLength(1);
+		expect(res.matches[0]?.file.path).toBe('tasks/task-1.md');
+		expect(res.matches[0]?.links[0]?.resolvedPath).toBe('projects/roadmap.md');
+		expect('paths' in res).toBe(false);
+		expect('propertyDiagnostics' in res).toBe(false);
+	});
+
+	it('overrides types.json entries case-insensitively via options.propertyTypes', async () => {
+		const app = makeMockApp({
+			typesJson: JSON.stringify({ types: { due: 'text' } }),
+			notes: [
+				{
+					path: 'journal/today.md',
+					cache: { frontmatter: { due: '2026-10-25' } },
+				},
+			],
+		});
+
+		const referenceTimeMs = Date.UTC(2026, 9, 25, 12, 0, 0);
+		const res = await runVaultQuery(app, '[due = @today]', {
+			timeZone: 'UTC',
+			propertyTypes: { Due: 'date' },
+			referenceTimeMs,
+		});
+
+		expect(res.diagnostics.executable).toBe(true);
+		expect(res.context.propertyTypes).toEqual({ due: 'date' });
+		expect(res.matches.map((doc) => doc.file.path)).toEqual(['journal/today.md']);
+	});
+
+	it('short-circuits before scanning the vault when query compilation fails', async () => {
+		const getMarkdownFilesSpy = vi.fn(() => []);
+		const app = makeMockApp({
+			typesJson: JSON.stringify({ types: { priority: 'number' } }),
+		});
+		app.vault.getMarkdownFiles = getMarkdownFilesSpy;
+
+		const res = await runVaultQuery(app, '[priority = "not-a-number"]', {
+			timeZone: 'UTC',
+			referenceTimeMs: 1700000000000,
+		});
+
+		expect(res.diagnostics.executable).toBe(false);
+		expect(res.diagnostics.findings.length).toBeGreaterThan(0);
+		expect(res.diagnostics.findings[0]?.severity).toBe('error');
+		expect(res.matches).toEqual([]);
+		expect(res.context).toEqual({
+			timeZone: 'UTC',
+			referenceTimeMs: 1700000000000,
+			propertyTypes: { priority: 'number' },
+		});
+		expect(getMarkdownFilesSpy).not.toHaveBeenCalled();
+	});
+
+	it('returns frozen JSON-safe fallback context when config or referenceTimeMs is invalid', async () => {
+		const app = makeMockApp({
+			typesJson: JSON.stringify({ types: { priority: 'number' } }),
+		});
+
+		const badConfigRes = await runVaultQuery(app, 'note', {
+			timeZone: 'Invalid/Time_Zone_Name',
+			referenceTimeMs: Number.NaN,
+		});
+
+		expect(badConfigRes.diagnostics.executable).toBe(false);
+		expect(badConfigRes.diagnostics.findings[0]?.code).toBe('ERROR_INVALID_CONFIG');
+		expect(badConfigRes.context).toEqual({
+			timeZone: 'Invalid/Time_Zone_Name',
+			referenceTimeMs: null,
+			propertyTypes: { priority: 'number' },
+		});
+		expect(Object.isFrozen(badConfigRes.context)).toBe(true);
+		expect(Object.isFrozen(badConfigRes.context.propertyTypes)).toBe(true);
+		expect(JSON.parse(JSON.stringify(badConfigRes))).toEqual(badConfigRes);
 	});
 });
