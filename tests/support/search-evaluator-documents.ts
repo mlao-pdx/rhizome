@@ -65,12 +65,22 @@ const rawValueArb = fc.oneof(
 	fc.array(scalarArb, { maxLength: 4 }),
 	fc.array(fc.array(scalarArb, { maxLength: 2 }), { maxLength: 2 }),
 );
+export const posArb = fc
+	.tuple(fc.integer({ min: 0, max: 500 }), fc.integer({ min: 0, max: 200 }))
+	.map(([startOffset, length]) => ({
+		start: { line: 1, col: 0, offset: startOffset },
+		end: { line: 1, col: 0, offset: startOffset + length },
+	}));
+
+const optionalPosArb = fc.option(posArb, { nil: undefined });
+
 const linkArb = fc.record({
 	link: fc.oneof(
 		textArb,
 		fc.constantFrom('alpha', '#Intro', '^block', 'beta#Summary', 'Missing'),
 	),
 	displayText: textArb,
+	position: optionalPosArb,
 });
 
 export const documentInputArb = fc.record({
@@ -87,19 +97,30 @@ export const documentInputArb = fc.record({
 			key: propertyKeyArb,
 			value: rawValueArb,
 			line: fc.integer({ min: 1, max: 100 }),
+			position: optionalPosArb,
 		}),
 		{ maxLength: 6 },
 	),
 	tags: fc.array(
-		fc.record({ tag: fc.oneof(textArb, fc.constantFrom('#work', '#work/urgent', '#alpha')) }),
+		fc.record({
+			tag: fc.oneof(textArb, fc.constantFrom('#work', '#work/urgent', '#alpha')),
+			position: optionalPosArb,
+		}),
 		{ maxLength: 4 },
 	),
-	headings: fc.array(fc.record({ heading: textArb, level: fc.integer({ min: 1, max: 6 }) }), {
-		maxLength: 4,
-	}),
+	headings: fc.array(
+		fc.record({
+			heading: textArb,
+			level: fc.integer({ min: 1, max: 6 }),
+			position: optionalPosArb,
+		}),
+		{
+			maxLength: 4,
+		},
+	),
 	links: fc.array(linkArb, { maxLength: 3 }),
 	embeds: fc.array(linkArb, { maxLength: 3 }),
-	blocks: fc.array(textArb, { maxLength: 3 }),
+	blocks: fc.array(fc.record({ id: textArb, position: optionalPosArb }), { maxLength: 3 }),
 });
 
 export type DocumentInput = typeof documentInputArb extends fc.Arbitrary<infer T> ? T : never;
@@ -180,7 +201,7 @@ export function evaluatorVault(
 						links: input.links,
 						frontmatterLinks: input.links,
 						embeds: input.embeds,
-						blocks: Object.fromEntries(input.blocks.map((id) => [id, { id }])),
+						blocks: Object.fromEntries(input.blocks.map((b) => [b.id, b])),
 					},
 			config,
 			input.inline,

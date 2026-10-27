@@ -6,6 +6,7 @@ import {
 	initEngineConfig,
 	isVirtualFileKey,
 	normalizeObsidianMetadata,
+	resolveOriginWikiLink,
 	resolveQueryPropertyType,
 	resolveUserPropertyType,
 	stripTagHash,
@@ -13,6 +14,7 @@ import {
 	VIRTUAL_FILE_KEYS_LIST,
 	type DocumentDiagnostic,
 	type InlinePropertyInput,
+	type ObsidianPosInput,
 	type ObsidianPropertyType,
 	type PropertyTypeRegistry,
 } from '../../src/core/search';
@@ -628,6 +630,313 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					}
 				}
 			}),
+		);
+	});
+
+	it('Links Appearance Order & TagLocations Bijection Invariant: frontmatterLinks precede body links and tagLocations aligns 1-to-1 with tags in frontmatter -> inline -> body order', async () => {
+		const configRes = initEngineConfig({ timeZone: 'UTC', propertyTypes: {} });
+		if (!configRes.ok) throw new Error('Expected valid config');
+		const resolvedConfig = configRes.config;
+
+		const posArb: fc.Arbitrary<ObsidianPosInput> = fc
+			.tuple(fc.integer({ min: 0, max: 500 }), fc.integer({ min: 0, max: 200 }))
+			.map(([start, len]) => ({
+				start: { line: 1, col: 0, offset: start },
+				end: { line: 1, col: 0, offset: start + len },
+			}));
+		const optionalPosArb = fc.option(posArb, { nil: undefined });
+
+		const linkItemArb = fc.record({
+			link: fc.oneof(
+				fc.constantFrom('#Head', '^blk', 'Note#Head', 'PlainNote'),
+				fc.string({ maxLength: 16 }),
+			),
+			displayText: fc.option(fc.string({ maxLength: 12 }), { nil: undefined }),
+			position: optionalPosArb,
+		});
+
+		const fmEntriesArb = fc.array(
+			fc.tuple(
+				fc.constantFrom('tags', 'tag', 'TAGS', 'status', 'aliases'),
+				fc.oneof(
+					fc.string({ maxLength: 16 }),
+					fc.array(fc.string({ maxLength: 16 }), { maxLength: 4 }),
+				),
+			),
+			{ maxLength: 5 },
+		);
+
+		const inlineTagsArb: fc.Arbitrary<InlinePropertyInput[]> = fc.array(
+			fc.record({
+				key: fc.constantFrom('tags', 'tag', ' TAG ', 'status'),
+				value: fc.oneof(
+					fc.string({ maxLength: 16 }),
+					fc.array(fc.string({ maxLength: 16 }), { maxLength: 4 }),
+				),
+				line: fc.option(fc.integer({ min: 1, max: 100 }), { nil: null }),
+				position: optionalPosArb,
+			}),
+			{ maxLength: 5 },
+		);
+
+		const bodyTagsArb = fc.array(
+			fc.record({
+				tag: fc.string({ maxLength: 16 }),
+				position: optionalPosArb,
+			}),
+			{ maxLength: 5 },
+		);
+
+		const headingsArb = fc.array(
+			fc.record({
+				heading: fc.oneof(
+					fc.constantFrom('Overview', 'Section [1]', 'Part | Two', 'Clean Title'),
+					fc.string({ maxLength: 16 }),
+				),
+				level: fc.integer({ min: 1, max: 6 }),
+				position: optionalPosArb,
+			}),
+			{ maxLength: 5 },
+		);
+
+		const blocksArb = fc.dictionary(
+			fc.string({ minLength: 1, maxLength: 10 }),
+			fc.record({
+				id: fc.oneof(
+					fc.constantFrom('blk-1', '^blk-2', 'bad|id', 'clean-id'),
+					fc.string({ maxLength: 12 }),
+				),
+				position: optionalPosArb,
+			}),
+			{ maxKeys: 5 },
+		);
+
+		await assertProperty(
+			'search/normalizer__links-order-and-tag-locations-bijection',
+			fc.property(
+				fmEntriesArb,
+				inlineTagsArb,
+				bodyTagsArb,
+				fc.array(linkItemArb, { maxLength: 5 }),
+				fc.array(linkItemArb, { maxLength: 5 }),
+				fc.array(linkItemArb, { maxLength: 4 }),
+				headingsArb,
+				blocksArb,
+				(
+					fmEntries,
+					inlineProps,
+					bodyTags,
+					fmLinks,
+					bodyLinks,
+					embeds,
+					headings,
+					blocks,
+				) => {
+					const frontmatter: Record<string, unknown> = {};
+					for (const [k, v] of fmEntries) {
+						frontmatter[k] = v;
+					}
+
+					const doc = normalizeObsidianMetadata(
+						{
+							path: 'Folder/Note.md',
+							name: 'Note.md',
+							basename: 'Note',
+							extension: 'md',
+							parent: { path: 'Folder' },
+							stat: { ctime: 100, mtime: 200, size: 50 },
+						},
+						{
+							frontmatter,
+							tags: bodyTags,
+							frontmatterLinks: fmLinks,
+							links: bodyLinks,
+							embeds,
+							headings,
+							blocks,
+						},
+						resolvedConfig,
+						inlineProps,
+					);
+
+					const noteOrigin = `[[${doc.file.path}|${doc.file.basename}]]`;
+
+					// Invariant 1: doc.links orders frontmatterLinks before body links,
+					// and every frontmatter link has origin === noteOrigin
+					expect(doc.links.length).toBe(fmLinks.length + bodyLinks.length);
+					let seenBodyLink = false;
+					for (const l of doc.links) {
+						if (l.source === 'frontmatter') {
+							expect(seenBodyLink).toBe(false);
+							expect(l.origin).toBe(noteOrigin);
+						} else {
+							expect(l.source).toBe('body');
+							seenBodyLink = true;
+						}
+					}
+
+					// Invariant 2: doc.tags and doc.tagLocations bijection & monotonic source order
+					expect(doc.tagLocations.length).toBe(doc.tags.length);
+					expect(doc.tagLocations.map((tl) => tl.tag)).toEqual(doc.tags);
+
+					const sourceOrder = { frontmatter: 0, inline: 1, body: 2 } as const;
+					let maxSourceRank = 0;
+					for (const tl of doc.tagLocations) {
+						const rank = sourceOrder[tl.source];
+						expect(rank).toBeGreaterThanOrEqual(maxSourceRank);
+						maxSourceRank = rank;
+						if (tl.source === 'frontmatter') {
+							expect(tl.origin).toBe(noteOrigin);
+						}
+					}
+
+					// Every origin on links, embeds, and tagLocations is a valid wikilink without unsafe subpath characters
+					const prefix = `[[${doc.file.path}`;
+					const suffix = `|${doc.file.basename}]]`;
+					for (const item of [...doc.links, ...doc.embeds, ...doc.tagLocations]) {
+						expect(item.origin.startsWith(prefix)).toBe(true);
+						expect(item.origin.endsWith(suffix)).toBe(true);
+						const middle = item.origin.slice(
+							prefix.length,
+							item.origin.length - suffix.length,
+						);
+						if (middle !== '') {
+							expect(middle.startsWith('#')).toBe(true);
+							const subpathText = middle.startsWith('#^')
+								? middle.slice(2)
+								: middle.slice(1);
+							expect(subpathText.trim().length).toBeGreaterThan(0);
+							expect(/[[\]#^|\r\n]/.test(subpathText)).toBe(false);
+						}
+					}
+				},
+			),
+		);
+	});
+
+	it('Origin 3-Tier Specificity Invariant: start-offset-only anchoring, narrowest block over heading precedence, and exact active heading syntax fallback', async () => {
+		const cleanIdArb = fc.stringMatching(/^[A-Za-z0-9_-]{1,12}$/);
+		const cleanHeadingArb = fc
+			.stringMatching(/^[A-Za-z0-9 _-]{1,16}$/)
+			.filter((s) => s.trim().length > 0);
+		const unsafeCharArb = fc.constantFrom('[', ']', '#', '^', '|');
+
+		await assertProperty(
+			'search/normalizer__origin-three-tier-specificity-and-start-offset-anchoring',
+			fc.property(
+				fc.integer({ min: 0, max: 400 }),
+				fc.integer({ min: 0, max: 200 }),
+				fc.integer({ min: 0, max: 500 }),
+				cleanIdArb,
+				cleanIdArb,
+				cleanHeadingArb,
+				cleanHeadingArb,
+				unsafeCharArb,
+				(
+					itemStart,
+					initialLen,
+					mutatedLen,
+					outerBlockId,
+					innerBlockId,
+					earlyCleanHeading,
+					lateHeadingBase,
+					unsafeChar,
+				) => {
+					const filePath = 'Notes/Spec.md';
+					const fileBasename = 'Spec';
+					const noteOrigin = `[[${filePath}|${fileBasename}]]`;
+
+					const pos1: ObsidianPosInput = {
+						start: { line: 1, col: 0, offset: itemStart },
+						end: { line: 1, col: 0, offset: itemStart + initialLen },
+					};
+					const pos2: ObsidianPosInput = {
+						start: { line: 1, col: 0, offset: itemStart },
+						end: { line: 50, col: 0, offset: itemStart + mutatedLen },
+					};
+
+					// 1. Start-offset-only containment: mutating end.offset never changes origin
+					//    and Narrowest-block over heading precedence when inside nested blocks
+					const outerBlock = {
+						id: `^${outerBlockId}`,
+						position: {
+							start: { line: 1, col: 0, offset: Math.max(0, itemStart - 20) },
+							end: { line: 10, col: 0, offset: itemStart + 50 },
+						},
+					};
+					const innerBlock = {
+						id: innerBlockId,
+						position: {
+							start: { line: 2, col: 0, offset: Math.max(0, itemStart - 5) },
+							end: { line: 5, col: 0, offset: itemStart + 10 },
+						},
+					};
+					const precedingHeading = {
+						heading: earlyCleanHeading,
+						level: 1,
+						position: {
+							start: { line: 1, col: 0, offset: Math.max(0, itemStart - 30) },
+							end: { line: 1, col: 10, offset: Math.max(0, itemStart - 25) },
+						},
+					};
+
+					const origin1 = resolveOriginWikiLink(
+						filePath,
+						fileBasename,
+						pos1,
+						{ outer: outerBlock, inner: innerBlock },
+						[precedingHeading],
+					);
+					const origin2 = resolveOriginWikiLink(
+						filePath,
+						fileBasename,
+						pos2,
+						{ outer: outerBlock, inner: innerBlock },
+						[precedingHeading],
+					);
+
+					expect(origin1).toBe(`[[${filePath}#^${innerBlockId}|${fileBasename}]]`);
+					expect(origin2).toBe(origin1);
+
+					// 2. When outside all blocks and preceded by a clean heading, resolves to #Heading
+					//    and mutating end.offset still never changes origin
+					const headingOnlyOrigin1 = resolveOriginWikiLink(
+						filePath,
+						fileBasename,
+						pos1,
+						{},
+						[precedingHeading],
+					);
+					const headingOnlyOrigin2 = resolveOriginWikiLink(
+						filePath,
+						fileBasename,
+						pos2,
+						{},
+						[precedingHeading],
+					);
+					expect(headingOnlyOrigin1).toBe(
+						`[[${filePath}#${earlyCleanHeading}|${fileBasename}]]`,
+					);
+					expect(headingOnlyOrigin2).toBe(headingOnlyOrigin1);
+
+					// 3. Exact-heading fallback: if the immediately preceding heading contains any
+					//    wikilink syntax character, falls back directly to noteOrigin (does not walk
+					//    back to an earlier clean heading)
+					const unsafeActiveHeading = {
+						heading: `${lateHeadingBase}${unsafeChar}suffix`,
+						level: 2,
+						position: {
+							start: { line: 3, col: 0, offset: itemStart },
+							end: { line: 3, col: 10, offset: itemStart + 10 },
+						},
+					};
+					const fallbackOrigin = resolveOriginWikiLink(filePath, fileBasename, pos1, {}, [
+						precedingHeading,
+						unsafeActiveHeading,
+					]);
+					expect(fallbackOrigin).toBe(noteOrigin);
+				},
+			),
 		);
 	});
 });

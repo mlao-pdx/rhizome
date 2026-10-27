@@ -78,6 +78,13 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		});
 		expect(result.matches).toHaveLength(1);
 		expect(result.matches[0]?.file.path).toBe('notes/alpha.md');
+		expect(result.matches[0]?.tagLocations).toEqual([
+			{
+				tag: 'project',
+				source: 'body',
+				origin: '[[notes/alpha.md|alpha]]',
+			},
+		]);
 		expect('normalizationFingerprint' in (result.matches[0] ?? {})).toBe(false);
 		expect('propertyOccurrences' in (result.matches[0] ?? {})).toBe(false);
 		expect('paths' in result).toBe(false);

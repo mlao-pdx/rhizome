@@ -227,6 +227,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '#Overview',
 				displayText: '#Overview',
 				source: 'body',
+				origin: '[[Notes/A.md|A]]',
 			},
 			{
 				link: '^summary-block',
@@ -235,6 +236,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '^summary-block',
 				displayText: 'Summary',
 				source: 'body',
+				origin: '[[Notes/A.md|A]]',
 			},
 			{
 				link: 'Team/Alice#Bio',
@@ -243,6 +245,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '#Bio',
 				displayText: 'Alice',
 				source: 'body',
+				origin: '[[Notes/A.md|A]]',
 			},
 			{
 				link: 'MissingNote',
@@ -251,6 +254,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '',
 				displayText: 'MissingNote',
 				source: 'body',
+				origin: '[[Notes/A.md|A]]',
 			},
 		]);
 
@@ -419,6 +423,14 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			'work/urgent',
 			'inline-tag',
 		]);
+		expect(doc.tagLocations).toEqual([
+			{ tag: 'Project', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
+			{ tag: 'work/urgent', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
+			{ tag: 'work/urgent', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
+			{ tag: 'extra-tag', source: 'inline', origin: '[[RootNote.md|RootNote]]' },
+			{ tag: 'work/urgent', source: 'body', origin: '[[RootNote.md|RootNote]]' },
+			{ tag: 'inline-tag', source: 'body', origin: '[[RootNote.md|RootNote]]' },
+		]);
 		expect(doc.properties['tags']).toEqual(['Project', 'work/urgent', 'work/urgent']);
 		expect(doc.properties['tag']).toBe('extra-tag');
 		expect(doc.aliases).toEqual(['First Alias', '42', 'Second Alias']);
@@ -435,6 +447,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '',
 				displayText: 'Ref',
 				source: 'frontmatter',
+				origin: '[[RootNote.md|RootNote]]',
 			},
 		]);
 		expect(doc.embeds).toEqual([
@@ -445,6 +458,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '#page=1',
 				displayText: 'Diagram.png#page=1',
 				source: 'embed',
+				origin: '[[RootNote.md|RootNote]]',
 			},
 		]);
 		expect(doc.blocks).toEqual(['Block-One', 'block-two']);
@@ -562,6 +576,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		for (const field of [
 			'aliases',
 			'tags',
+			'tagLocations',
 			'headings',
 			'links',
 			'embeds',
@@ -613,5 +628,185 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		// Mutating doc.properties[key] array must not corrupt doc.propertyOccurrences[0].rawValue
 		(doc.properties['tags'] as unknown[]).push('mutated-view');
 		expect(doc.propertyOccurrences[0]?.rawValue).toEqual(['alpha', 'beta']);
+	});
+
+	it('orders frontmatterLinks before body links and resolves 3-tier origin wikilinks across links, embeds, and tagLocations', () => {
+		const config = getStandardConfig();
+		const pos = (startOffset: number, endOffset: number) => ({
+			start: { line: 1, col: 0, offset: startOffset },
+			end: { line: 1, col: 0, offset: endOffset },
+		});
+
+		const doc = normalizeObsidianMetadata(
+			makeFile({ path: 'Projects/Plan.md', name: 'Plan.md', basename: 'Plan' }),
+			{
+				frontmatter: {
+					tags: ['#fm-tag'],
+				},
+				frontmatterLinks: [
+					{ link: 'FmTarget1', displayText: 'FM 1', position: pos(120, 130) },
+					{ link: 'FmTarget2' },
+				],
+				headings: [
+					{ heading: 'Clean Heading', level: 1, position: pos(50, 65) },
+					{ heading: 'Heading With [Brackets]', level: 2, position: pos(200, 225) },
+					{ heading: 'Heading With | Pipe', level: 2, position: pos(260, 280) },
+					{ heading: 'Final Section', level: 2, position: pos(300, 315) },
+				],
+				blocks: {
+					outer: { id: '^outer-block', position: pos(100, 190) },
+					inner: { id: 'inner-block', position: pos(110, 150) },
+					unsafe: { id: 'bad|block', position: pos(320, 360) },
+				},
+				links: [
+					{ link: 'BeforeHeading', position: pos(10, 25) },
+					{ link: 'InHeading', position: pos(70, 85) },
+					{ link: 'InNestedBlock', position: pos(120, 140) },
+					{ link: 'SpanningOutOfBlock', position: pos(145, 250) },
+					{ link: 'StartingBeforeBlock', position: pos(95, 130) },
+					{ link: 'UnderUnsafeHeading', position: pos(230, 245) },
+					{ link: 'UnderPipeHeading', position: pos(285, 295) },
+					{ link: 'InUnsafeBlockUnderCleanHeading', position: pos(330, 345) },
+				],
+				embeds: [{ link: 'Chart.png', position: pos(160, 175) }],
+				tags: [
+					{ tag: '#body-block', position: pos(130, 140) },
+					{ tag: '#body-heading', position: pos(80, 90) },
+					{ tag: '#body-fallback', position: pos(240, 250) },
+				],
+			},
+			config,
+			[
+				{
+					key: 'tags',
+					value: ['#inline-a', 'inline-b'],
+					line: 12,
+					position: pos(75, 95),
+				},
+				{
+					key: 'tag',
+					value: 'inline-in-block',
+					line: 20,
+					position: pos(115, 125),
+				},
+			],
+		);
+
+		// 1. Links order: frontmatterLinks first, then body links
+		expect(
+			doc.links.map((l) => ({ link: l.link, source: l.source, origin: l.origin })),
+		).toEqual([
+			{
+				link: 'FmTarget1',
+				source: 'frontmatter',
+				origin: '[[Projects/Plan.md|Plan]]',
+			},
+			{
+				link: 'FmTarget2',
+				source: 'frontmatter',
+				origin: '[[Projects/Plan.md|Plan]]',
+			},
+			{
+				link: 'BeforeHeading',
+				source: 'body',
+				origin: '[[Projects/Plan.md|Plan]]',
+			},
+			{
+				link: 'InHeading',
+				source: 'body',
+				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
+			},
+			{
+				link: 'InNestedBlock',
+				source: 'body',
+				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
+			},
+			{
+				link: 'SpanningOutOfBlock',
+				source: 'body',
+				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
+			},
+			{
+				link: 'StartingBeforeBlock',
+				source: 'body',
+				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
+			},
+			{
+				link: 'UnderUnsafeHeading',
+				source: 'body',
+				origin: '[[Projects/Plan.md|Plan]]',
+			},
+			{
+				link: 'UnderPipeHeading',
+				source: 'body',
+				origin: '[[Projects/Plan.md|Plan]]',
+			},
+			{
+				link: 'InUnsafeBlockUnderCleanHeading',
+				source: 'body',
+				origin: '[[Projects/Plan.md#Final Section|Plan]]',
+			},
+		]);
+
+		// 2. Embeds origin
+		expect(doc.embeds).toEqual([
+			{
+				link: 'Chart.png',
+				rawTarget: 'Chart.png',
+				resolvedPath: null,
+				subpath: '',
+				displayText: 'Chart.png',
+				source: 'embed',
+				origin: '[[Projects/Plan.md#^outer-block|Plan]]',
+			},
+		]);
+
+		// 3. Tags & tagLocations bijection and appearance order (frontmatter -> inline -> body)
+		expect(doc.tags).toEqual([
+			'fm-tag',
+			'inline-a',
+			'inline-b',
+			'inline-in-block',
+			'body-block',
+			'body-heading',
+			'body-fallback',
+		]);
+		expect(doc.tagLocations).toEqual([
+			{
+				tag: 'fm-tag',
+				source: 'frontmatter',
+				origin: '[[Projects/Plan.md|Plan]]',
+			},
+			{
+				tag: 'inline-a',
+				source: 'inline',
+				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
+			},
+			{
+				tag: 'inline-b',
+				source: 'inline',
+				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
+			},
+			{
+				tag: 'inline-in-block',
+				source: 'inline',
+				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
+			},
+			{
+				tag: 'body-block',
+				source: 'body',
+				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
+			},
+			{
+				tag: 'body-heading',
+				source: 'body',
+				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
+			},
+			{
+				tag: 'body-fallback',
+				source: 'body',
+				origin: '[[Projects/Plan.md|Plan]]',
+			},
+		]);
 	});
 });

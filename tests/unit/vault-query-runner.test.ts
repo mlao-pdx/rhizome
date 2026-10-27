@@ -383,10 +383,19 @@ describe('runVaultQuery', () => {
 		const match = res.matches[0]!;
 		expect(match.file.path).toBe('tasks/task-1.md');
 		expect(match.links[0]?.resolvedPath).toBe('projects/roadmap.md');
+		expect(match.links[0]?.origin).toBe('[[tasks/task-1.md|task-1]]');
+		expect(match.tagLocations).toEqual([
+			{
+				tag: 'work',
+				source: 'body',
+				origin: '[[tasks/task-1.md|task-1]]',
+			},
+		]);
 		expect(Object.keys(match)).toEqual([
 			'file',
 			'aliases',
 			'tags',
+			'tagLocations',
 			'headings',
 			'links',
 			'embeds',

@@ -11,6 +11,7 @@ import {
 	type NormalizedFileInfo,
 	type NormalizedHeading,
 	type NormalizedLink,
+	type NormalizedTagLocation,
 	normalizeObsidianMetadata,
 	type PropertyTypeRegistry,
 	type ResolveLinkPathFn,
@@ -63,6 +64,7 @@ export interface VaultQueryMatch {
 	readonly file: NormalizedFileInfo;
 	readonly aliases: string[];
 	readonly tags: string[];
+	readonly tagLocations: NormalizedTagLocation[];
 	readonly headings: NormalizedHeading[];
 	readonly links: NormalizedLink[];
 	readonly embeds: NormalizedLink[];
@@ -90,6 +92,7 @@ export function toVaultQueryMatch(doc: NormalizedDocument): VaultQueryMatch {
 		file: doc.file,
 		aliases: doc.aliases,
 		tags: doc.tags,
+		tagLocations: doc.tagLocations,
 		headings: doc.headings,
 		links: doc.links,
 		embeds: doc.embeds,

@@ -144,6 +144,13 @@ export interface NormalizedLink {
 	subpath: string; // "#Heading" or "^block", or ""
 	displayText: string;
 	source: 'body' | 'frontmatter' | 'embed';
+	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
+}
+
+export interface NormalizedTagLocation {
+	tag: string; // Authored-case tag with leading '#' stripped
+	source: 'frontmatter' | 'inline' | 'body';
+	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
 }
 
 export interface NormalizedDocument {
@@ -152,8 +159,9 @@ export interface NormalizedDocument {
 	file: NormalizedFileInfo;
 	aliases: string[];
 	tags: string[]; // Authored-case tags with leading '#' stripped, in appearance order
+	tagLocations: NormalizedTagLocation[]; // In 1-to-1 correspondence with tags (frontmatter -> inline -> body)
 	headings: NormalizedHeading[];
-	links: NormalizedLink[]; // Outgoing links (body + frontmatterLinks, excluding embeds)
+	links: NormalizedLink[]; // Outgoing links (frontmatterLinks + body links, excluding embeds)
 	embeds: NormalizedLink[]; // Outgoing embeds
 	blocks: string[]; // Authored-case block IDs with any leading '^' stripped
 	propertyOccurrences: PropertyOccurrence[]; // Cache-level occurrence stream

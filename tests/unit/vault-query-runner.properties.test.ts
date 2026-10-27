@@ -315,6 +315,7 @@ describe('Vault Query Runner Property Invariants', () => {
 							'file',
 							'aliases',
 							'tags',
+							'tagLocations',
 							'headings',
 							'links',
 							'embeds',

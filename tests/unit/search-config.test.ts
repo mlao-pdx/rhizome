@@ -27,6 +27,18 @@ function createFixtureDoc(): NormalizedDocument {
 		},
 		aliases: ['Q4 Sprint', 'Active Roadmap'],
 		tags: ['project', 'work/urgent'],
+		tagLocations: [
+			{
+				tag: 'project',
+				source: 'frontmatter',
+				origin: '[[Projects/Active/Sprint-12.md|Sprint-12]]',
+			},
+			{
+				tag: 'work/urgent',
+				source: 'body',
+				origin: '[[Projects/Active/Sprint-12.md#Overview|Sprint-12]]',
+			},
+		],
 		headings: [
 			{ text: 'Overview', level: 1 },
 			{ text: 'Action Items', level: 2 },
@@ -39,6 +51,7 @@ function createFixtureDoc(): NormalizedDocument {
 				subpath: '#Bio',
 				displayText: 'Alice Lead',
 				source: 'body',
+				origin: '[[Projects/Active/Sprint-12.md#Overview|Sprint-12]]',
 			},
 			{
 				link: 'MissingNote',
@@ -47,6 +60,7 @@ function createFixtureDoc(): NormalizedDocument {
 				subpath: '',
 				displayText: 'Ghost Link',
 				source: 'frontmatter',
+				origin: '[[Projects/Active/Sprint-12.md|Sprint-12]]',
 			},
 		],
 		embeds: [
@@ -57,6 +71,7 @@ function createFixtureDoc(): NormalizedDocument {
 				subpath: '',
 				displayText: 'Arch.png',
 				source: 'embed',
+				origin: '[[Projects/Active/Sprint-12.md#^summary-block|Sprint-12]]',
 			},
 			{
 				link: 'MissingEmbed.png',
@@ -65,6 +80,7 @@ function createFixtureDoc(): NormalizedDocument {
 				subpath: '',
 				displayText: 'MissingEmbed.png',
 				source: 'embed',
+				origin: '[[Projects/Active/Sprint-12.md|Sprint-12]]',
 			},
 		],
 		blocks: ['summary-block', 'decision-1'],
