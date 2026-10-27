@@ -272,16 +272,38 @@ const optionsFuzzArb: fc.Arbitrary<VaultQueryOptions | undefined> = fc.option(
 	{ nil: undefined },
 );
 
+const queryNameArb = fc.constantFrom(
+	'inbox',
+	'urgent',
+	'work',
+	'roadmap',
+	'archive',
+	'__proto__',
+	'constructor',
+	'prototype',
+);
+
+const queryMapFuzzArb: fc.Arbitrary<Record<string, string>> = fc.dictionary(
+	queryNameArb,
+	queryFuzzArb,
+	{ maxKeys: 5 },
+);
+
+const uniqueNotesArb = fc.uniqueArray(mockNoteSpecArb, {
+	selector: (n) => n.path,
+	maxLength: 4,
+});
+
 describe('Vault Query Runner Property Invariants', () => {
-	it('Invariant 1: Differential Equivalence between runVaultQuery and diagnoseVaultQuery', async () => {
+	it('Invariant 1: Multi-Query Differential Equivalence & Failed-Query Omission', async () => {
 		await assertProperty(
-			'adapters/vault-query-runner__differential-equivalence',
+			'adapters/vault-query-runner__multi-query-differential-equivalence',
 			fc.asyncProperty(
-				fc.array(mockNoteSpecArb, { maxLength: 5 }),
+				uniqueNotesArb,
 				typesJsonPayloadArb,
-				queryFuzzArb,
+				queryMapFuzzArb,
 				optionsFuzzArb,
-				async (notes, typesJson, queryInput, rawOptions) => {
+				async (notes, typesJson, queryMap, rawOptions) => {
 					const options: VaultQueryOptions = {
 						...rawOptions,
 						referenceTimeMs:
@@ -293,45 +315,89 @@ describe('Vault Query Runner Property Invariants', () => {
 						notes,
 						typesJson,
 					});
-					const { app: appDiag, getFileCacheSpy: diagCacheSpy } = makeSpyMockApp({
-						notes,
-						typesJson,
-					});
 
-					const [runRes, diagRes] = await Promise.all([
-						runVaultQuery(appRun, queryInput, options),
-						diagnoseVaultQuery(appDiag, queryInput, options),
-					]);
+					const runRes = await runVaultQuery(appRun, queryMap, options);
 
-					expect(runRes.diagnostics.executable).toBe(diagRes.executable);
-					expect(runRes.diagnostics.findings).toEqual(diagRes.diagnostics);
-					expect(runRes.matches).toEqual(diagRes.matches.map(toVaultQueryMatch));
-					expect(diagRes.paths).toEqual(runRes.matches.map((doc) => doc.file.path));
+					const expectedKeys = Object.keys(queryMap).filter(
+						(k) =>
+							!FORBIDDEN_KEYS.has(k) && !FORBIDDEN_KEYS.has(k.trim().toLowerCase()),
+					);
+					expect(Object.keys(runRes.diagnostics.queries)).toEqual(expectedKeys);
+
+					const configOk = runRes.diagnostics.findings.length === 0;
+					expect(runRes.diagnostics.executable).toBe(
+						configOk &&
+							Object.values(runRes.diagnostics.queries).every((q) => q.executable),
+					);
+
+					if (!configOk) {
+						expect(runRes.context.normalizationFingerprint).toBeNull();
+						expect(runRes.matches).toEqual({});
+						for (const k of expectedKeys) {
+							expect(runRes.diagnostics.queries[k]).toEqual({
+								executable: false,
+								findings: [],
+							});
+						}
+					} else {
+						expect(typeof runRes.context.normalizationFingerprint).toBe('string');
+						for (const k of expectedKeys) {
+							const { app: appDiag, getFileCacheSpy: diagCacheSpy } = makeSpyMockApp({
+								notes,
+								typesJson,
+							});
+							const diagRes = await diagnoseVaultQuery(appDiag, queryMap[k], options);
+							const qDiag = runRes.diagnostics.queries[k]!;
+
+							expect(qDiag).toEqual({
+								executable: diagRes.executable,
+								findings: diagRes.diagnostics,
+							});
+
+							if (qDiag.executable) {
+								expect(
+									Object.prototype.hasOwnProperty.call(runRes.matches, k),
+								).toBe(true);
+								const bucket = runRes.matches[k]!;
+								expect(bucket).toEqual(diagRes.matches.map(toVaultQueryMatch));
+								expect(diagRes.paths).toEqual(bucket.map((m) => m.file.path));
+
+								for (const m of bucket) {
+									expect(Object.keys(m)).toEqual([
+										'file',
+										'aliases',
+										'tags',
+										'tagLocations',
+										'headings',
+										'links',
+										'embeds',
+										'blocks',
+										'properties',
+									]);
+									expect('normalizationFingerprint' in m).toBe(false);
+									expect('propertyOccurrences' in m).toBe(false);
+									expect('propertyKeys' in m).toBe(false);
+									expect('diagnostics' in m).toBe(false);
+									expect(Object.isFrozen(m)).toBe(false);
+									expect(Object.isFrozen(m.file)).toBe(false);
+								}
+							} else {
+								expect(
+									Object.prototype.hasOwnProperty.call(runRes.matches, k),
+								).toBe(false);
+							}
+
+							for (const call of diagCacheSpy.mock.calls) {
+								const arg = call[0] as { deleted?: boolean };
+								expect(arg.deleted).toBe(false);
+							}
+						}
+					}
+
 					expect('paths' in runRes).toBe(false);
 					expect('propertyDiagnostics' in runRes).toBe(false);
 
-					for (const m of runRes.matches) {
-						expect(Object.keys(m)).toEqual([
-							'file',
-							'aliases',
-							'tags',
-							'tagLocations',
-							'headings',
-							'links',
-							'embeds',
-							'blocks',
-							'properties',
-						]);
-						expect('normalizationFingerprint' in m).toBe(false);
-						expect('propertyOccurrences' in m).toBe(false);
-						expect('propertyKeys' in m).toBe(false);
-						expect('diagnostics' in m).toBe(false);
-						expect(Object.isFrozen(m)).toBe(false);
-						expect(Object.isFrozen(m.file)).toBe(false);
-					}
-
-					// Deleted files are never normalized or returned in matches
-					for (const call of [...runCacheSpy.mock.calls, ...diagCacheSpy.mock.calls]) {
+					for (const call of runCacheSpy.mock.calls) {
 						const arg = call[0] as { deleted?: boolean };
 						expect(arg.deleted).toBe(false);
 					}
@@ -340,15 +406,77 @@ describe('Vault Query Runner Property Invariants', () => {
 		);
 	});
 
-	it('Invariant 2: Compile Gate, Non-Blocking Lints, and Lazy Vault Short-Circuit', async () => {
+	it('Invariant 2: Cross-Query In-Memory Reference Identity (===) & Single Normalization Pass', async () => {
+		const multiExecutableQueryMapArb = fc.dictionary(
+			fc.constantFrom('q1', 'q2', 'q3', 'q4'),
+			fc.oneof(executableQueryStringArb, fc.constant(''), fc.constant('#work')),
+			{ minKeys: 1, maxKeys: 4 },
+		);
+
 		await assertProperty(
-			'adapters/vault-query-runner__compile-gate-and-lazy-vault-short-circuit',
+			'adapters/vault-query-runner__cross-query-reference-identity-and-single-pass',
 			fc.asyncProperty(
-				fc.array(mockNoteSpecArb, { minLength: 1, maxLength: 4 }),
+				uniqueNotesArb,
+				multiExecutableQueryMapArb,
+				async (notes, queryMap) => {
+					const typesJson = JSON.stringify({
+						types: {
+							score: 'number',
+							priority: 'number',
+							meeting: 'datetime',
+							due: 'date',
+							modified: 'date',
+							sprint: 'date',
+							status: 'text',
+							done: 'checkbox',
+						},
+					});
+					const { app, getMarkdownFilesSpy, getFileCacheSpy } = makeSpyMockApp({
+						notes,
+						typesJson,
+					});
+
+					const runRes = await runVaultQuery(app, queryMap, {
+						timeZone: 'America/New_York',
+						referenceTimeMs: PINNED_REF_MS,
+					});
+
+					const executableBuckets = Object.values(runRes.matches);
+					expect(executableBuckets.length).toBeGreaterThanOrEqual(1);
+
+					const nonDeletedCount = notes.filter((n) => !n.deleted).length;
+					expect(getMarkdownFilesSpy).toHaveBeenCalledTimes(1);
+					expect(getFileCacheSpy).toHaveBeenCalledTimes(nonDeletedCount);
+
+					const canonicalByPath = new Map<string, unknown>();
+					for (const bucket of executableBuckets) {
+						for (const match of bucket) {
+							const existing = canonicalByPath.get(match.file.path);
+							if (existing !== undefined) {
+								expect(match).toBe(existing);
+							} else {
+								canonicalByPath.set(match.file.path, match);
+							}
+						}
+					}
+				},
+			),
+		);
+	});
+
+	it('Invariant 3: Partial Execution Gate vs. Lazy Vault Short-Circuit', async () => {
+		await assertProperty(
+			'adapters/vault-query-runner__partial-execution-and-lazy-vault-short-circuit',
+			fc.asyncProperty(
+				fc.uniqueArray(mockNoteSpecArb, {
+					selector: (n) => n.path,
+					minLength: 1,
+					maxLength: 4,
+				}),
 				typesJsonPayloadArb,
-				queryFuzzArb,
+				queryMapFuzzArb,
 				optionsFuzzArb,
-				async (notes, typesJson, queryInput, rawOptions) => {
+				async (notes, typesJson, queryMap, rawOptions) => {
 					const options: VaultQueryOptions = {
 						...rawOptions,
 						referenceTimeMs:
@@ -356,87 +484,138 @@ describe('Vault Query Runner Property Invariants', () => {
 								? rawOptions.referenceTimeMs
 								: PINNED_REF_MS,
 					};
-					const {
-						app: appRun,
-						getMarkdownFilesSpy: runFilesSpy,
-						getFileCacheSpy: runCacheSpy,
-					} = makeSpyMockApp({ notes, typesJson });
-					const {
-						app: appDiag,
-						getMarkdownFilesSpy: diagFilesSpy,
-						getFileCacheSpy: diagCacheSpy,
-					} = makeSpyMockApp({ notes, typesJson });
+					const { app, getMarkdownFilesSpy, getFileCacheSpy } = makeSpyMockApp({
+						notes,
+						typesJson,
+					});
 
-					const [runRes, diagRes] = await Promise.all([
-						runVaultQuery(appRun, queryInput, options),
-						diagnoseVaultQuery(appDiag, queryInput, options),
-					]);
+					const runRes = await runVaultQuery(app, queryMap, options);
 
-					const hasError = runRes.diagnostics.findings.some(
-						(d) => d.severity === 'error',
-					);
-					expect(runRes.diagnostics.executable).toBe(!hasError);
+					for (const [k, qDiag] of Object.entries(runRes.diagnostics.queries)) {
+						const hasError = qDiag.findings.some((d) => d.severity === 'error');
+						if (runRes.diagnostics.findings.length === 0) {
+							expect(qDiag.executable).toBe(!hasError);
+						} else {
+							expect(qDiag.executable).toBe(false);
+						}
 
-					if (!runRes.diagnostics.executable) {
-						expect(runRes.matches).toEqual([]);
-						expect(diagRes.paths).toEqual([]);
-						expect(diagRes.matches).toEqual([]);
-						expect(diagRes.propertyDiagnostics).toEqual([]);
-						expect(runFilesSpy).not.toHaveBeenCalled();
-						expect(runCacheSpy).not.toHaveBeenCalled();
-						expect(diagFilesSpy).not.toHaveBeenCalled();
-						expect(diagCacheSpy).not.toHaveBeenCalled();
+						if (qDiag.executable) {
+							expect(Object.prototype.hasOwnProperty.call(runRes.matches, k)).toBe(
+								true,
+							);
+						} else {
+							expect(Object.prototype.hasOwnProperty.call(runRes.matches, k)).toBe(
+								false,
+							);
+						}
+					}
+
+					const executableCount = Object.keys(runRes.matches).length;
+					const nonDeletedCount = notes.filter((n) => !n.deleted).length;
+					if (executableCount === 0) {
+						expect(getMarkdownFilesSpy).not.toHaveBeenCalled();
+						expect(getFileCacheSpy).not.toHaveBeenCalled();
 					} else {
-						expect(runFilesSpy).toHaveBeenCalledTimes(1);
-						expect(diagFilesSpy).toHaveBeenCalledTimes(1);
+						expect(getMarkdownFilesSpy).toHaveBeenCalledTimes(1);
+						expect(getFileCacheSpy).toHaveBeenCalledTimes(nonDeletedCount);
 					}
 				},
 			),
 		);
-	});
 
-	it('Invariant 3: Total Function (Never-Throw) & Strict LiquidJS POJO / JSON Round-Trip', async () => {
 		await assertProperty(
-			'adapters/vault-query-runner__never-throw-and-json-pojo-roundtrip',
+			'adapters/vault-query-runner__mixed-valid-invalid-batch-partial-execution',
 			fc.asyncProperty(
-				fc.array(mockNoteSpecArb, { maxLength: 4 }),
-				typesJsonPayloadArb,
-				queryFuzzArb,
-				optionsFuzzArb,
-				async (notes, typesJson, queryInput, options) => {
-					const { app: appRun } = makeSpyMockApp({ notes, typesJson });
-					const { app: appDiag } = makeSpyMockApp({ notes, typesJson });
+				fc.uniqueArray(mockNoteSpecArb, {
+					selector: (n) => n.path,
+					minLength: 1,
+					maxLength: 4,
+				}),
+				executableQueryStringArb,
+				fc.constantFrom('/unclosed(/', '[priority = "not-a-number"]', 'AND'),
+				async (notes, validQuery, invalidQuery) => {
+					const typesJson = JSON.stringify({
+						types: {
+							score: 'number',
+							priority: 'number',
+							meeting: 'datetime',
+							due: 'date',
+							modified: 'date',
+							sprint: 'date',
+							status: 'text',
+							done: 'checkbox',
+						},
+					});
+					const { app, getMarkdownFilesSpy, getFileCacheSpy } = makeSpyMockApp({
+						notes,
+						typesJson,
+					});
 
-					const [runRes, diagRes] = await Promise.all([
-						runVaultQuery(appRun, queryInput, options),
-						diagnoseVaultQuery(appDiag, queryInput, options),
-					]);
+					const runRes = await runVaultQuery(
+						app,
+						{
+							validKey: validQuery,
+							invalidKey: invalidQuery,
+						},
+						{
+							timeZone: 'America/New_York',
+							referenceTimeMs: PINNED_REF_MS,
+						},
+					);
 
-					expect(Object.isFrozen(runRes.context)).toBe(true);
-					expect(Object.isFrozen(runRes.context.propertyTypes)).toBe(true);
-
-					if (runRes.context.referenceTimeMs !== null) {
-						expect(Number.isSafeInteger(runRes.context.referenceTimeMs)).toBe(true);
-						expect(Math.abs(runRes.context.referenceTimeMs)).toBeLessThanOrEqual(
-							MAX_SAFE_EPOCH_MS,
-						);
-					}
-
-					expect(JSON.parse(JSON.stringify(runRes))).toEqual(runRes);
-					expect(JSON.parse(JSON.stringify(diagRes))).toEqual(diagRes);
+					expect(runRes.diagnostics.executable).toBe(false);
+					expect(runRes.diagnostics.findings).toEqual([]);
+					expect(runRes.diagnostics.queries['validKey']?.executable).toBe(true);
+					expect(runRes.diagnostics.queries['invalidKey']?.executable).toBe(false);
+					expect(Object.keys(runRes.matches)).toEqual(['validKey']);
+					expect(Object.prototype.hasOwnProperty.call(runRes.matches, 'invalidKey')).toBe(
+						false,
+					);
+					expect(getMarkdownFilesSpy).toHaveBeenCalledTimes(1);
+					expect(getFileCacheSpy).toHaveBeenCalledTimes(
+						notes.filter((n) => !n.deleted).length,
+					);
 				},
 			),
 		);
 	});
 
-	it('Invariant 4: Context, Case-Insensitive Override Precedence & Normalization Fingerprint Alignment', async () => {
-		const validKeyArb = fc.constantFrom('due', 'priority', 'status', 'done', 'score');
+	it('Invariant 4: Shared Frozen Context, Fingerprint & Zero Temporal Tear Across Sibling Queries', async () => {
+		const validKeyArb = fc.constantFrom('priority', 'status', 'done', 'score');
 		const validPropTypeArb = fc.constantFrom(...VALID_PROPERTY_TYPES);
+		const dueDateNoteArb: fc.Arbitrary<MockNoteSpec> = fc.record({
+			path: fc.constantFrom(
+				'notes/alpha.md',
+				'notes/beta.md',
+				'tasks/todo.md',
+				'archive/old.md',
+			),
+			ctime: fc.constant(1_700_000_000_000),
+			mtime: fc.constant(1_700_000_000_000),
+			size: fc.constant(120),
+			deleted: fc.boolean(),
+			cache: fc.record({
+				frontmatter: fc.record({
+					due: fc.constantFrom(
+						'2026-10-20',
+						'2026-10-21',
+						'2026-10-22',
+						'2026-10-23',
+						'2026-10-25',
+						'not-a-date',
+					),
+				}),
+			}),
+		});
 
 		await assertProperty(
-			'adapters/vault-query-runner__context-override-precedence-and-fingerprint',
+			'adapters/vault-query-runner__shared-context-fingerprint-and-zero-temporal-tear',
 			fc.asyncProperty(
-				fc.array(mockNoteSpecArb, { minLength: 1, maxLength: 4 }),
+				fc.uniqueArray(dueDateNoteArb, {
+					selector: (n) => n.path,
+					minLength: 1,
+					maxLength: 4,
+				}),
 				validKeyArb,
 				validPropTypeArb,
 				validPropTypeArb,
@@ -447,24 +626,37 @@ describe('Vault Query Runner Property Invariants', () => {
 					const typesJson = JSON.stringify({
 						types: {
 							[baseKey]: vaultType,
+							due: 'date',
 						},
 					});
 					const { app: appRun } = makeSpyMockApp({ notes, typesJson });
 					const { app: appDiag } = makeSpyMockApp({ notes, typesJson });
 
 					const [res, diagRes] = await Promise.all([
-						runVaultQuery(appRun, '', {
-							timeZone: rawTz,
-							referenceTimeMs: PINNED_REF_MS,
-							propertyTypes: {
-								[variantKey]: overrideType,
+						runVaultQuery(
+							appRun,
+							{
+								all: '',
+								lt: '[due < @today]',
+								eq: '[due = @today]',
+								gt: '[due > @today]',
+								hasDue: '[due]',
 							},
-						}),
+							{
+								timeZone: rawTz,
+								referenceTimeMs: PINNED_REF_MS,
+								propertyTypes: {
+									[variantKey]: overrideType,
+									due: 'date',
+								},
+							},
+						),
 						diagnoseVaultQuery(appDiag, '', {
 							timeZone: rawTz,
 							referenceTimeMs: PINNED_REF_MS,
 							propertyTypes: {
 								[variantKey]: overrideType,
+								due: 'date',
 							},
 						}),
 					]);
@@ -481,25 +673,39 @@ describe('Vault Query Runner Property Invariants', () => {
 						tz: res.context.timeZone,
 						types: sortedTypePairs,
 					});
+					expect(res.context.normalizationFingerprint).toBe(expectedFingerprint);
 
-					for (const m of res.matches) {
-						expect('normalizationFingerprint' in m).toBe(false);
-					}
 					for (const doc of diagRes.matches) {
 						expect(doc.normalizationFingerprint).toBe(expectedFingerprint);
 					}
 
+					// Zero temporal tear: lt, eq, gt strictly partition all notes with a valid single due date (`hasDue`)
+					const ltPaths = res.matches['lt']!.map((m) => m.file.path);
+					const eqPaths = res.matches['eq']!.map((m) => m.file.path);
+					const gtPaths = res.matches['gt']!.map((m) => m.file.path);
+					const hasDuePaths = res.matches['hasDue']!.map((m) => m.file.path);
+
+					const combined = [...ltPaths, ...eqPaths, ...gtPaths];
+					expect(new Set(combined).size).toBe(combined.length);
+					expect([...combined].sort()).toEqual([...hasDuePaths].sort());
+
 					// Conflicting case-colliding keys within options.propertyTypes itself must fail config validation
 					if (vaultType !== overrideType) {
-						const conflictRes = await runVaultQuery(appRun, '', {
-							timeZone: 'UTC',
-							referenceTimeMs: PINNED_REF_MS,
-							propertyTypes: {
-								[baseKey]: vaultType,
-								[baseKey.toUpperCase()]: overrideType,
+						const conflictRes = await runVaultQuery(
+							appRun,
+							{ all: '' },
+							{
+								timeZone: 'UTC',
+								referenceTimeMs: PINNED_REF_MS,
+								propertyTypes: {
+									[baseKey]: vaultType,
+									[baseKey.toUpperCase()]: overrideType,
+								},
 							},
-						});
+						);
 						expect(conflictRes.diagnostics.executable).toBe(false);
+						expect(conflictRes.context.normalizationFingerprint).toBeNull();
+						expect(conflictRes.matches).toEqual({});
 						expect(
 							conflictRes.diagnostics.findings.some(
 								(d) => d.code === 'ERROR_INVALID_CONFIG',
@@ -511,7 +717,52 @@ describe('Vault Query Runner Property Invariants', () => {
 		);
 	});
 
-	it('Invariant 5: parseObsidianTypesJson Total Sanitization & Idempotence', async () => {
+	it('Invariant 5: Total Function (Never-Throw), Strict LiquidJS POJO / JSON Round-Trip & parseObsidianTypesJson Sanitization', async () => {
+		await assertProperty(
+			'adapters/vault-query-runner__never-throw-and-json-pojo-roundtrip',
+			fc.asyncProperty(
+				uniqueNotesArb,
+				typesJsonPayloadArb,
+				queryMapFuzzArb,
+				queryFuzzArb,
+				optionsFuzzArb,
+				async (notes, typesJson, queryMap, singleQuery, options) => {
+					const { app: appRun } = makeSpyMockApp({ notes, typesJson });
+					const { app: appDiag } = makeSpyMockApp({ notes, typesJson });
+
+					const [runRes, diagRes] = await Promise.all([
+						runVaultQuery(appRun, queryMap, options),
+						diagnoseVaultQuery(appDiag, singleQuery, options),
+					]);
+
+					expect(Object.isFrozen(runRes.context)).toBe(true);
+					expect(Object.isFrozen(runRes.context.propertyTypes)).toBe(true);
+
+					for (const forbidden of FORBIDDEN_KEYS) {
+						expect(
+							Object.prototype.hasOwnProperty.call(
+								runRes.diagnostics.queries,
+								forbidden,
+							),
+						).toBe(false);
+						expect(
+							Object.prototype.hasOwnProperty.call(runRes.matches, forbidden),
+						).toBe(false);
+					}
+
+					if (runRes.context.referenceTimeMs !== null) {
+						expect(Number.isSafeInteger(runRes.context.referenceTimeMs)).toBe(true);
+						expect(Math.abs(runRes.context.referenceTimeMs)).toBeLessThanOrEqual(
+							MAX_SAFE_EPOCH_MS,
+						);
+					}
+
+					expect(JSON.parse(JSON.stringify(runRes))).toEqual(runRes);
+					expect(JSON.parse(JSON.stringify(diagRes))).toEqual(diagRes);
+				},
+			),
+		);
+
 		const rawInputArb = fc.oneof(
 			fc.string({ maxLength: 200 }),
 			fc.json(),

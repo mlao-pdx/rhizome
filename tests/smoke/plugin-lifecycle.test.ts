@@ -63,36 +63,55 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		const plugin = new RhizomePlugin(app, manifest);
 		await plugin.onload();
 
-		const result = await plugin.query('#project [status: active]', {
-			timeZone: 'UTC',
-			referenceTimeMs: 1700000000000,
-		});
+		const result = await plugin.query(
+			{
+				activeProjects: '#project [status: active]',
+				allNotes: '',
+			},
+			{
+				timeZone: 'UTC',
+				referenceTimeMs: 1700000000000,
+			},
+		);
 		expect(result.context).toEqual({
 			timeZone: 'UTC',
 			referenceTimeMs: 1700000000000,
 			propertyTypes: {},
+			normalizationFingerprint: JSON.stringify({ tz: 'UTC', types: [] }),
 		});
 		expect(result.diagnostics).toEqual({
 			executable: true,
 			findings: [],
+			queries: {
+				activeProjects: { executable: true, findings: [] },
+				allNotes: { executable: true, findings: [] },
+			},
 		});
-		expect(result.matches).toHaveLength(1);
-		expect(result.matches[0]?.file.path).toBe('notes/alpha.md');
-		expect(result.matches[0]?.tagLocations).toEqual([
+		expect(result.matches['activeProjects']).toHaveLength(1);
+		expect(result.matches['allNotes']).toHaveLength(1);
+		expect(result.matches['activeProjects']?.[0]).toBe(result.matches['allNotes']?.[0]);
+		expect(result.matches['activeProjects']?.[0]?.file.path).toBe('notes/alpha.md');
+		expect(result.matches['activeProjects']?.[0]?.tagLocations).toEqual([
 			{
 				tag: 'project',
 				source: 'body',
 				origin: '[[notes/alpha.md|alpha]]',
 			},
 		]);
-		expect('normalizationFingerprint' in (result.matches[0] ?? {})).toBe(false);
-		expect('propertyOccurrences' in (result.matches[0] ?? {})).toBe(false);
+		expect('normalizationFingerprint' in (result.matches['activeProjects']?.[0] ?? {})).toBe(
+			false,
+		);
+		expect('propertyOccurrences' in (result.matches['activeProjects']?.[0] ?? {})).toBe(false);
 		expect('paths' in result).toBe(false);
 		expect('propertyDiagnostics' in result).toBe(false);
 
-		const matchAllResult = await plugin.query();
-		expect(matchAllResult.diagnostics.executable).toBe(true);
-		expect(matchAllResult.matches.map((doc) => doc.file.path)).toEqual(['notes/alpha.md']);
+		const emptyResult = await plugin.query();
+		expect(emptyResult.diagnostics).toEqual({
+			executable: true,
+			findings: [],
+			queries: {},
+		});
+		expect(emptyResult.matches).toEqual({});
 	});
 
 	it('diagnoseQuery() evaluates against the vault and returns matches, paths, and propertyDiagnostics', async () => {

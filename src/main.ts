@@ -72,8 +72,11 @@ export default class RhizomePlugin extends Plugin {
 		await this.dataStore.saveSettings(this.settings);
 	}
 
-	async query(input: string = '', options?: VaultQueryOptions): Promise<VaultQueryResult> {
-		return runVaultQuery(this.app, input, options);
+	async query(
+		queries: Readonly<Record<string, string>> = {},
+		options?: VaultQueryOptions,
+	): Promise<VaultQueryResult> {
+		return runVaultQuery(this.app, queries, options);
 	}
 
 	async diagnoseQuery(

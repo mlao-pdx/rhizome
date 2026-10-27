@@ -59,6 +59,8 @@ function makeMockApp(options: {
 	notes?: MockNoteSpec[];
 	typesJson?: string | Error;
 	linkMap?: Record<string, string>;
+	onGetMarkdownFiles?: () => void;
+	onGetFileCache?: (file: { path: string }) => void;
 }): App {
 	const notes = options.notes ?? [];
 	const files = notes.map(makeMockFileEntry);
@@ -84,10 +86,16 @@ function makeMockApp(options: {
 					throw new Error(`ENOENT: ${path}`);
 				}),
 			},
-			getMarkdownFiles: () => files,
+			getMarkdownFiles: () => {
+				options.onGetMarkdownFiles?.();
+				return files;
+			},
 		},
 		metadataCache: {
-			getFileCache: (file: { path: string }) => cacheByPath.get(file.path) ?? null,
+			getFileCache: (file: { path: string }) => {
+				options.onGetFileCache?.(file);
+				return cacheByPath.get(file.path) ?? null;
+			},
 			getFirstLinkpathDest: (linkpath: string, _sourcePath: string) => {
 				const resolved = options.linkMap?.[linkpath];
 				return resolved ? { path: resolved } : null;
@@ -310,7 +318,9 @@ describe('diagnoseVaultQuery', () => {
 });
 
 describe('runVaultQuery', () => {
-	it('returns the reshaped { context, diagnostics, matches } envelope without paths or propertyDiagnostics', async () => {
+	it('evaluates multiple named queries in a single pass and shares === match references across queries', async () => {
+		const getMarkdownFilesSpy = vi.fn();
+		const getFileCacheSpy = vi.fn();
 		const app = makeMockApp({
 			typesJson: JSON.stringify({
 				types: {
@@ -355,14 +365,23 @@ describe('runVaultQuery', () => {
 					},
 				},
 			],
+			onGetMarkdownFiles: getMarkdownFilesSpy,
+			onGetFileCache: getFileCacheSpy,
 		});
 
 		const referenceTimeMs = Date.UTC(2026, 9, 25, 12, 0, 0);
 		const res = await runVaultQuery(
 			app,
-			'#work [priority < 3] [due <= 2026-10-25] [done = false] link:"projects/roadmap.md"',
+			{
+				urgentRoadmap:
+					'#work [priority < 3] [due <= 2026-10-25] [done = false] link:"projects/roadmap.md"',
+				allWork: '#work',
+			},
 			{ timeZone: 'UTC', referenceTimeMs },
 		);
+
+		expect(getMarkdownFilesSpy).toHaveBeenCalledTimes(1);
+		expect(getFileCacheSpy).toHaveBeenCalledTimes(2);
 
 		expect(res.context).toEqual({
 			timeZone: 'UTC',
@@ -372,15 +391,31 @@ describe('runVaultQuery', () => {
 				due: 'date',
 				done: 'checkbox',
 			},
+			normalizationFingerprint: JSON.stringify({
+				tz: 'UTC',
+				types: [
+					['done', 'checkbox'],
+					['due', 'date'],
+					['priority', 'number'],
+				],
+			}),
 		});
 		expect(Object.isFrozen(res.context)).toBe(true);
 		expect(Object.isFrozen(res.context.propertyTypes)).toBe(true);
 		expect(res.diagnostics).toEqual({
 			executable: true,
 			findings: [],
+			queries: {
+				urgentRoadmap: { executable: true, findings: [] },
+				allWork: { executable: true, findings: [] },
+			},
 		});
-		expect(res.matches).toHaveLength(1);
-		const match = res.matches[0]!;
+		expect(Object.keys(res.matches)).toEqual(['urgentRoadmap', 'allWork']);
+		expect(res.matches['urgentRoadmap']).toHaveLength(1);
+		expect(res.matches['allWork']).toHaveLength(2);
+
+		const match = res.matches['urgentRoadmap']![0]!;
+		expect(match).toBe(res.matches['allWork']![0]);
 		expect(match.file.path).toBe('tasks/task-1.md');
 		expect(match.links[0]?.resolvedPath).toBe('projects/roadmap.md');
 		expect(match.links[0]?.origin).toBe('[[tasks/task-1.md|task-1]]');
@@ -412,6 +447,39 @@ describe('runVaultQuery', () => {
 		expect('propertyDiagnostics' in res).toBe(false);
 	});
 
+	it('executes valid queries and omits failed queries from matches when a batch has partial failures', async () => {
+		const app = makeMockApp({
+			typesJson: JSON.stringify({ types: { priority: 'number' } }),
+			notes: [
+				{
+					path: 'tasks/task-1.md',
+					cache: { frontmatter: { priority: 1 } },
+				},
+			],
+		});
+
+		const res = await runVaultQuery(
+			app,
+			{
+				validQuery: '[priority < 3]',
+				brokenQuery: '[priority = "not-a-number"]',
+			},
+			{ timeZone: 'UTC', referenceTimeMs: 1700000000000 },
+		);
+
+		expect(res.diagnostics.executable).toBe(false);
+		expect(res.diagnostics.findings).toEqual([]);
+		expect(res.diagnostics.queries['validQuery']).toEqual({
+			executable: true,
+			findings: [],
+		});
+		expect(res.diagnostics.queries['brokenQuery']?.executable).toBe(false);
+		expect(res.diagnostics.queries['brokenQuery']?.findings.length).toBeGreaterThan(0);
+		expect(Object.keys(res.matches)).toEqual(['validQuery']);
+		expect('brokenQuery' in res.matches).toBe(false);
+		expect(res.matches['validQuery']?.map((m) => m.file.path)).toEqual(['tasks/task-1.md']);
+	});
+
 	it('skips files marked deleted: true in both runVaultQuery and diagnoseVaultQuery', async () => {
 		const app = makeMockApp({
 			notes: [
@@ -427,8 +495,12 @@ describe('runVaultQuery', () => {
 			],
 		});
 
-		const runRes = await runVaultQuery(app, '[status: active]', { timeZone: 'UTC' });
-		expect(runRes.matches.map((m) => m.file.path)).toEqual(['notes/active.md']);
+		const runRes = await runVaultQuery(
+			app,
+			{ active: '[status: active]' },
+			{ timeZone: 'UTC' },
+		);
+		expect(runRes.matches['active']?.map((m) => m.file.path)).toEqual(['notes/active.md']);
 
 		const diagRes = await diagnoseVaultQuery(app, '[status: active]', { timeZone: 'UTC' });
 		expect(diagRes.paths).toEqual(['notes/active.md']);
@@ -447,37 +519,66 @@ describe('runVaultQuery', () => {
 		});
 
 		const referenceTimeMs = Date.UTC(2026, 9, 25, 12, 0, 0);
-		const res = await runVaultQuery(app, '[due = @today]', {
-			timeZone: 'UTC',
-			propertyTypes: { Due: 'date' },
-			referenceTimeMs,
-		});
+		const res = await runVaultQuery(
+			app,
+			{ today: '[due = @today]' },
+			{
+				timeZone: 'UTC',
+				propertyTypes: { Due: 'date' },
+				referenceTimeMs,
+			},
+		);
 
 		expect(res.diagnostics.executable).toBe(true);
 		expect(res.context.propertyTypes).toEqual({ due: 'date' });
-		expect(res.matches.map((doc) => doc.file.path)).toEqual(['journal/today.md']);
+		expect(res.matches['today']?.map((doc) => doc.file.path)).toEqual(['journal/today.md']);
 	});
 
-	it('short-circuits before scanning the vault when query compilation fails', async () => {
+	it('short-circuits before scanning the vault when all queries fail or an empty query map is passed', async () => {
 		const getMarkdownFilesSpy = vi.fn(() => []);
 		const app = makeMockApp({
 			typesJson: JSON.stringify({ types: { priority: 'number' } }),
 		});
 		app.vault.getMarkdownFiles = getMarkdownFilesSpy;
 
-		const res = await runVaultQuery(app, '[priority = "not-a-number"]', {
-			timeZone: 'UTC',
-			referenceTimeMs: 1700000000000,
+		const emptyRes = await runVaultQuery(
+			app,
+			{},
+			{
+				timeZone: 'UTC',
+				referenceTimeMs: 1700000000000,
+			},
+		);
+		expect(emptyRes.diagnostics).toEqual({
+			executable: true,
+			findings: [],
+			queries: {},
 		});
+		expect(emptyRes.matches).toEqual({});
+		expect(getMarkdownFilesSpy).not.toHaveBeenCalled();
 
-		expect(res.diagnostics.executable).toBe(false);
-		expect(res.diagnostics.findings.length).toBeGreaterThan(0);
-		expect(res.diagnostics.findings[0]?.severity).toBe('error');
-		expect(res.matches).toEqual([]);
-		expect(res.context).toEqual({
+		const failedRes = await runVaultQuery(
+			app,
+			{ bad: '[priority = "not-a-number"]' },
+			{
+				timeZone: 'UTC',
+				referenceTimeMs: 1700000000000,
+			},
+		);
+
+		expect(failedRes.diagnostics.executable).toBe(false);
+		expect(failedRes.diagnostics.findings).toEqual([]);
+		expect(failedRes.diagnostics.queries['bad']?.executable).toBe(false);
+		expect(failedRes.diagnostics.queries['bad']?.findings[0]?.severity).toBe('error');
+		expect(failedRes.matches).toEqual({});
+		expect(failedRes.context).toEqual({
 			timeZone: 'UTC',
 			referenceTimeMs: 1700000000000,
 			propertyTypes: { priority: 'number' },
+			normalizationFingerprint: JSON.stringify({
+				tz: 'UTC',
+				types: [['priority', 'number']],
+			}),
 		});
 		expect(getMarkdownFilesSpy).not.toHaveBeenCalled();
 	});
@@ -487,17 +588,26 @@ describe('runVaultQuery', () => {
 			typesJson: JSON.stringify({ types: { priority: 'number' } }),
 		});
 
-		const badConfigRes = await runVaultQuery(app, 'note', {
-			timeZone: 'Invalid/Time_Zone_Name',
-			referenceTimeMs: Number.NaN,
-		});
+		const badConfigRes = await runVaultQuery(
+			app,
+			{ q1: 'note' },
+			{
+				timeZone: 'Invalid/Time_Zone_Name',
+				referenceTimeMs: Number.NaN,
+			},
+		);
 
 		expect(badConfigRes.diagnostics.executable).toBe(false);
 		expect(badConfigRes.diagnostics.findings[0]?.code).toBe('ERROR_INVALID_CONFIG');
+		expect(badConfigRes.diagnostics.queries).toEqual({
+			q1: { executable: false, findings: [] },
+		});
+		expect(badConfigRes.matches).toEqual({});
 		expect(badConfigRes.context).toEqual({
 			timeZone: 'Invalid/Time_Zone_Name',
 			referenceTimeMs: null,
 			propertyTypes: { priority: 'number' },
+			normalizationFingerprint: null,
 		});
 		expect(Object.isFrozen(badConfigRes.context)).toBe(true);
 		expect(Object.isFrozen(badConfigRes.context.propertyTypes)).toBe(true);
