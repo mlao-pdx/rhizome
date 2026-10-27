@@ -2,6 +2,7 @@ import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
 	coercePropertyValue,
+	createOriginWikiLinkResolver,
 	FORBIDDEN_KEYS,
 	initEngineConfig,
 	isVirtualFileKey,
@@ -806,7 +807,8 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					// Every origin on links, embeds, and tagLocations is a valid wikilink without unsafe subpath characters
 					const prefix = `[[${doc.file.path}`;
 					const suffix = `|${doc.file.basename}]]`;
-					for (const item of [...doc.links, ...doc.embeds, ...doc.tagLocations]) {
+					const allItems = [...doc.links, ...doc.embeds, ...doc.tagLocations];
+					for (const item of allItems) {
 						expect(item.origin.startsWith(prefix)).toBe(true);
 						expect(item.origin.endsWith(suffix)).toBe(true);
 						const middle = item.origin.slice(
@@ -822,6 +824,40 @@ describe('search metadata normalizer & property coercion invariants', () => {
 							expect(/[[\]#^|\r\n]/.test(subpathText)).toBe(false);
 						}
 					}
+
+					// Invariant 3: Precomputed Origin Pool Cardinality & Equivalence
+					const standaloneResolver = createOriginWikiLinkResolver(
+						doc.file.path,
+						doc.file.basename,
+						blocks,
+						headings,
+					);
+					for (let i = 0; i < bodyLinks.length; i++) {
+						const expected = resolveOriginWikiLink(
+							doc.file.path,
+							doc.file.basename,
+							bodyLinks[i]!.position,
+							blocks,
+							headings,
+						);
+						expect(doc.links[fmLinks.length + i]!.origin).toBe(expected);
+						expect(standaloneResolver.resolve(bodyLinks[i]!.position)).toBe(expected);
+					}
+					for (let i = 0; i < embeds.length; i++) {
+						const expected = resolveOriginWikiLink(
+							doc.file.path,
+							doc.file.basename,
+							embeds[i]!.position,
+							blocks,
+							headings,
+						);
+						expect(doc.embeds[i]!.origin).toBe(expected);
+						expect(standaloneResolver.resolve(embeds[i]!.position)).toBe(expected);
+					}
+					const distinctOrigins = new Set(allItems.map((item) => item.origin));
+					expect(distinctOrigins.size).toBeLessThanOrEqual(
+						1 + Object.keys(blocks).length + headings.length,
+					);
 				},
 			),
 		);

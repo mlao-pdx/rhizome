@@ -97,6 +97,129 @@ function isValidOffset(val: unknown): val is number {
 	return typeof val === 'number' && Number.isSafeInteger(val) && val >= 0;
 }
 
+interface PrecomputedBlockOrigin {
+	readonly startOffset: number;
+	readonly endOffset: number;
+	readonly span: number;
+	readonly orderIndex: number;
+	readonly origin: string;
+}
+
+interface PrecomputedHeadingOrigin {
+	readonly startOffset: number;
+	readonly orderIndex: number;
+	readonly origin: string;
+}
+
+export interface OriginWikiLinkResolver {
+	readonly noteOrigin: string;
+	resolve(itemPos: ObsidianPosInput | null | undefined): string;
+}
+
+/**
+ * Precomputes a per-note lookup table of origin wikilinks for blocks, headings,
+ * and the note-level fallback so each unique origin string is allocated once
+ * and resolved without re-validating or re-testing regexes per item.
+ */
+export function createOriginWikiLinkResolver(
+	filePath: string,
+	fileBasename: string,
+	blocks: ObsidianMetadataCacheInput['blocks'],
+	headings: ObsidianMetadataCacheInput['headings'],
+): OriginWikiLinkResolver {
+	const noteOrigin = `[[${filePath}|${fileBasename}]]`;
+	const blockEntries: PrecomputedBlockOrigin[] = [];
+	const blockOriginCache = new Map<string, string>();
+
+	if (blocks) {
+		let orderIndex = 0;
+		for (const b of Object.values(blocks)) {
+			const currentOrder = orderIndex++;
+			const cleanedId = b.id.startsWith('^') ? b.id.slice(1) : b.id;
+			if (cleanedId.length === 0 || WIKILINK_UNSAFE_RE.test(cleanedId)) {
+				continue;
+			}
+			const bStart = b.position?.start?.offset;
+			const bEnd = b.position?.end?.offset;
+			if (!isValidOffset(bStart) || !isValidOffset(bEnd) || bStart > bEnd) {
+				continue;
+			}
+			let origin = blockOriginCache.get(cleanedId);
+			if (origin === undefined) {
+				origin = `[[${filePath}#^${cleanedId}|${fileBasename}]]`;
+				blockOriginCache.set(cleanedId, origin);
+			}
+			blockEntries.push({
+				startOffset: bStart,
+				endOffset: bEnd,
+				span: bEnd - bStart,
+				orderIndex: currentOrder,
+				origin,
+			});
+		}
+		blockEntries.sort(
+			(a, b) =>
+				a.span - b.span || b.startOffset - a.startOffset || a.orderIndex - b.orderIndex,
+		);
+	}
+
+	const headingEntries: PrecomputedHeadingOrigin[] = [];
+	if (headings) {
+		const headingOriginCache = new Map<string, string>();
+		for (let i = 0; i < headings.length; i++) {
+			const h = headings[i]!;
+			const hStart = h.position?.start?.offset;
+			if (!isValidOffset(hStart)) {
+				continue;
+			}
+			let origin: string;
+			if (h.heading.trim().length > 0 && !WIKILINK_UNSAFE_RE.test(h.heading)) {
+				const cached = headingOriginCache.get(h.heading);
+				if (cached !== undefined) {
+					origin = cached;
+				} else {
+					origin = `[[${filePath}#${h.heading}|${fileBasename}]]`;
+					headingOriginCache.set(h.heading, origin);
+				}
+			} else {
+				origin = noteOrigin;
+			}
+			headingEntries.push({
+				startOffset: hStart,
+				orderIndex: i,
+				origin,
+			});
+		}
+		headingEntries.sort((a, b) => b.startOffset - a.startOffset || b.orderIndex - a.orderIndex);
+	}
+
+	return {
+		noteOrigin,
+		resolve(itemPos: ObsidianPosInput | null | undefined): string {
+			const itemStartOffset = itemPos?.start?.offset;
+			if (!isValidOffset(itemStartOffset)) {
+				return noteOrigin;
+			}
+
+			for (let i = 0; i < blockEntries.length; i++) {
+				const entry = blockEntries[i]!;
+				if (entry.startOffset <= itemStartOffset && itemStartOffset <= entry.endOffset) {
+					return entry.origin;
+				}
+			}
+
+			for (let i = 0; i < headingEntries.length; i++) {
+				const entry = headingEntries[i]!;
+				if (entry.startOffset <= itemStartOffset) {
+					return entry.origin;
+				}
+			}
+
+			return noteOrigin;
+		},
+	};
+}
+
 /**
  * Resolves the narrowest valid Obsidian wikilink pointing to where an item starts
  * in the source note (block ID, active heading, or note-level fallback).
@@ -108,67 +231,7 @@ export function resolveOriginWikiLink(
 	blocks: ObsidianMetadataCacheInput['blocks'],
 	headings: ObsidianMetadataCacheInput['headings'],
 ): string {
-	const noteOrigin = `[[${filePath}|${fileBasename}]]`;
-	const itemStartOffset = itemPos?.start?.offset;
-	if (!isValidOffset(itemStartOffset)) {
-		return noteOrigin;
-	}
-
-	if (blocks) {
-		let bestBlockId: string | null = null;
-		let bestSpan = Number.POSITIVE_INFINITY;
-		let bestStart = -1;
-
-		for (const b of Object.values(blocks)) {
-			const cleanedId = b.id.startsWith('^') ? b.id.slice(1) : b.id;
-			if (cleanedId.length === 0 || WIKILINK_UNSAFE_RE.test(cleanedId)) {
-				continue;
-			}
-			const bStart = b.position?.start?.offset;
-			const bEnd = b.position?.end?.offset;
-			if (!isValidOffset(bStart) || !isValidOffset(bEnd) || bStart > bEnd) {
-				continue;
-			}
-			if (bStart <= itemStartOffset && itemStartOffset <= bEnd) {
-				const span = bEnd - bStart;
-				if (span < bestSpan || (span === bestSpan && bStart > bestStart)) {
-					bestSpan = span;
-					bestStart = bStart;
-					bestBlockId = cleanedId;
-				}
-			}
-		}
-
-		if (bestBlockId !== null) {
-			return `[[${filePath}#^${bestBlockId}|${fileBasename}]]`;
-		}
-	}
-
-	if (headings) {
-		let activeHeadingText: string | null = null;
-		let bestHeadingStart = -1;
-
-		for (const h of headings) {
-			const hStart = h.position?.start?.offset;
-			if (!isValidOffset(hStart)) {
-				continue;
-			}
-			if (hStart <= itemStartOffset && hStart >= bestHeadingStart) {
-				bestHeadingStart = hStart;
-				activeHeadingText = h.heading;
-			}
-		}
-
-		if (
-			activeHeadingText !== null &&
-			activeHeadingText.trim().length > 0 &&
-			!WIKILINK_UNSAFE_RE.test(activeHeadingText)
-		) {
-			return `[[${filePath}#${activeHeadingText}|${fileBasename}]]`;
-		}
-	}
-
-	return noteOrigin;
+	return createOriginWikiLinkResolver(filePath, fileBasename, blocks, headings).resolve(itemPos);
 }
 
 function validateIntegerTimestampMs(val: number, fieldName: string): number {
@@ -245,7 +308,12 @@ export function normalizeObsidianMetadata(
 	const propertyOccurrences: PropertyOccurrence[] = [];
 	const occurrencePositions: Array<ObsidianPosInput | null | undefined> = [];
 	const diagnostics: DocumentDiagnostic[] = [];
-	const noteOrigin = `[[${tfile.path}|${tfile.basename}]]`;
+	const originResolver = createOriginWikiLinkResolver(
+		tfile.path,
+		tfile.basename,
+		cache?.blocks,
+		cache?.headings,
+	);
 
 	const recordDocDiagnosticIfInvalid = (
 		tv: TypedPropertyValue,
@@ -390,14 +458,8 @@ export function normalizeObsidianMetadata(
 		if (occ.key === 'tags' || occ.key === 'tag') {
 			const occOrigin =
 				occ.source === 'frontmatter'
-					? noteOrigin
-					: resolveOriginWikiLink(
-							tfile.path,
-							tfile.basename,
-							occurrencePositions[i],
-							cache?.blocks,
-							cache?.headings,
-						);
+					? originResolver.noteOrigin
+					: originResolver.resolve(occurrencePositions[i]);
 			for (const tv of occ.typedValues) {
 				if (tv.kind === 'text') {
 					const stripped = stripTagHash(tv.value);
@@ -420,13 +482,7 @@ export function normalizeObsidianMetadata(
 			tagLocations.push({
 				tag: stripped,
 				source: 'body',
-				origin: resolveOriginWikiLink(
-					tfile.path,
-					tfile.basename,
-					t.position,
-					cache?.blocks,
-					cache?.headings,
-				),
+				origin: originResolver.resolve(t.position),
 			});
 		}
 	}
@@ -440,20 +496,20 @@ export function normalizeObsidianMetadata(
 
 	const links: NormalizedLink[] = [
 		...(cache?.frontmatterLinks ?? []).map((l) =>
-			normalizeLinkItem(l, 'frontmatter', tfile.path, noteOrigin, resolveLinkPath),
+			normalizeLinkItem(
+				l,
+				'frontmatter',
+				tfile.path,
+				originResolver.noteOrigin,
+				resolveLinkPath,
+			),
 		),
 		...(cache?.links ?? []).map((l) =>
 			normalizeLinkItem(
 				l,
 				'body',
 				tfile.path,
-				resolveOriginWikiLink(
-					tfile.path,
-					tfile.basename,
-					l.position,
-					cache?.blocks,
-					cache?.headings,
-				),
+				originResolver.resolve(l.position),
 				resolveLinkPath,
 			),
 		),
@@ -464,13 +520,7 @@ export function normalizeObsidianMetadata(
 			e,
 			'embed',
 			tfile.path,
-			resolveOriginWikiLink(
-				tfile.path,
-				tfile.basename,
-				e.position,
-				cache?.blocks,
-				cache?.headings,
-			),
+			originResolver.resolve(e.position),
 			resolveLinkPath,
 		),
 	);

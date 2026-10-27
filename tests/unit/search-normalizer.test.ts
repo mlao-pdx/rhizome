@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
 	buildPropertiesViews,
 	coercePropertyValue,
+	createOriginWikiLinkResolver,
 	FORBIDDEN_KEYS,
 	initEngineConfig,
 	MAX_SAFE_EPOCH_MS,
@@ -801,5 +802,66 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				origin: '[[Projects/Plan.md|Plan]]',
 			},
 		]);
+
+		// 4. Bounded unique origin pool across the entire document
+		const distinctOrigins = new Set(
+			[...doc.links, ...doc.embeds, ...doc.tagLocations].map((item) => item.origin),
+		);
+		expect(distinctOrigins).toEqual(
+			new Set([
+				'[[Projects/Plan.md|Plan]]',
+				'[[Projects/Plan.md#Clean Heading|Plan]]',
+				'[[Projects/Plan.md#Final Section|Plan]]',
+				'[[Projects/Plan.md#^inner-block|Plan]]',
+				'[[Projects/Plan.md#^outer-block|Plan]]',
+			]),
+		);
+	});
+
+	it('precomputes per-note origin lookup table with createOriginWikiLinkResolver and handles partial Pos mocks and tie-breakers', () => {
+		const pos = (startOffset: number, endOffset: number) => ({
+			start: { line: 1, col: 0, offset: startOffset },
+			end: { line: 1, col: 0, offset: endOffset },
+		});
+
+		const resolver = createOriginWikiLinkResolver(
+			'Folder/Note.md',
+			'Note',
+			{
+				missingPos: { id: 'no-pos', position: {} as never },
+				tieLaterStart: { id: 'later-start', position: pos(110, 150) },
+				tieEarlierStart: { id: 'earlier-start', position: pos(100, 140) },
+				exactTieFirst: { id: 'first-tie', position: pos(200, 220) },
+				exactTieSecond: { id: 'second-tie', position: pos(200, 220) },
+			},
+			[
+				{ heading: 'Missing Pos Heading', level: 1, position: {} as never },
+				{ heading: 'Duplicate Heading', level: 2, position: pos(20, 35) },
+				{ heading: 'Duplicate Heading', level: 2, position: pos(50, 65) },
+				{ heading: 'Same Offset First', level: 2, position: pos(300, 310) },
+				{ heading: 'Same Offset Last', level: 2, position: pos(300, 310) },
+				{ heading: '   ', level: 2, position: pos(350, 355) },
+			],
+		);
+
+		expect(resolver.noteOrigin).toBe('[[Folder/Note.md|Note]]');
+		expect(resolver.resolve(undefined)).toBe(resolver.noteOrigin);
+		expect(resolver.resolve({} as never)).toBe(resolver.noteOrigin);
+
+		// Equal span (40), tie broken by larger startOffset (110 > 100)
+		expect(resolver.resolve(pos(120, 125))).toBe('[[Folder/Note.md#^later-start|Note]]');
+
+		// Equal span and equal startOffset, tie broken by first seen in blocks record
+		expect(resolver.resolve(pos(210, 215))).toBe('[[Folder/Note.md#^first-tie|Note]]');
+
+		// Duplicate heading text reuses the same origin string
+		expect(resolver.resolve(pos(25, 30))).toBe('[[Folder/Note.md#Duplicate Heading|Note]]');
+		expect(resolver.resolve(pos(55, 60))).toBe('[[Folder/Note.md#Duplicate Heading|Note]]');
+
+		// Heading tie at same startOffset broken by last in appearance order
+		expect(resolver.resolve(pos(315, 320))).toBe('[[Folder/Note.md#Same Offset Last|Note]]');
+
+		// Blank active heading falls back directly to noteOrigin (does not walk back to Same Offset Last)
+		expect(resolver.resolve(pos(360, 365))).toBe(resolver.noteOrigin);
 	});
 });
