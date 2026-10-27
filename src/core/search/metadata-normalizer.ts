@@ -383,7 +383,7 @@ export function normalizeObsidianMetadata(
 		}
 	}
 
-	const tags: string[] = [];
+	const tagSet = new Set<string>();
 	const tagLocations: NormalizedTagLocation[] = [];
 	for (let i = 0; i < propertyOccurrences.length; i++) {
 		const occ = propertyOccurrences[i]!;
@@ -402,7 +402,7 @@ export function normalizeObsidianMetadata(
 				if (tv.kind === 'text') {
 					const stripped = stripTagHash(tv.value);
 					if (stripped) {
-						tags.push(stripped);
+						tagSet.add(stripped.toLowerCase());
 						tagLocations.push({
 							tag: stripped,
 							source: occ.source,
@@ -416,7 +416,7 @@ export function normalizeObsidianMetadata(
 	for (const t of cache?.tags ?? []) {
 		const stripped = stripTagHash(t.tag);
 		if (stripped) {
-			tags.push(stripped);
+			tagSet.add(stripped.toLowerCase());
 			tagLocations.push({
 				tag: stripped,
 				source: 'body',
@@ -430,6 +430,7 @@ export function normalizeObsidianMetadata(
 			});
 		}
 	}
+	const tags = Array.from(tagSet).sort();
 
 	const headings: NormalizedHeading[] = (cache?.headings ?? []).map((h) => ({
 		text: h.heading,

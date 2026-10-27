@@ -512,17 +512,27 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					]);
 					expect('stat' in doc.file).toBe(false);
 
-					// 1. tags: non-empty, no leading '#', preserves casing, appearance order, and duplicates
+					// 1. tags: non-empty, no leading '#', lowercased, deduplicated, sorted set
 					const expectedFmTags = fmTags
 						.map((t) => stripTagHash(t))
 						.filter((t) => t.length > 0);
 					const expectedCacheTags = tags
 						.map((t) => stripTagHash(t.tag))
 						.filter((t) => t.length > 0);
-					expect(doc.tags).toEqual([...expectedFmTags, ...expectedCacheTags]);
-					for (const t of doc.tags) {
+					const expectedTagSet = Array.from(
+						new Set(
+							[...expectedFmTags, ...expectedCacheTags].map((t) => t.toLowerCase()),
+						),
+					).sort();
+					expect(doc.tags).toEqual(expectedTagSet);
+					for (let i = 0; i < doc.tags.length; i++) {
+						const t = doc.tags[i]!;
 						expect(t.length).toBeGreaterThan(0);
 						expect(t.startsWith('#')).toBe(false);
+						expect(t).toBe(t.toLowerCase());
+						if (i > 0) {
+							expect(doc.tags[i - 1]! < t).toBe(true);
+						}
 					}
 					expect(doc.properties['tags']).toEqual(expectedFmTags);
 					for (const occ of doc.propertyOccurrences) {
@@ -633,7 +643,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 		);
 	});
 
-	it('Links Appearance Order & TagLocations Bijection Invariant: frontmatterLinks precede body links and tagLocations aligns 1-to-1 with tags in frontmatter -> inline -> body order', async () => {
+	it('Links Appearance Order & TagLocations Set Projection Invariant: frontmatterLinks precede body links and doc.tags is the lowercased sorted set of tagLocations in frontmatter -> inline -> body order', async () => {
 		const configRes = initEngineConfig({ timeZone: 'UTC', propertyTypes: {} });
 		if (!configRes.ok) throw new Error('Expected valid config');
 		const resolvedConfig = configRes.config;
@@ -775,9 +785,12 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						}
 					}
 
-					// Invariant 2: doc.tags and doc.tagLocations bijection & monotonic source order
-					expect(doc.tagLocations.length).toBe(doc.tags.length);
-					expect(doc.tagLocations.map((tl) => tl.tag)).toEqual(doc.tags);
+					// Invariant 2: doc.tags is the lowercased sorted set projection of doc.tagLocations, which maintains monotonic source order
+					expect(doc.tags).toEqual(
+						Array.from(
+							new Set(doc.tagLocations.map((tl) => tl.tag.toLowerCase())),
+						).sort(),
+					);
 
 					const sourceOrder = { frontmatter: 0, inline: 1, body: 2 } as const;
 					let maxSourceRank = 0;

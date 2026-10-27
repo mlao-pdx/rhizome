@@ -223,10 +223,12 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		});
 		const docs = [doc1, doc2];
 
-		// Case-sensitive regex matches only exact authored casing
-		assertEval(docs, 'tag:/^Work/', config, ['upper.md']);
-		assertEval(docs, 'tag:/^work/', config, ['lower.md']);
-		assertEval(docs, 'tag:/^BodyTag$/', config, ['upper.md']);
+		// Case-sensitive regex on properties and blocks matches exact authored casing;
+		// tag: scope reads the lowercased doc.tags selection set
+		assertEval(docs, 'tag:/^Work/', config, []);
+		assertEval(docs, 'tag:/^work/', config, ['upper.md', 'lower.md']);
+		assertEval(docs, 'tag:/^BodyTag$/', config, []);
+		assertEval(docs, 'tag:/^bodytag$/', config, ['upper.md', 'lower.md']);
 		assertEval(docs, '[tags: /^Work/]', config, ['upper.md']);
 		assertEval(docs, '[tags: /^work/]', config, ['lower.md']);
 		assertEval(docs, 'blocks:/^Blk-Alpha$/', config, ['upper.md']);

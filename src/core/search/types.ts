@@ -158,8 +158,8 @@ export interface NormalizedDocument {
 	normalizationFingerprint: string;
 	file: NormalizedFileInfo;
 	aliases: string[];
-	tags: string[]; // Authored-case tags with leading '#' stripped, in appearance order
-	tagLocations: NormalizedTagLocation[]; // In 1-to-1 correspondence with tags (frontmatter -> inline -> body)
+	tags: string[]; // Lowercased, '#'-stripped, deduplicated, sorted set of tags across all occurrences
+	tagLocations: NormalizedTagLocation[]; // Full occurrence stream preserving authored casing, duplicates, and order (frontmatter -> inline -> body)
 	headings: NormalizedHeading[];
 	links: NormalizedLink[]; // Outgoing links (frontmatterLinks + body links, excluding embeds)
 	embeds: NormalizedLink[]; // Outgoing embeds

@@ -415,14 +415,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		);
 
 		expect(doc.file.parent).toBe('');
-		expect(doc.tags).toEqual([
-			'Project',
-			'work/urgent',
-			'work/urgent',
-			'extra-tag',
-			'work/urgent',
-			'inline-tag',
-		]);
+		expect(doc.tags).toEqual(['extra-tag', 'inline-tag', 'project', 'work/urgent']);
 		expect(doc.tagLocations).toEqual([
 			{ tag: 'Project', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
 			{ tag: 'work/urgent', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
@@ -761,15 +754,15 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			},
 		]);
 
-		// 3. Tags & tagLocations bijection and appearance order (frontmatter -> inline -> body)
+		// 3. Tags (lowercased sorted set) & tagLocations (authored casing and appearance order: frontmatter -> inline -> body)
 		expect(doc.tags).toEqual([
+			'body-block',
+			'body-fallback',
+			'body-heading',
 			'fm-tag',
 			'inline-a',
 			'inline-b',
 			'inline-in-block',
-			'body-block',
-			'body-heading',
-			'body-fallback',
 		]);
 		expect(doc.tagLocations).toEqual([
 			{
