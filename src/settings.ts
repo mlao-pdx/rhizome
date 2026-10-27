@@ -77,7 +77,7 @@ export class RhizomeSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Reveal log folder')
 			.setDesc(
-				`Opens ${this.plugin.loggerAdapter.logsFolderPath} in Obsidian\u2019s file explorer.`,
+				`Opens ${this.plugin.loggerAdapter.logsFolderPath} in Obsidian\u2019s file explorer and Notebook Navigator (when active).`,
 			)
 			.addButton((button) =>
 				button.setButtonText('Reveal log folder').onClick(() => {

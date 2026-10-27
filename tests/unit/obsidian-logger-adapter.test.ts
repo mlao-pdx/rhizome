@@ -1,9 +1,10 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 
 import type { App } from 'obsidian';
 import { ObsidianLoggerAdapter } from '../../src/adapters/obsidian-logger-adapter';
+import { noticeMessages } from '../support/mock-obsidian-app';
 import { createInMemoryDataAdapter, type InMemoryDataAdapter } from '../support/mock-vault-adapter';
 
 const TEST_PLUGIN_ID = 'rhizome';
@@ -25,13 +26,17 @@ function createApp(adapter: InMemoryDataAdapter): App {
 }
 
 describe('ObsidianLoggerAdapter', () => {
+	beforeEach(() => {
+		noticeMessages.length = 0;
+	});
+
 	it('touches no vault I/O while logging is disabled', async () => {
 		const adapter = createInMemoryDataAdapter();
 		const logger = new ObsidianLoggerAdapter(
 			createApp(adapter),
 			() => ({
 				loggingEnabled: false,
-				logLevel: 'trace',
+				logLevel: 'debug',
 			}),
 			TEST_PLUGIN_ID,
 		);
@@ -66,19 +71,19 @@ describe('ObsidianLoggerAdapter', () => {
 			createApp(adapter),
 			() => ({
 				loggingEnabled: true,
-				logLevel: 'info',
+				logLevel: 'debug',
 			}),
 			TEST_PLUGIN_ID,
 		);
 
-		logger.log('info', 'hello', { count: 1 });
+		logger.log('debug', 'hello', { count: 1 });
 
 		await vi.waitFor(() => {
 			expect(adapter.files.get(LOG_PATH)).toBeDefined();
 		});
 		const content = adapter.files.get(LOG_PATH) ?? '';
 		expect(content).toMatch(
-			/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \[INFO] hello \{"count":1\}\n$/,
+			/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \[DEBUG] hello \{"count":1\}\n$/,
 		);
 		expect(adapter.dirs.has(`_${TEST_PLUGIN_ID}/logs`)).toBe(true);
 	});
@@ -91,12 +96,12 @@ describe('ObsidianLoggerAdapter', () => {
 			createApp(adapter),
 			() => ({
 				loggingEnabled: true,
-				logLevel: 'info',
+				logLevel: 'debug',
 			}),
 			TEST_PLUGIN_ID,
 		);
 
-		logger.log('info', 'new line after rotation');
+		logger.log('debug', 'new line after rotation');
 
 		await vi.waitFor(() => {
 			expect(adapter.files.get(BACKUP_PATH)).toBeDefined();
@@ -114,12 +119,12 @@ describe('ObsidianLoggerAdapter', () => {
 			createApp(adapter),
 			() => ({
 				loggingEnabled: true,
-				logLevel: 'info',
+				logLevel: 'debug',
 			}),
 			TEST_PLUGIN_ID,
 		);
 
-		logger.log('info', 'rotated line');
+		logger.log('debug', 'rotated line');
 
 		await vi.waitFor(() => {
 			expect(adapter.files.get(BACKUP_PATH)).not.toBe('stale backup');
@@ -135,15 +140,15 @@ describe('ObsidianLoggerAdapter', () => {
 			createApp(adapter),
 			() => ({
 				loggingEnabled: true,
-				logLevel: 'info',
+				logLevel: 'debug',
 			}),
 			TEST_PLUGIN_ID,
 		);
 
 		// Two near-simultaneous calls both observe the file over the cap;
 		// without serialization the second rotate() would race the first.
-		logger.log('info', 'line A');
-		logger.log('info', 'line B');
+		logger.log('debug', 'line A');
+		logger.log('debug', 'line B');
 
 		await vi.waitFor(() => {
 			expect(adapter.files.get(LOG_PATH)).toContain('line B');
@@ -163,7 +168,7 @@ describe('ObsidianLoggerAdapter', () => {
 			createApp(adapter),
 			() => ({
 				loggingEnabled: true,
-				logLevel: 'info',
+				logLevel: 'debug',
 			}),
 			TEST_PLUGIN_ID,
 		);
@@ -172,5 +177,221 @@ describe('ObsidianLoggerAdapter', () => {
 
 		expect(adapter.files.has(LOG_PATH)).toBe(false);
 		expect(adapter.files.has(BACKUP_PATH)).toBe(false);
+	});
+
+	describe('revealLogFolder', () => {
+		const mockFolder = { path: '_rhizome/logs' };
+
+		it('shows a Notice when the log folder does not exist yet', async () => {
+			const adapter = createInMemoryDataAdapter();
+			const logger = new ObsidianLoggerAdapter(
+				createApp(adapter),
+				() => ({ loggingEnabled: true, logLevel: 'warn' }),
+				TEST_PLUGIN_ID,
+			);
+
+			await logger.revealLogFolder();
+
+			expect(noticeMessages).toEqual([
+				'No log folder yet — enable logging in settings and trigger an action first.',
+			]);
+		});
+
+		it('reveals in core Files when only file-explorer is available', async () => {
+			const adapter = createInMemoryDataAdapter();
+			const revealInFolder = vi.fn();
+			const leaf = { view: { revealInFolder } };
+			const revealLeaf = vi.fn(async () => {});
+			const app = {
+				vault: {
+					adapter,
+					getAbstractFileByPath: () => mockFolder,
+				},
+				workspace: {
+					getLeavesOfType: () => [leaf],
+					revealLeaf,
+				},
+			} as unknown as App;
+			const logger = new ObsidianLoggerAdapter(
+				app,
+				() => ({ loggingEnabled: true, logLevel: 'warn' }),
+				TEST_PLUGIN_ID,
+			);
+
+			await logger.revealLogFolder();
+
+			expect(revealLeaf).toHaveBeenCalledWith(leaf);
+			expect(revealInFolder).toHaveBeenCalledWith(mockFolder);
+			expect(noticeMessages).toEqual([]);
+		});
+
+		it('reveals in Notebook Navigator when only Notebook Navigator is available', async () => {
+			const adapter = createInMemoryDataAdapter();
+			const navigateToFolder = vi.fn(async () => true);
+			const app = {
+				vault: {
+					adapter,
+					getAbstractFileByPath: () => mockFolder,
+				},
+				workspace: {
+					getLeavesOfType: () => [],
+					revealLeaf: async () => {},
+				},
+				plugins: {
+					plugins: {
+						'notebook-navigator': {
+							api: {
+								navigation: {
+									navigateToFolder,
+								},
+							},
+						},
+					},
+				},
+			} as unknown as App;
+			const logger = new ObsidianLoggerAdapter(
+				app,
+				() => ({ loggingEnabled: true, logLevel: 'warn' }),
+				TEST_PLUGIN_ID,
+			);
+
+			await logger.revealLogFolder();
+
+			expect(navigateToFolder).toHaveBeenCalledWith(mockFolder);
+			expect(noticeMessages).toEqual([]);
+		});
+
+		it('reveals in core Files first and then Notebook Navigator when both are available', async () => {
+			const adapter = createInMemoryDataAdapter();
+			const callOrder: string[] = [];
+			const revealInFolder = vi.fn(() => {
+				callOrder.push('files');
+			});
+			const leaf = { view: { revealInFolder } };
+			const navigateToFolder = vi.fn(async () => {
+				callOrder.push('notebook-navigator');
+				return true;
+			});
+			const app = {
+				vault: {
+					adapter,
+					getAbstractFileByPath: () => mockFolder,
+				},
+				workspace: {
+					getLeavesOfType: () => [leaf],
+					revealLeaf: async () => {},
+				},
+				plugins: {
+					plugins: {
+						'notebook-navigator': {
+							api: {
+								navigation: {
+									navigateToFolder,
+								},
+							},
+						},
+					},
+				},
+			} as unknown as App;
+			const logger = new ObsidianLoggerAdapter(
+				app,
+				() => ({ loggingEnabled: true, logLevel: 'warn' }),
+				TEST_PLUGIN_ID,
+			);
+
+			await logger.revealLogFolder();
+
+			expect(callOrder).toEqual(['files', 'notebook-navigator']);
+			expect(noticeMessages).toEqual([]);
+		});
+
+		it('shows the fallback path Notice when Notebook Navigator returns false and Files is unavailable', async () => {
+			const adapter = createInMemoryDataAdapter();
+			const navigateToFolder = vi.fn(async () => false);
+			const app = {
+				vault: {
+					adapter,
+					getAbstractFileByPath: () => mockFolder,
+				},
+				workspace: {
+					getLeavesOfType: () => [],
+					revealLeaf: async () => {},
+				},
+				plugins: {
+					plugins: {
+						'notebook-navigator': {
+							api: {
+								navigation: {
+									navigateToFolder,
+								},
+							},
+						},
+					},
+				},
+			} as unknown as App;
+			const logger = new ObsidianLoggerAdapter(
+				app,
+				() => ({ loggingEnabled: true, logLevel: 'warn' }),
+				TEST_PLUGIN_ID,
+			);
+
+			await logger.revealLogFolder();
+
+			expect(navigateToFolder).toHaveBeenCalledWith(mockFolder);
+			expect(noticeMessages).toEqual(['Log folder: _rhizome/logs']);
+		});
+
+		it('reveals in core Files when file-explorer view is deferred until revealLeaf resolves', async () => {
+			const adapter = createInMemoryDataAdapter();
+			const revealInFolder = vi.fn();
+			const leaf: { view: unknown } = { view: {} };
+			const revealLeaf = vi.fn(async () => {
+				leaf.view = { revealInFolder };
+			});
+			const app = {
+				vault: {
+					adapter,
+					getAbstractFileByPath: () => mockFolder,
+				},
+				workspace: {
+					getLeavesOfType: () => [leaf],
+					revealLeaf,
+				},
+			} as unknown as App;
+			const logger = new ObsidianLoggerAdapter(
+				app,
+				() => ({ loggingEnabled: true, logLevel: 'warn' }),
+				TEST_PLUGIN_ID,
+			);
+
+			await logger.revealLogFolder();
+
+			expect(revealLeaf).toHaveBeenCalledWith(leaf);
+			expect(revealInFolder).toHaveBeenCalledWith(mockFolder);
+			expect(noticeMessages).toEqual([]);
+		});
+
+		it('shows the fallback path Notice when neither Files nor Notebook Navigator is available', async () => {
+			const adapter = createInMemoryDataAdapter();
+			const app = {
+				vault: {
+					adapter,
+					getAbstractFileByPath: () => mockFolder,
+				},
+				workspace: {
+					getLeavesOfType: () => [],
+					revealLeaf: async () => {},
+				},
+			} as unknown as App;
+			const logger = new ObsidianLoggerAdapter(
+				app,
+				() => ({ loggingEnabled: true, logLevel: 'warn' }),
+				TEST_PLUGIN_ID,
+			);
+
+			await logger.revealLogFolder();
+
+			expect(noticeMessages).toEqual(['Log folder: _rhizome/logs']);
+		});
 	});
 });

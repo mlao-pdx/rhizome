@@ -30,11 +30,22 @@ describe('PluginDataStore.loadSettings', () => {
 	});
 
 	it('forgivingly reads the legacy flat settings shape instead of discarding it', async () => {
-		const { store } = createStore({ loggingEnabled: true, logLevel: 'info' });
+		const { store } = createStore({ loggingEnabled: true, logLevel: 'debug' });
 		expect(await store.loadSettings()).toEqual({
 			...DEFAULTS,
 			loggingEnabled: true,
-			logLevel: 'info',
+			logLevel: 'debug',
+		});
+	});
+
+	it('falls back to the default logLevel when a legacy or invalid logLevel is persisted', async () => {
+		const { store } = createStore({
+			settings: { loggingEnabled: true, logLevel: 'info' },
+		});
+		expect(await store.loadSettings()).toEqual({
+			...DEFAULTS,
+			loggingEnabled: true,
+			logLevel: 'warn',
 		});
 	});
 
@@ -126,10 +137,10 @@ describe('PluginDataStore.saveSettings', () => {
 		await Promise.all([
 			store.saveSettings({ ...DEFAULTS, loggingEnabled: true }),
 			store.ensureVaultInstanceId(),
-			store.saveSettings({ ...DEFAULTS, loggingEnabled: true, logLevel: 'info' }),
+			store.saveSettings({ ...DEFAULTS, loggingEnabled: true, logLevel: 'debug' }),
 		]);
 		const last = data.writes[data.writes.length - 1] as PluginData;
-		expect(last.settings.logLevel).toBe('info');
+		expect(last.settings.logLevel).toBe('debug');
 		expect(isValidVaultInstanceId(last.vaultInstanceId)).toBe(true);
 		// No write lost either intermediate state permanently.
 		expect(data.writes.length).toBeGreaterThanOrEqual(3);
@@ -152,8 +163,8 @@ describe('PluginDataStore.saveSettings', () => {
 		await expect(store.saveSettings({ ...DEFAULTS, loggingEnabled: true })).rejects.toThrow(
 			'disk full',
 		);
-		await store.saveSettings({ ...DEFAULTS, logLevel: 'info' });
+		await store.saveSettings({ ...DEFAULTS, logLevel: 'debug' });
 		expect(data.writes).toHaveLength(1);
-		expect((data.writes[0] as PluginData).settings.logLevel).toBe('info');
+		expect((data.writes[0] as PluginData).settings.logLevel).toBe('debug');
 	});
 });

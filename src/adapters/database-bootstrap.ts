@@ -1,3 +1,4 @@
+import type { LoggerPort } from '@ports/logger-port';
 import type { PluginDatabase } from './dexie-persistence-adapter';
 import { IDENTITY_KEY, IDENTITY_RECORD_FORMAT, decideBootstrapAction } from './database-identity';
 
@@ -28,6 +29,7 @@ export interface BootstrapParameters {
 	readonly factory: IDBFactory;
 	readonly ensureVaultInstanceId: () => Promise<string>;
 	readonly openDatabase: () => PluginDatabase;
+	readonly logger?: LoggerPort | undefined;
 }
 
 /**
@@ -53,7 +55,15 @@ export async function bootstrapPersistenceDatabase(
 	const present = await databaseExists(params.factory, params.dbName);
 
 	if (!present) {
-		return createWithIdentity(params.openDatabase, vaultInstanceId);
+		const created = await createWithIdentity(params.openDatabase, vaultInstanceId);
+		params.logger?.log(
+			'debug',
+			`Persistence database bootstrap complete on «${params.dbName}»`,
+			{
+				action: 'create',
+			},
+		);
+		return created;
 	}
 
 	// Step 4: present — read the identity singleton. An open failure means
@@ -72,6 +82,13 @@ export async function bootstrapPersistenceDatabase(
 		storedIdentity,
 	});
 	if (decision.database === 'reuse') {
+		params.logger?.log(
+			'debug',
+			`Persistence database bootstrap complete on «${params.dbName}»`,
+			{
+				action: 'reuse',
+			},
+		);
 		return probed;
 	}
 
@@ -86,7 +103,15 @@ export async function bootstrapPersistenceDatabase(
 			{ cause: error },
 		);
 	}
-	return createWithIdentity(params.openDatabase, vaultInstanceId);
+	const recreated = await createWithIdentity(params.openDatabase, vaultInstanceId);
+	params.logger?.log(
+		'warn',
+		`Recreated persistence database «${params.dbName}» due to missing or mismatched identity`,
+		{
+			action: 'recreate',
+		},
+	);
+	return recreated;
 }
 
 /**

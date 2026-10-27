@@ -18,14 +18,9 @@ export default class RhizomePlugin extends Plugin {
 	persistence!: DexiePersistenceAdapter;
 
 	override async onload() {
-		this.dataStore = new PluginDataStore(
-			() => this.loadData(),
-			(data) => this.saveData(data),
-			DEFAULT_SETTINGS,
-		);
-		await this.loadSettings();
+		this.settings = { ...DEFAULT_SETTINGS };
 
-		// Wired here so it exists before any future core/service constructor
+		// Wired here so it exists before any core/service constructor
 		// needs it injected; reads settings live, so no re-wiring is needed
 		// when the user flips the Diagnostics toggle.
 		this.loggerAdapter = new ObsidianLoggerAdapter(
@@ -33,7 +28,16 @@ export default class RhizomePlugin extends Plugin {
 			() => this.settings,
 			this.manifest.id,
 		);
-		this.loggerAdapter.log('info', `${this.manifest.name} loaded`, {
+
+		this.dataStore = new PluginDataStore(
+			() => this.loadData(),
+			(data) => this.saveData(data),
+			DEFAULT_SETTINGS,
+			this.loggerAdapter,
+		);
+		await this.loadSettings();
+
+		this.loggerAdapter.log('debug', `${this.manifest.name} loaded`, {
 			version: this.manifest.version,
 		});
 
@@ -61,7 +65,7 @@ export default class RhizomePlugin extends Plugin {
 	}
 
 	override onunload() {
-		this.loggerAdapter?.log('info', `${this.manifest.name} unloaded`);
+		this.loggerAdapter?.log('debug', `${this.manifest.name} unloaded`);
 	}
 
 	async loadSettings() {
@@ -76,13 +80,13 @@ export default class RhizomePlugin extends Plugin {
 		queries: Readonly<Record<string, string>> = {},
 		options?: VaultQueryOptions,
 	): Promise<VaultQueryResult> {
-		return runVaultQuery(this.app, queries, options);
+		return runVaultQuery(this.app, queries, options, this.loggerAdapter);
 	}
 
 	async diagnoseQuery(
 		input: string = '',
 		options?: VaultQueryOptions,
 	): Promise<DiagnoseVaultQueryResult> {
-		return diagnoseVaultQuery(this.app, input, options);
+		return diagnoseVaultQuery(this.app, input, options, this.loggerAdapter);
 	}
 }

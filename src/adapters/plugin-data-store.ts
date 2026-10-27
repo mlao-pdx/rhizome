@@ -1,5 +1,7 @@
+import type { LoggerPort } from '@ports/logger-port';
 import type { RhizomeSettings } from '../settings';
 import { isValidVaultInstanceId, mintVaultInstanceId } from './database-identity';
+import { isLogLevel } from './logger-format';
 
 /**
  * Owns the shape of `data.json` and is the only caller of
@@ -42,6 +44,7 @@ export class PluginDataStore {
 		private readonly loadData: () => Promise<unknown>,
 		private readonly saveData: (data: PluginData) => Promise<void>,
 		private readonly defaultSettings: RhizomeSettings,
+		private readonly logger?: LoggerPort,
 	) {}
 
 	/** Reads `data.json` (once, then cached) and returns the merged settings. */
@@ -80,6 +83,7 @@ export class PluginDataStore {
 		}
 		const minted = mintVaultInstanceId();
 		await this.enqueueWrite((current) => ({ ...current, vaultInstanceId: minted }));
+		this.logger?.log('debug', 'Minted new vaultInstanceId');
 		return minted;
 	}
 
@@ -92,6 +96,11 @@ export class PluginDataStore {
 				const raw = await this.loadData();
 				this.cached = parsePluginData(raw, this.defaultSettings);
 				return this.cached;
+			} catch (error) {
+				this.logger?.log('error', 'Failed to load plugin data', {
+					error: String(error),
+				});
+				throw error;
 			} finally {
 				this.readInFlight = undefined;
 			}
@@ -103,7 +112,14 @@ export class PluginDataStore {
 		const task = this.writeQueue.then(async () => {
 			const current = await this.read();
 			const next = mutate(current);
-			await this.saveData(next);
+			try {
+				await this.saveData(next);
+			} catch (error) {
+				this.logger?.log('error', 'Failed to save plugin data', {
+					error: String(error),
+				});
+				throw error;
+			}
 			this.cached = next;
 		});
 		// A failed write rejects the caller's promise but must not poison
@@ -133,5 +149,14 @@ function mergeSettings(defaults: RhizomeSettings, raw: unknown): RhizomeSettings
 	if (raw === null || typeof raw !== 'object') {
 		return { ...defaults };
 	}
-	return { ...defaults, ...(raw as Partial<RhizomeSettings>) };
+	const candidate = raw as Partial<Record<keyof RhizomeSettings, unknown>>;
+	return {
+		...defaults,
+		...(raw as Partial<RhizomeSettings>),
+		loggingEnabled:
+			typeof candidate.loggingEnabled === 'boolean'
+				? candidate.loggingEnabled
+				: defaults.loggingEnabled,
+		logLevel: isLogLevel(candidate.logLevel) ? candidate.logLevel : defaults.logLevel,
+	};
 }

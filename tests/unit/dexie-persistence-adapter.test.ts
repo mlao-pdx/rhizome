@@ -29,16 +29,16 @@ interface LoggerSpy {
 	readonly logger: {
 		log(level: LogLevel, message: string, meta?: Record<string, unknown>): void;
 	};
-	readonly calls: Array<{ level: LogLevel; message: string }>;
+	readonly calls: Array<{ level: LogLevel; message: string; meta?: Record<string, unknown> }>;
 }
 
 function createLoggerSpy(): LoggerSpy {
-	const calls: Array<{ level: LogLevel; message: string }> = [];
+	const calls: Array<{ level: LogLevel; message: string; meta?: Record<string, unknown> }> = [];
 	return {
 		calls,
 		logger: {
-			log: (level, message) => {
-				calls.push({ level, message });
+			log: (level, message, meta) => {
+				calls.push({ level, message, ...(meta !== undefined ? { meta } : {}) });
 			},
 		},
 	};
@@ -139,10 +139,15 @@ describe('DexiePersistenceAdapter', () => {
 
 	it('fresh create writes the identity record before any application row exists', async () => {
 		const factory = new IDBFactory();
-		const { adapter } = createAdapter(factory, async () => PERSISTED_ID);
+		const { adapter, logCalls } = createAdapter(factory, async () => PERSISTED_ID);
 
 		expect(await adapter.get(999)).toBeUndefined();
 
+		expect(logCalls).toContainEqual({
+			level: 'debug',
+			message: `Persistence database bootstrap complete on «${DB_NAME}»`,
+			meta: { action: 'create' },
+		});
 		const stored = (await readStoredIdentity(factory)) as DatabaseIdentityRecord;
 		expect(stored).toEqual(identityRecord(PERSISTED_ID));
 		const inspector = openDb(factory);
@@ -159,9 +164,14 @@ describe('DexiePersistenceAdapter', () => {
 			identity: identityRecord(PERSISTED_ID),
 			rows: [{ id: 1, value: 'kept' }],
 		});
-		const { adapter } = createAdapter(factory, async () => PERSISTED_ID);
+		const { adapter, logCalls } = createAdapter(factory, async () => PERSISTED_ID);
 
 		expect(await adapter.get(1)).toEqual({ id: 1, value: 'kept' });
+		expect(logCalls).toContainEqual({
+			level: 'debug',
+			message: `Persistence database bootstrap complete on «${DB_NAME}»`,
+			meta: { action: 'reuse' },
+		});
 		expect(await readStoredIdentity(factory)).toEqual(identityRecord(PERSISTED_ID));
 	});
 
@@ -174,10 +184,15 @@ describe('DexiePersistenceAdapter', () => {
 				{ id: 2, value: 'stale-2' },
 			],
 		});
-		const { adapter } = createAdapter(factory, async () => PERSISTED_ID);
+		const { adapter, logCalls } = createAdapter(factory, async () => PERSISTED_ID);
 
 		expect(await adapter.get(1)).toBeUndefined();
 		expect(await adapter.get(2)).toBeUndefined();
+		expect(logCalls).toContainEqual({
+			level: 'warn',
+			message: `Recreated persistence database «${DB_NAME}» due to missing or mismatched identity`,
+			meta: { action: 'recreate' },
+		});
 		expect(await readStoredIdentity(factory)).toEqual(identityRecord(PERSISTED_ID));
 		expect((await factory.databases()).map((info) => info.name)).toEqual([DB_NAME]);
 	});

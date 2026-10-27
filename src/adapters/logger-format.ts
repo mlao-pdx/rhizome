@@ -15,11 +15,21 @@ import type { LogLevel } from '@ports/logger-port';
  * of re-declaring its own copy, so adding/removing a level can't desync
  * the UI from `shouldLog()`'s comparison.
  */
-export const LEVEL_ORDER: readonly LogLevel[] = ['trace', 'debug', 'info', 'warn', 'error'];
+export const LEVEL_ORDER: readonly LogLevel[] = ['debug', 'warn', 'error'];
+
+/** True when `value` is a recognized `LogLevel`. */
+export function isLogLevel(value: unknown): value is LogLevel {
+	return typeof value === 'string' && (LEVEL_ORDER as readonly string[]).includes(value);
+}
 
 /** True when `level` is at or above `threshold` in severity. */
 export function shouldLog(threshold: LogLevel, level: LogLevel): boolean {
-	return LEVEL_ORDER.indexOf(level) >= LEVEL_ORDER.indexOf(threshold);
+	const thresholdIndex = LEVEL_ORDER.indexOf(threshold);
+	const levelIndex = LEVEL_ORDER.indexOf(level);
+	if (thresholdIndex === -1 || levelIndex === -1) {
+		return false;
+	}
+	return levelIndex >= thresholdIndex;
 }
 
 /**

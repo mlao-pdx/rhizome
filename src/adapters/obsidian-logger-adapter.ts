@@ -1,9 +1,25 @@
-import { App, Notice, normalizePath } from 'obsidian';
+import { App, Notice, type TAbstractFile, normalizePath } from 'obsidian';
 import type { LoggerPort, LogLevel } from '@ports/logger-port';
 import { formatLogLine, shouldLog } from './logger-format';
 
 /** Rotation cap, in bytes, before the log file is backed up and truncated. */
 const ROTATION_CAP_BYTES = 5 * 1024 * 1024;
+
+interface NotebookNavigatorNavigationApi {
+	navigateToFolder?: (folder: TAbstractFile | string) => Promise<boolean>;
+}
+
+interface AppWithPlugins extends App {
+	plugins?: {
+		plugins?: {
+			'notebook-navigator'?: {
+				api?: {
+					navigation?: NotebookNavigatorNavigationApi;
+				};
+			};
+		};
+	};
+}
 
 export interface ObsidianLoggerSettings {
 	readonly loggingEnabled: boolean;
@@ -121,9 +137,10 @@ export class ObsidianLoggerAdapter implements LoggerPort {
 	}
 
 	/**
-	 * Reveals the log folder in Obsidian's file explorer. Falls back to a
-	 * `Notice` stating the path when the folder does not exist yet (no
-	 * log has been written) or when the file-explorer view is unavailable.
+	 * Reveals the log folder in Obsidian's file explorer first and then in
+	 * Notebook Navigator (when active). Falls back to a `Notice` stating
+	 * the path when the folder does not exist yet (no log has been written)
+	 * or when neither navigation target can reveal it.
 	 */
 	async revealLogFolder(): Promise<void> {
 		const folder = this.app.vault.getAbstractFileByPath(this.logsFolderPath);
@@ -133,13 +150,35 @@ export class ObsidianLoggerAdapter implements LoggerPort {
 			);
 			return;
 		}
+		let revealedInFiles = false;
 		const fileExplorerLeaf = this.app.workspace.getLeavesOfType('file-explorer')[0];
-		const view = fileExplorerLeaf?.view as unknown as
-			{ revealInFolder?: (file: typeof folder) => void } | undefined;
-		if (fileExplorerLeaf && view?.revealInFolder) {
-			await this.app.workspace.revealLeaf(fileExplorerLeaf);
-			view.revealInFolder(folder);
-		} else {
+		if (fileExplorerLeaf) {
+			try {
+				await this.app.workspace.revealLeaf(fileExplorerLeaf);
+				const view = fileExplorerLeaf.view as unknown as
+					{ revealInFolder?: (file: typeof folder) => void } | undefined;
+				if (typeof view?.revealInFolder === 'function') {
+					view.revealInFolder(folder);
+					revealedInFiles = true;
+				}
+			} catch {
+				revealedInFiles = false;
+			}
+		}
+
+		let revealedInNotebookNavigator = false;
+		const navigation = (this.app as AppWithPlugins).plugins?.plugins?.['notebook-navigator']
+			?.api?.navigation;
+		if (typeof navigation?.navigateToFolder === 'function') {
+			try {
+				const result = await navigation.navigateToFolder(folder);
+				revealedInNotebookNavigator = Boolean(result);
+			} catch {
+				revealedInNotebookNavigator = false;
+			}
+		}
+
+		if (!revealedInFiles && !revealedInNotebookNavigator) {
 			new Notice(`Log folder: ${this.logsFolderPath}`);
 		}
 	}

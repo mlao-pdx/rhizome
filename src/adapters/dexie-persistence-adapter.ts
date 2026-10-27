@@ -168,6 +168,7 @@ export class DexiePersistenceAdapter implements PersistencePort {
 				factory: this.resolveAmbient().indexedDB,
 				ensureVaultInstanceId: this.ensureVaultInstanceId,
 				openDatabase: () => this.openDatabase(),
+				logger: this.logger,
 			});
 			if (this.closed) {
 				// close() raced the bootstrap: don't leak the connection.

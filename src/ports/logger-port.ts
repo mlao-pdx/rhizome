@@ -36,7 +36,7 @@
  * Neither this interface nor its adapter inspects arguments for vault
  * content — only the caller knows which arguments are vault-derived.
  */
-export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error';
+export type LogLevel = 'debug' | 'warn' | 'error';
 
 export interface LoggerPort {
 	/**

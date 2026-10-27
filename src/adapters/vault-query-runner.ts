@@ -1,10 +1,11 @@
-import { type App, normalizePath } from 'obsidian';
+import type { App } from 'obsidian';
 import {
 	compileQuery,
 	type DocumentDiagnostic,
 	evaluateDoc,
 	evaluateVault,
 	FORBIDDEN_KEYS,
+	getExecutionPlan,
 	initEngineConfig,
 	isValidPropertyType,
 	isValidReferenceTimeMs,
@@ -19,8 +20,16 @@ import {
 	type ResolveLinkPathFn,
 	type SearchDiagnostic,
 } from '@core/search';
+import type { LoggerPort } from '@ports/logger-port';
+import {
+	loadVaultPropertyTypes,
+	logEngineConfigFailure,
+	logQueryCompilation,
+	parseObsidianTypesJson,
+	QueriedPropertyDiagnosticsAggregator,
+} from './vault-query-logging';
 
-const BUILTIN_PROPERTY_KEYS: ReadonlySet<string> = new Set(['alias', 'aliases', 'tag', 'tags']);
+export { parseObsidianTypesJson };
 
 /**
  * Options for running or diagnosing a vault query.
@@ -139,65 +148,6 @@ export interface DiagnoseVaultQueryResult {
 	readonly propertyDiagnostics: DocumentDiagnostic[];
 }
 
-/**
- * Parses raw `.obsidian/types.json` content into a normalized `PropertyTypeRegistry`.
- *
- * @remarks
- * (obsidian-idiom, 2026-10-25) Obsidian's `types.json` stores `"aliases": "aliases"` and may
- * contain third-party widget types or mixed-case keys. Filtering unrecognized types, stripping
- * built-in keys handled by `resolveUserPropertyType`, and deduplicating case collisions prevents
- * `initEngineConfig` from rejecting the entire vault config.
- */
-export function parseObsidianTypesJson(rawJson: string): PropertyTypeRegistry {
-	const registry = Object.create(null) as PropertyTypeRegistry;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(rawJson);
-	} catch {
-		return registry;
-	}
-
-	if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-		return registry;
-	}
-
-	const typesObj = (parsed as Record<string, unknown>)['types'];
-	if (typeof typesObj !== 'object' || typesObj === null || Array.isArray(typesObj)) {
-		return registry;
-	}
-
-	for (const [rawKey, rawVal] of Object.entries(typesObj as Record<string, unknown>)) {
-		const key = rawKey.trim().toLowerCase();
-		if (
-			!key ||
-			FORBIDDEN_KEYS.has(key) ||
-			FORBIDDEN_KEYS.has(rawKey) ||
-			BUILTIN_PROPERTY_KEYS.has(key)
-		) {
-			continue;
-		}
-		if (!isValidPropertyType(rawVal)) {
-			continue;
-		}
-		if (Object.prototype.hasOwnProperty.call(registry, key)) {
-			continue;
-		}
-		registry[key] = rawVal;
-	}
-
-	return registry;
-}
-
-async function loadVaultPropertyTypes(app: App): Promise<PropertyTypeRegistry> {
-	const typesPath = normalizePath(`${app.vault.configDir}/types.json`);
-	try {
-		const raw = await app.vault.adapter.read(typesPath);
-		return parseObsidianTypesJson(raw);
-	} catch {
-		return Object.create(null) as PropertyTypeRegistry;
-	}
-}
-
 function resolveDefaultTimeZone(): string {
 	try {
 		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -282,13 +232,15 @@ export async function runVaultQuery(
 	app: App,
 	queries: Readonly<Record<string, string>> = {},
 	options?: VaultQueryOptions,
+	logger?: LoggerPort,
 ): Promise<VaultQueryResult> {
+	const startedAt = Date.now();
 	const sanitizedEntries = sanitizeQueryEntries(queries);
 	const timeZone = options?.timeZone !== undefined ? options.timeZone : resolveDefaultTimeZone();
 	const rawRefTimeMs = options?.referenceTimeMs ?? Date.now();
 	const validRefTimeMs = isValidReferenceTimeMs(rawRefTimeMs) ? rawRefTimeMs : null;
 
-	const vaultTypes = await loadVaultPropertyTypes(app);
+	const vaultTypes = await loadVaultPropertyTypes(app, logger);
 	const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
 
 	const configResult = initEngineConfig({
@@ -296,6 +248,7 @@ export async function runVaultQuery(
 		propertyTypes: mergedTypes,
 	});
 	if (!configResult.ok) {
+		logEngineConfigFailure(logger, timeZone, configResult.diagnostics);
 		const context: VaultQueryContext = Object.freeze({
 			timeZone: typeof timeZone === 'string' ? timeZone.trim() : '',
 			referenceTimeMs: validRefTimeMs,
@@ -330,6 +283,7 @@ export async function runVaultQuery(
 	const queryDiagnosticsMap: Record<string, QueryDiagnostics> = {};
 	const matches: Record<string, VaultQueryMatch[]> = {};
 	const executableQueries: Array<{
+		name: string;
 		prepared: PreparedQuery;
 		bucket: VaultQueryMatch[];
 	}> = [];
@@ -337,6 +291,7 @@ export async function runVaultQuery(
 
 	for (const [name, rawInput] of sanitizedEntries) {
 		const compileResult = compileQuery(rawInput, configResult.config, rawRefTimeMs);
+		logQueryCompilation(logger, name, rawInput, compileResult);
 		queryDiagnosticsMap[name] = {
 			executable: compileResult.executable,
 			findings: compileResult.diagnostics,
@@ -345,6 +300,7 @@ export async function runVaultQuery(
 			const bucket: VaultQueryMatch[] = [];
 			matches[name] = bucket;
 			executableQueries.push({
+				name,
 				prepared: compileResult.prepared,
 				bucket,
 			});
@@ -360,6 +316,15 @@ export async function runVaultQuery(
 	};
 
 	if (executableQueries.length === 0) {
+		logger?.log('debug', 'Completed vault query run', {
+			durationMs: Math.max(0, Date.now() - startedAt),
+			queryCount: sanitizedEntries.length,
+			executableCount: 0,
+			notesScanned: 0,
+			uncachedNotes: 0,
+			docDiagnosticCount: 0,
+			matchCounts: {},
+		});
 		return {
 			context,
 			diagnostics,
@@ -367,20 +332,40 @@ export async function runVaultQuery(
 		};
 	}
 
+	const queriedKeys = new Set<string>();
+	for (const entry of executableQueries) {
+		for (const key of getExecutionPlan(entry.prepared).queriedKeys) {
+			queriedKeys.add(key);
+		}
+	}
+	const propDiagnosticsAggregator = new QueriedPropertyDiagnosticsAggregator(queriedKeys);
+
 	const resolveLinkPath: ResolveLinkPathFn = (rawTarget, sourcePath) =>
 		app.metadataCache.getFirstLinkpathDest(rawTarget, sourcePath)?.path ?? null;
+
+	let notesScanned = 0;
+	let uncachedNotes = 0;
 
 	for (const file of app.vault.getMarkdownFiles()) {
 		if ((file as { deleted?: boolean }).deleted) {
 			continue;
 		}
-		const doc = normalizeObsidianMetadata(
-			file,
-			app.metadataCache.getFileCache(file),
-			configResult.config,
-			[],
-			resolveLinkPath,
-		);
+		notesScanned++;
+		const cache = app.metadataCache.getFileCache(file);
+		if (cache === null) {
+			uncachedNotes++;
+		}
+		let doc: NormalizedDocument;
+		try {
+			doc = normalizeObsidianMetadata(file, cache, configResult.config, [], resolveLinkPath);
+		} catch (error) {
+			logger?.log('error', `Failed to normalize note «${file.path}»`, {
+				error: String(error),
+			});
+			throw error;
+		}
+		propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
+
 		let sharedMatch: VaultQueryMatch | undefined;
 		for (const entry of executableQueries) {
 			if (evaluateDoc(doc, entry.prepared)) {
@@ -389,6 +374,22 @@ export async function runVaultQuery(
 			}
 		}
 	}
+
+	propDiagnosticsAggregator.flush(logger);
+
+	const matchCounts: Record<string, number> = {};
+	for (const entry of executableQueries) {
+		matchCounts[`«${entry.name}»`] = entry.bucket.length;
+	}
+	logger?.log('debug', 'Completed vault query run', {
+		durationMs: Math.max(0, Date.now() - startedAt),
+		queryCount: sanitizedEntries.length,
+		executableCount: executableQueries.length,
+		notesScanned,
+		uncachedNotes,
+		docDiagnosticCount: propDiagnosticsAggregator.diagnosticCount,
+		matchCounts,
+	});
 
 	return {
 		context,
@@ -404,9 +405,11 @@ export async function diagnoseVaultQuery(
 	app: App,
 	input: string = '',
 	options?: VaultQueryOptions,
+	logger?: LoggerPort,
 ): Promise<DiagnoseVaultQueryResult> {
+	const startedAt = Date.now();
 	const timeZone = options?.timeZone !== undefined ? options.timeZone : resolveDefaultTimeZone();
-	const vaultTypes = await loadVaultPropertyTypes(app);
+	const vaultTypes = await loadVaultPropertyTypes(app, logger);
 	const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
 
 	const configResult = initEngineConfig({
@@ -414,6 +417,7 @@ export async function diagnoseVaultQuery(
 		propertyTypes: mergedTypes,
 	});
 	if (!configResult.ok) {
+		logEngineConfigFailure(logger, timeZone, configResult.diagnostics);
 		return {
 			executable: false,
 			paths: [],
@@ -425,6 +429,7 @@ export async function diagnoseVaultQuery(
 
 	const referenceTimeMs = options?.referenceTimeMs ?? Date.now();
 	const compileResult = compileQuery(input, configResult.config, referenceTimeMs);
+	logQueryCompilation(logger, 'diagnose', input, compileResult);
 	if (!compileResult.executable || !compileResult.prepared) {
 		return {
 			executable: false,
@@ -438,20 +443,42 @@ export async function diagnoseVaultQuery(
 	const resolveLinkPath: ResolveLinkPathFn = (rawTarget, sourcePath) =>
 		app.metadataCache.getFirstLinkpathDest(rawTarget, sourcePath)?.path ?? null;
 
-	const docs: NormalizedDocument[] = app.vault
-		.getMarkdownFiles()
-		.filter((file) => !(file as { deleted?: boolean }).deleted)
-		.map((file) =>
-			normalizeObsidianMetadata(
-				file,
-				app.metadataCache.getFileCache(file),
-				configResult.config,
-				[],
-				resolveLinkPath,
-			),
-		);
+	const docs: NormalizedDocument[] = [];
+	let notesScanned = 0;
+	let uncachedNotes = 0;
+
+	for (const file of app.vault.getMarkdownFiles()) {
+		if ((file as { deleted?: boolean }).deleted) {
+			continue;
+		}
+		notesScanned++;
+		const cache = app.metadataCache.getFileCache(file);
+		if (cache === null) {
+			uncachedNotes++;
+		}
+		try {
+			docs.push(
+				normalizeObsidianMetadata(file, cache, configResult.config, [], resolveLinkPath),
+			);
+		} catch (error) {
+			logger?.log('error', `Failed to normalize note «${file.path}»`, {
+				error: String(error),
+			});
+			throw error;
+		}
+	}
 
 	const report = evaluateVault(docs, compileResult.prepared);
+
+	logger?.log('debug', 'Completed diagnoseVaultQuery', {
+		durationMs: Math.max(0, Date.now() - startedAt),
+		queryCount: 1,
+		executableCount: 1,
+		notesScanned,
+		uncachedNotes,
+		docDiagnosticCount: report.propertyDiagnostics.length,
+		matchCounts: { '«diagnose»': report.matches.length },
+	});
 
 	return {
 		executable: true,
