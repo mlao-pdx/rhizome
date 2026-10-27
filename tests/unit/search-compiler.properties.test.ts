@@ -103,16 +103,18 @@ function assertAstDeepFrozen(ast: SearchAST): void {
 	}
 }
 
-function countDocTextMatchNodes(ast: SearchAST): number {
+function collectDocTextMatchNodes(
+	ast: SearchAST,
+): Array<Extract<SearchAST, { type: 'TEXT_MATCH' }>> {
 	switch (ast.type) {
 		case 'TEXT_MATCH':
-			return 1;
+			return [ast];
 		case 'NOT':
-			return countDocTextMatchNodes(ast.child);
+			return collectDocTextMatchNodes(ast.child);
 		case 'LOGICAL':
-			return ast.children.reduce((sum, child) => sum + countDocTextMatchNodes(child), 0);
+			return ast.children.flatMap((child) => collectDocTextMatchNodes(child));
 		default:
-			return 0;
+			return [];
 	}
 }
 
@@ -169,6 +171,8 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 		'/abc/i',
 		'/foo(/',
 		'/test/g',
+		'/unclosed',
+		'file:/unclosed',
 		'[[Note|Alias]]',
 		'#tag/sub',
 		'file:test',
@@ -318,13 +322,24 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 					}
 					const res = compileQuery(fuzzQuery, resolvedConfig, PINNED_REF_MS);
 					if (res.executable && res.ast) {
+						const textNodes = collectDocTextMatchNodes(res.ast);
+						const textNodeSpans = new Set(
+							textNodes.map((n) =>
+								n.span ? `${n.span.startOffset}:${n.span.endOffset}` : '',
+							),
+						);
 						const textDiagCount = res.diagnostics.filter(
 							(diagnostic) =>
 								diagnostic.code === 'HINT_BARE_TEXT_NO_BODY' ||
 								diagnostic.code === 'WARN_LOWERCASE_BOOLEAN' ||
-								diagnostic.code === 'WARN_DANGEROUS_SPACED_HYPHEN',
+								diagnostic.code === 'WARN_DANGEROUS_SPACED_HYPHEN' ||
+								(diagnostic.code === 'HINT_UNCLOSED_REGEX' &&
+									diagnostic.span !== null &&
+									textNodeSpans.has(
+										`${diagnostic.span.startOffset}:${diagnostic.span.endOffset}`,
+									)),
 						).length;
-						expect(textDiagCount).toBe(countDocTextMatchNodes(res.ast));
+						expect(textDiagCount).toBe(textNodes.length);
 					}
 				},
 			),

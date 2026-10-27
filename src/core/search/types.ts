@@ -262,7 +262,8 @@ export type DiagnosticCode =
 	| 'HINT_PROPERTY_MATCHES_SCOPE'
 	| 'HINT_AMBIGUOUS_PRECEDENCE'
 	| 'HINT_WIKILINK_BRACKETS_IN_SCOPE'
-	| 'HINT_BARE_TEXT_NO_BODY';
+	| 'HINT_BARE_TEXT_NO_BODY'
+	| 'HINT_UNCLOSED_REGEX';
 
 export interface SearchDiagnostic {
 	code: DiagnosticCode;

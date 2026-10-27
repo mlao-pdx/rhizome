@@ -608,6 +608,94 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 			);
 		}
 	});
+
+	it('emits HINT_UNCLOSED_REGEX on unquoted leading-slash strings in regex-capable leaf positions and suppresses HINT_BARE_TEXT_NO_BODY on bare terms', () => {
+		for (const bare of ['/foo', '/^draft']) {
+			const res = compileQuery(bare, config, PINNED_REF_MS);
+			expect(res.executable).toBe(true);
+			expect(res.diagnostics).toHaveLength(1);
+			expect(res.diagnostics[0]).toMatchObject({
+				code: 'HINT_UNCLOSED_REGEX',
+				severity: 'hint',
+				issue: `Unquoted "${bare}" starts with "/" and is searched as literal text.`,
+				hint: 'Add a closing "/" for a regular expression, or wrap in quotes for literal text.',
+			});
+			expect(res.diagnostics[0]?.span).not.toBeNull();
+		}
+
+		// Bracketed unclosed regex splits as Identifier("/"), PropertyFilter("[a-z]"), Identifier("+")
+		const bracketedRes = compileQuery('/[a-z]+', config, PINNED_REF_MS);
+		expect(bracketedRes.executable).toBe(true);
+		expect(bracketedRes.diagnostics.map((d) => d.code)).toEqual([
+			'HINT_UNCLOSED_REGEX',
+			'HINT_BARE_TEXT_NO_BODY',
+		]);
+		expect(bracketedRes.diagnostics[0]).toMatchObject({
+			code: 'HINT_UNCLOSED_REGEX',
+			severity: 'hint',
+			issue: 'Unquoted "/" starts with "/" and is searched as literal text.',
+			hint: 'Add a closing "/" for a regular expression, or wrap in quotes for literal text.',
+		});
+
+		// Scoped filter leaf and compound ValueExprAST
+		const scopedSingle = compileQuery('file:/^draft', config, PINNED_REF_MS);
+		expect(scopedSingle.executable).toBe(true);
+		expect(scopedSingle.diagnostics).toHaveLength(1);
+		expect(scopedSingle.diagnostics[0]).toMatchObject({
+			code: 'HINT_UNCLOSED_REGEX',
+			severity: 'hint',
+			issue: 'Unquoted "/^draft" starts with "/" and is searched as literal text.',
+			hint: 'Add a closing "/" for a regular expression, or wrap in quotes for literal text.',
+		});
+		expect(scopedSingle.diagnostics[0]?.span).not.toBeNull();
+
+		const scopedCompound = compileQuery('tag:(/work\nOR -/urgent)', config, PINNED_REF_MS);
+		expect(scopedCompound.executable).toBe(true);
+		expect(scopedCompound.diagnostics).toHaveLength(2);
+		expect(scopedCompound.diagnostics.map((d) => d.issue)).toEqual([
+			'Unquoted "/work" starts with "/" and is searched as literal text.',
+			'Unquoted "/urgent" starts with "/" and is searched as literal text.',
+		]);
+
+		// Property `:` filter leaf and compound ValueExprAST
+		const propSingle = compileQuery('[status: /^todo]', config, PINNED_REF_MS);
+		expect(propSingle.executable).toBe(true);
+		expect(propSingle.diagnostics).toHaveLength(1);
+		expect(propSingle.diagnostics[0]).toMatchObject({
+			code: 'HINT_UNCLOSED_REGEX',
+			severity: 'hint',
+			issue: 'Unquoted "/^todo" starts with "/" and is searched as literal text.',
+			hint: 'Add a closing "/" for a regular expression, or wrap in quotes for literal text.',
+		});
+		expect(propSingle.diagnostics[0]?.span).not.toBeNull();
+
+		const propCompound = compileQuery('[status: (/open\nOR /closed)]', config, PINNED_REF_MS);
+		expect(propCompound.executable).toBe(true);
+		expect(propCompound.diagnostics).toHaveLength(2);
+		expect(propCompound.diagnostics.map((d) => d.issue)).toEqual([
+			'Unquoted "/open" starts with "/" and is searched as literal text.',
+			'Unquoted "/closed" starts with "/" and is searched as literal text.',
+		]);
+
+		// Negative cases that must NOT emit HINT_UNCLOSED_REGEX
+		const negativeQueries = [
+			'"/foo"',
+			'file:"/projects/active"',
+			'[status: "/todo"]',
+			'/foo/i',
+			'file:/^draft/',
+			'//',
+			'file://',
+			'[status = /todo]',
+			'[status != /todo]',
+			'[done: /true]',
+			'[score: /100]',
+		];
+		for (const q of negativeQueries) {
+			const res = compileQuery(q, config, PINNED_REF_MS);
+			expect(res.diagnostics.some((d) => d.code === 'HINT_UNCLOSED_REGEX')).toBe(false);
+		}
+	});
 });
 
 describe('Step 6: PreparedQuery & AST deep freeze (Conformance Test 16c)', () => {

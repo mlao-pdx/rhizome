@@ -1,3 +1,4 @@
+import { resolveQueryPropertyType } from './property-coercion';
 import { BUILT_IN_SCOPES } from './scopes';
 import type {
 	LeafMatcher,
@@ -60,6 +61,55 @@ export function createUnquotedMultiwordScopeWarning(
 		hint: `Use ${scope}:"${leftVal} ${nextVal}"`,
 		span,
 	};
+}
+
+/**
+ * Builds the `HINT_UNCLOSED_REGEX` diagnostic emitted when an unquoted string leaf starts with `/`.
+ */
+export function createUnclosedRegexHint(
+	rawValue: string,
+	span: SourceSpan | null,
+): SearchDiagnostic {
+	return {
+		code: 'HINT_UNCLOSED_REGEX',
+		severity: 'hint',
+		issue: `Unquoted "${rawValue}" starts with "/" and is searched as literal text.`,
+		hint: 'Add a closing "/" for a regular expression, or wrap in quotes for literal text.',
+		span,
+	};
+}
+
+function isUnclosedRegexMatcher(
+	matcher: LeafMatcher,
+): matcher is Extract<LeafMatcher, { kind: 'string' }> {
+	return (
+		matcher.kind === 'string' &&
+		!matcher.quoted &&
+		matcher.value.startsWith('/') &&
+		matcher.value !== '//'
+	);
+}
+
+function lintUnclosedRegexInValueExpr(
+	expr: ValueExprAST,
+	span: SourceSpan | null,
+	diagnostics: SearchDiagnostic[],
+): void {
+	switch (expr.type) {
+		case 'VALUE_LEAF':
+			if (isUnclosedRegexMatcher(expr.matcher)) {
+				diagnostics.push(createUnclosedRegexHint(expr.matcher.value, span));
+			}
+			return;
+		case 'VALUE_NOT':
+			lintUnclosedRegexInValueExpr(expr.child, span, diagnostics);
+			return;
+		case 'VALUE_LOGICAL':
+			for (const child of expr.children) {
+				lintUnclosedRegexInValueExpr(child, span, diagnostics);
+			}
+			return;
+	}
 }
 
 function extractSingleValueEquality(child: SearchAST): SingleValueEquality | null {
@@ -181,7 +231,10 @@ export function lintQueryAST(
 	function traverse(node: SearchAST): void {
 		switch (node.type) {
 			case 'MATCH_ALL':
+				return;
+
 			case 'SCOPED_FILTER':
+				lintUnclosedRegexInValueExpr(node.expr, node.span ?? null, diagnostics);
 				return;
 
 			case 'PROPERTY_FILTER': {
@@ -211,6 +264,17 @@ export function lintQueryAST(
 								span: node.span ?? null,
 							});
 						}
+						const propType = resolveQueryPropertyType(
+							node.key,
+							resolvedConfig?.propertyTypes ?? {},
+						);
+						if (propType !== 'checkbox') {
+							lintUnclosedRegexInValueExpr(
+								node.valueExpr,
+								node.span ?? null,
+								diagnostics,
+							);
+						}
 					}
 				}
 				return;
@@ -232,6 +296,12 @@ export function lintQueryAST(
 							span: node.span ?? null,
 						});
 					}
+				}
+				if (!flaggedTextNodes.has(node) && isUnclosedRegexMatcher(node.matcher)) {
+					flaggedTextNodes.add(node);
+					diagnostics.push(
+						createUnclosedRegexHint(node.matcher.value, node.span ?? null),
+					);
 				}
 				if (!flaggedTextNodes.has(node)) {
 					diagnostics.push({
