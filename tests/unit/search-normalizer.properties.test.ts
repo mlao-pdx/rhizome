@@ -825,39 +825,99 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						}
 					}
 
-					// Invariant 3: Precomputed Origin Pool Cardinality & Equivalence
+					// Invariant 3: Tight Deduplicated Valid Origin Pool Closure & Full Item Coverage (links, embeds, inline/body tagLocations)
 					const standaloneResolver = createOriginWikiLinkResolver(
 						doc.file.path,
 						doc.file.basename,
 						blocks,
 						headings,
 					);
+					const allowedOriginPool = new Set<string>([noteOrigin]);
+					for (const b of Object.values(blocks)) {
+						const cleanedId = b.id.startsWith('^') ? b.id.slice(1) : b.id;
+						const bStart = b.position?.start?.offset;
+						const bEnd = b.position?.end?.offset;
+						if (
+							cleanedId.length > 0 &&
+							!/[[\]#^|\r\n]/.test(cleanedId) &&
+							typeof bStart === 'number' &&
+							Number.isSafeInteger(bStart) &&
+							bStart >= 0 &&
+							typeof bEnd === 'number' &&
+							Number.isSafeInteger(bEnd) &&
+							bEnd >= 0 &&
+							bStart <= bEnd
+						) {
+							allowedOriginPool.add(
+								`[[${doc.file.path}#^${cleanedId}|${doc.file.basename}]]`,
+							);
+						}
+					}
+					for (const h of headings) {
+						const hStart = h.position?.start?.offset;
+						if (
+							typeof hStart === 'number' &&
+							Number.isSafeInteger(hStart) &&
+							hStart >= 0 &&
+							h.heading.trim().length > 0 &&
+							!/[[\]#^|\r\n]/.test(h.heading)
+						) {
+							allowedOriginPool.add(
+								`[[${doc.file.path}#${h.heading}|${doc.file.basename}]]`,
+							);
+						}
+					}
+
 					for (let i = 0; i < bodyLinks.length; i++) {
-						const expected = resolveOriginWikiLink(
-							doc.file.path,
-							doc.file.basename,
-							bodyLinks[i]!.position,
-							blocks,
-							headings,
-						);
+						const expected = standaloneResolver.resolve(bodyLinks[i]!.position);
 						expect(doc.links[fmLinks.length + i]!.origin).toBe(expected);
-						expect(standaloneResolver.resolve(bodyLinks[i]!.position)).toBe(expected);
 					}
 					for (let i = 0; i < embeds.length; i++) {
-						const expected = resolveOriginWikiLink(
-							doc.file.path,
-							doc.file.basename,
-							embeds[i]!.position,
-							blocks,
-							headings,
-						);
+						const expected = standaloneResolver.resolve(embeds[i]!.position);
 						expect(doc.embeds[i]!.origin).toBe(expected);
-						expect(standaloneResolver.resolve(embeds[i]!.position)).toBe(expected);
+					}
+
+					// Verify inline and body tagLocations origins match their source positions
+					const expectedInlineTagOrigins: string[] = [];
+					for (const inline of inlineProps) {
+						const key = inline.key.trim().toLowerCase();
+						if (key === 'tags' || key === 'tag') {
+							const occOrigin = standaloneResolver.resolve(inline.position);
+							const rawVals = Array.isArray(inline.value)
+								? inline.value
+								: [inline.value];
+							for (const rv of rawVals) {
+								if (typeof rv === 'string') {
+									const stripped = stripTagHash(rv);
+									if (stripped) {
+										expectedInlineTagOrigins.push(occOrigin);
+									}
+								}
+							}
+						}
+					}
+					const expectedBodyTagOrigins: string[] = [];
+					for (const bt of bodyTags) {
+						if (stripTagHash(bt.tag)) {
+							expectedBodyTagOrigins.push(standaloneResolver.resolve(bt.position));
+						}
+					}
+					expect(
+						doc.tagLocations
+							.filter((tl) => tl.source === 'inline')
+							.map((tl) => tl.origin),
+					).toEqual(expectedInlineTagOrigins);
+					expect(
+						doc.tagLocations
+							.filter((tl) => tl.source === 'body')
+							.map((tl) => tl.origin),
+					).toEqual(expectedBodyTagOrigins);
+
+					for (const item of allItems) {
+						expect(allowedOriginPool.has(item.origin)).toBe(true);
 					}
 					const distinctOrigins = new Set(allItems.map((item) => item.origin));
-					expect(distinctOrigins.size).toBeLessThanOrEqual(
-						1 + Object.keys(blocks).length + headings.length,
-					);
+					expect(distinctOrigins.size).toBeLessThanOrEqual(allowedOriginPool.size);
 				},
 			),
 		);
@@ -984,6 +1044,133 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						unsafeActiveHeading,
 					]);
 					expect(fallbackOrigin).toBe(noteOrigin);
+
+					// 4. Permutation invariance on distinct (span, startOffset) / startOffset keys,
+					//    and deterministic tie-breaking on equal spans/offsets
+					const earlierEqualSpanBlock = {
+						id: outerBlockId,
+						position: {
+							start: { line: 1, col: 0, offset: itemStart },
+							end: { line: 5, col: 0, offset: itemStart + 30 },
+						},
+					};
+					const laterEqualSpanBlock = {
+						id: innerBlockId,
+						position: {
+							start: { line: 2, col: 0, offset: itemStart + 10 },
+							end: { line: 6, col: 0, offset: itemStart + 40 },
+						},
+					};
+					const overlapPos: ObsidianPosInput = {
+						start: { line: 3, col: 0, offset: itemStart + 15 },
+						end: { line: 3, col: 0, offset: itemStart + 20 },
+					};
+					// Equal span (30), different startOffset (itemStart + 10 > itemStart): larger startOffset wins regardless of key order
+					expect(
+						createOriginWikiLinkResolver(
+							filePath,
+							fileBasename,
+							{ a: earlierEqualSpanBlock, b: laterEqualSpanBlock },
+							[],
+						).resolve(overlapPos),
+					).toBe(`[[${filePath}#^${innerBlockId}|${fileBasename}]]`);
+					expect(
+						createOriginWikiLinkResolver(
+							filePath,
+							fileBasename,
+							{ b: laterEqualSpanBlock, a: earlierEqualSpanBlock },
+							[],
+						).resolve(overlapPos),
+					).toBe(`[[${filePath}#^${innerBlockId}|${fileBasename}]]`);
+
+					// Identical span and startOffset: first block in Object.values(blocks) order wins
+					const tieBlockFirst = {
+						id: outerBlockId,
+						position: {
+							start: { line: 2, col: 0, offset: itemStart },
+							end: { line: 6, col: 0, offset: itemStart + 25 },
+						},
+					};
+					const tieBlockSecond = {
+						id: innerBlockId,
+						position: {
+							start: { line: 2, col: 0, offset: itemStart },
+							end: { line: 6, col: 0, offset: itemStart + 25 },
+						},
+					};
+					expect(
+						createOriginWikiLinkResolver(
+							filePath,
+							fileBasename,
+							{ first: tieBlockFirst, second: tieBlockSecond },
+							[],
+						).resolve(pos1),
+					).toBe(`[[${filePath}#^${outerBlockId}|${fileBasename}]]`);
+
+					// Identical heading startOffset: last heading in array order wins (including unsafe fallback)
+					const cleanSameOffsetHeading = {
+						heading: earlyCleanHeading,
+						level: 1,
+						position: {
+							start: { line: 3, col: 0, offset: itemStart },
+							end: { line: 3, col: 10, offset: itemStart + 10 },
+						},
+					};
+					expect(
+						createOriginWikiLinkResolver(filePath, fileBasename, {}, [
+							cleanSameOffsetHeading,
+							unsafeActiveHeading,
+						]).resolve(pos1),
+					).toBe(noteOrigin);
+					expect(
+						createOriginWikiLinkResolver(filePath, fileBasename, {}, [
+							unsafeActiveHeading,
+							cleanSameOffsetHeading,
+						]).resolve(pos1),
+					).toBe(`[[${filePath}#${earlyCleanHeading}|${fileBasename}]]`);
+
+					// 5. Snapshot isolation: mutating blocks/headings or nested positions after
+					//    createOriginWikiLinkResolver returns does not alter subsequent resolve() results
+					const mutableBlocks: Record<
+						string,
+						{
+							id: string;
+							position: {
+								start: { line: number; col: number; offset: number };
+								end: { line: number; col: number; offset: number };
+							};
+						}
+					> = {
+						inner: {
+							id: innerBlockId,
+							position: {
+								start: { line: 2, col: 0, offset: Math.max(0, itemStart - 5) },
+								end: { line: 5, col: 0, offset: itemStart + 10 },
+							},
+						},
+					};
+					const mutableHeadings = [
+						{
+							heading: earlyCleanHeading,
+							level: 1,
+							position: {
+								start: { line: 1, col: 0, offset: Math.max(0, itemStart - 30) },
+								end: { line: 1, col: 10, offset: Math.max(0, itemStart - 25) },
+							},
+						},
+					];
+					const isolatedResolver = createOriginWikiLinkResolver(
+						filePath,
+						fileBasename,
+						mutableBlocks,
+						mutableHeadings,
+					);
+					const beforeMutationBlock = isolatedResolver.resolve(pos1);
+					mutableBlocks['inner']!.position.start.offset = itemStart + 9999;
+					delete mutableBlocks['inner'];
+					mutableHeadings[0]!.position.start.offset = itemStart + 9999;
+					mutableHeadings.length = 0;
+					expect(isolatedResolver.resolve(pos1)).toBe(beforeMutationBlock);
 				},
 			),
 		);
