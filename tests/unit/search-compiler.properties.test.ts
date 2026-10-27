@@ -7,14 +7,23 @@ import {
 	levenshteinDistance,
 	MAX_SAFE_EPOCH_MS,
 	normalizeAST,
+	substringStringMatch,
 	suggestScopeHint,
+	VIRTUAL_FILE_KEYS_LIST,
+	type PropertyFilterNode,
 	type ResolvedEngineConfig,
+	type ScopedFilterNode,
 	type SearchAST,
 	type ValueExprAST,
 } from '../../src/core/search';
 import { assertProperty } from '../support/assertProperty';
-import { printableExecutableAstArb } from '../support/search-arbitraries';
-import { printAST } from '../support/search-printer';
+import { printableExecutableAstArb, printableValueExprArb } from '../support/search-arbitraries';
+import {
+	quotedValueArb,
+	rhsLeafMatcherArb,
+	unquotedIdentifierArb,
+} from '../support/search-leaf-arbitraries';
+import { printAST, printValueExprAST } from '../support/search-printer';
 
 const PINNED_REF_MS = Date.parse('2026-10-22T15:30:00.000Z');
 
@@ -317,6 +326,173 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 						).length;
 						expect(textDiagCount).toBe(countDocTextMatchNodes(res.ast));
 					}
+				},
+			),
+		);
+	});
+});
+
+describe('Invariant: Scope-Property Portability, Operator Gate & Suggested Query Round-Trip', () => {
+	const customConfigRes = initEngineConfig({
+		timeZone: 'America/New_York',
+		propertyTypes: {
+			score: 'number',
+			priority: 'number',
+			status: 'text',
+			tags: 'tags',
+		},
+		customScopes: [
+			{
+				canonicalName: 'callout',
+				aliases: ['callout', 'callouts', 'admonition'],
+				extract: () => [],
+				matchString: substringStringMatch,
+			},
+		],
+	});
+	if (!customConfigRes.ok) throw new Error('Expected valid custom scope config');
+	const configWithCustomScopes = customConfigRes.config;
+
+	const scopeKeyArb = fc
+		.tuple(fc.constantFrom(...configWithCustomScopes.getAllScopeNames()), fc.boolean())
+		.map(([name, upperCase]) => (upperCase ? name.toUpperCase() : name));
+
+	const rhsValueExprArb: fc.Arbitrary<ValueExprAST> = fc.oneof(
+		rhsLeafMatcherArb.map((matcher): ValueExprAST => ({
+			type: 'VALUE_LEAF',
+			matcher,
+		})),
+		printableValueExprArb,
+	);
+
+	const nonColonOpArb = fc.constantFrom('EXISTS', '=', '!=', '<', '>', '<=', '>=');
+	const compLeafArb = fc.oneof(
+		unquotedIdentifierArb,
+		quotedValueArb.map((val) =>
+			printValueExprAST({
+				type: 'VALUE_LEAF',
+				matcher: { kind: 'string', value: val, quoted: true },
+			}),
+		),
+	);
+
+	const disjointPropKeyArb = fc.constantFrom(
+		'tags',
+		'status',
+		'score',
+		'priority',
+		'category',
+		...VIRTUAL_FILE_KEYS_LIST,
+	);
+
+	it('emits round-tripable HINT_PROPERTY_MATCHES_SCOPE on colon scope keys and suppresses on non-colon operators or disjoint property keys', async () => {
+		await assertProperty(
+			'search/compiler__scope-property-portability-and-roundtrip',
+			fc.property(
+				scopeKeyArb,
+				rhsValueExprArb,
+				nonColonOpArb,
+				compLeafArb,
+				disjointPropKeyArb,
+				(rawScopeKey, valueExpr, nonColonOp, compLeaf, disjointKey) => {
+					const rhsStr =
+						valueExpr.type === 'VALUE_LEAF'
+							? printValueExprAST(valueExpr)
+							: `(${printValueExprAST(valueExpr)})`;
+					const colonQuery = `[${rawScopeKey}: ${rhsStr}]`;
+					const colonRes = compileQuery(
+						colonQuery,
+						configWithCustomScopes,
+						PINNED_REF_MS,
+					);
+
+					expect(colonRes.executable).toBe(true);
+					expect(colonRes.ast?.type).toBe('PROPERTY_FILTER');
+					const propNode = colonRes.ast as PropertyFilterNode;
+
+					const scopeDef = configWithCustomScopes.getScope(rawScopeKey)!;
+					expect(scopeDef).toBeDefined();
+
+					const hintDiagnostics = colonRes.diagnostics.filter(
+						(d) => d.code === 'HINT_PROPERTY_MATCHES_SCOPE',
+					);
+					expect(hintDiagnostics).toHaveLength(1);
+					const diag = hintDiagnostics[0]!;
+					expect(diag.severity).toBe('hint');
+					expect(diag.span).not.toBeNull();
+
+					const normalizedKey = rawScopeKey.trim().toLowerCase();
+					if (normalizedKey === scopeDef.canonicalName.toLowerCase()) {
+						expect(diag.issue).toBe(
+							`The property "${normalizedKey}" matches the name of scope "${scopeDef.canonicalName}".`,
+						);
+					} else {
+						expect(diag.issue).toBe(
+							`The property "${normalizedKey}" matches an alias of scope "${scopeDef.canonicalName}".`,
+						);
+					}
+
+					expect(diag.hint).not.toBeNull();
+					const prefix = 'Did you mean "';
+					const suffix = '" instead?';
+					expect(diag.hint!.startsWith(prefix)).toBe(true);
+					expect(diag.hint!.endsWith(suffix)).toBe(true);
+
+					const suggestedQuery = diag.hint!.slice(prefix.length, -suffix.length);
+					const suggestedRes = compileQuery(
+						suggestedQuery,
+						configWithCustomScopes,
+						PINNED_REF_MS,
+					);
+					expect(suggestedRes.executable).toBe(true);
+					expect(suggestedRes.ast?.type).toBe('SCOPED_FILTER');
+					const scopedNode = suggestedRes.ast as ScopedFilterNode;
+					expect(scopedNode.scope).toBe(scopeDef.canonicalName);
+					expect(
+						normalizeAST({
+							type: 'SCOPED_FILTER',
+							scope: scopeDef.canonicalName,
+							rawScope: scopeDef.canonicalName,
+							expr: scopedNode.expr,
+						}),
+					).toEqual(
+						normalizeAST({
+							type: 'SCOPED_FILTER',
+							scope: scopeDef.canonicalName,
+							rawScope: scopeDef.canonicalName,
+							expr: propNode.valueExpr!,
+						}),
+					);
+
+					// Non-portable operator gate (op !== ':')
+					const nonColonQuery =
+						nonColonOp === 'EXISTS'
+							? `[${rawScopeKey}]`
+							: `[${rawScopeKey} ${nonColonOp} ${compLeaf}]`;
+					const nonColonRes = compileQuery(
+						nonColonQuery,
+						configWithCustomScopes,
+						PINNED_REF_MS,
+					);
+					expect(
+						nonColonRes.diagnostics.some(
+							(d) => d.code === 'HINT_PROPERTY_MATCHES_SCOPE',
+						),
+					).toBe(false);
+
+					// Disjoint property keys
+					expect(configWithCustomScopes.getScope(disjointKey)).toBeUndefined();
+					const disjointQuery = `[${disjointKey}: ${rhsStr}]`;
+					const disjointRes = compileQuery(
+						disjointQuery,
+						configWithCustomScopes,
+						PINNED_REF_MS,
+					);
+					expect(
+						disjointRes.diagnostics.some(
+							(d) => d.code === 'HINT_PROPERTY_MATCHES_SCOPE',
+						),
+					).toBe(false);
 				},
 			),
 		);

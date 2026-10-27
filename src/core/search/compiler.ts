@@ -50,7 +50,7 @@ export function compileQuery(
 	} = validateQueryAST(parsed.ast, resolvedConfig, referenceTimeMs, parsed.invalidPropertyNodes);
 
 	// Step 5: Non-blocking linter pass
-	const lintDiagnostics = lintQueryAST(resolvedAst, invalidPropertyNodes);
+	const lintDiagnostics = lintQueryAST(resolvedAst, invalidPropertyNodes, resolvedConfig);
 
 	// Step 6: Global compile gate & deep freeze
 	const diagnostics = [...parsed.diagnostics, ...valDiagnostics, ...lintDiagnostics];

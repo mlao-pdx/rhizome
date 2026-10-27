@@ -1,11 +1,26 @@
+import { BUILT_IN_SCOPES } from './scopes';
 import type {
+	LeafMatcher,
 	PropertyFilterNode,
+	ResolvedEngineConfig,
+	ScopeDefinition,
 	SearchAST,
 	SearchDiagnostic,
 	SourceSpan,
 	TextMatchNode,
 	ValueExprAST,
 } from './types';
+
+const DEFAULT_SCOPE_MAP: ReadonlyMap<string, ScopeDefinition> = (() => {
+	const map = new Map<string, ScopeDefinition>();
+	for (const def of BUILT_IN_SCOPES) {
+		map.set(def.canonicalName.trim().toLowerCase(), def);
+		for (const alias of def.aliases) {
+			map.set(alias.trim().toLowerCase(), def);
+		}
+	}
+	return map;
+})();
 
 type SingleValuedField =
 	'file.extension' | 'file.name' | 'file.basename' | 'file.path' | 'file.parent';
@@ -93,6 +108,53 @@ function extractSingleValueEquality(child: SearchAST): SingleValueEquality | nul
 	return null;
 }
 
+function encodeDoubleQuoted(value: string): string {
+	let out = '"';
+	for (const ch of value) {
+		if (ch === '\\') out += '\\\\';
+		else if (ch === '"') out += '\\"';
+		else if (ch === '\n') out += '\\n';
+		else if (ch === '\r') out += '\\r';
+		else if (ch === '\t') out += '\\t';
+		else out += ch;
+	}
+	return out + '"';
+}
+
+function formatLeafMatcher(matcher: LeafMatcher): string {
+	if (matcher.kind === 'regex') {
+		return `/${matcher.pattern}/${matcher.flags}`;
+	}
+	return matcher.quoted ? encodeDoubleQuoted(matcher.value) : matcher.value;
+}
+
+function formatValueExprInner(expr: ValueExprAST, parentOp?: 'AND' | 'OR' | 'NOT'): string {
+	switch (expr.type) {
+		case 'VALUE_LEAF':
+			return formatLeafMatcher(expr.matcher);
+		case 'VALUE_NOT': {
+			const child =
+				expr.child.type === 'VALUE_LOGICAL'
+					? `(${formatValueExprInner(expr.child)})`
+					: formatValueExprInner(expr.child, 'NOT');
+			return expr.syntax === '-' ? `-${child}` : `NOT ${child}`;
+		}
+		case 'VALUE_LOGICAL': {
+			const joined = expr.children
+				.map((child) => formatValueExprInner(child, expr.operator))
+				.join(` ${expr.operator} `);
+			return parentOp && parentOp !== expr.operator ? `(${joined})` : joined;
+		}
+	}
+}
+
+function formatScopeRhsDisplay(valueExpr: ValueExprAST): string {
+	if (valueExpr.type === 'VALUE_LEAF') {
+		return formatLeafMatcher(valueExpr.matcher);
+	}
+	return `(${formatValueExprInner(valueExpr)})`;
+}
+
 function formatRhsDisplay(valueExpr: ValueExprAST | undefined): string {
 	if (!valueExpr || valueExpr.type !== 'VALUE_LEAF') return '...';
 	if (valueExpr.matcher.kind === 'regex') {
@@ -107,9 +169,14 @@ function formatRhsDisplay(valueExpr: ValueExprAST | undefined): string {
 export function lintQueryAST(
 	ast: SearchAST,
 	invalidPropertyNodes?: ReadonlySet<PropertyFilterNode>,
+	resolvedConfig?: ResolvedEngineConfig,
 ): SearchDiagnostic[] {
 	const diagnostics: SearchDiagnostic[] = [];
 	const flaggedTextNodes = new Set<TextMatchNode>();
+	const getScope = (nameOrAlias: string): ScopeDefinition | undefined =>
+		resolvedConfig
+			? resolvedConfig.getScope(nameOrAlias)
+			: DEFAULT_SCOPE_MAP.get(nameOrAlias.trim().toLowerCase());
 
 	function traverse(node: SearchAST): void {
 		switch (node.type) {
@@ -118,15 +185,33 @@ export function lintQueryAST(
 				return;
 
 			case 'PROPERTY_FILTER': {
-				if (!invalidPropertyNodes?.has(node) && node.operator === '!=') {
-					const rhsDisplay = formatRhsDisplay(node.valueExpr);
-					diagnostics.push({
-						code: 'HINT_PROP_NEQ_EXISTENCE',
-						severity: 'hint',
-						issue: `"[${node.key} != ${rhsDisplay}]" requires "${node.key}" to exist.`,
-						hint: `To exclude notes (including notes missing "${node.key}"), use "-[${node.key} = ${rhsDisplay}]".`,
-						span: node.span ?? null,
-					});
+				if (!invalidPropertyNodes?.has(node)) {
+					if (node.operator === '!=') {
+						const rhsDisplay = formatRhsDisplay(node.valueExpr);
+						diagnostics.push({
+							code: 'HINT_PROP_NEQ_EXISTENCE',
+							severity: 'hint',
+							issue: `"[${node.key} != ${rhsDisplay}]" requires "${node.key}" to exist.`,
+							hint: `To exclude notes (including notes missing "${node.key}"), use "-[${node.key} = ${rhsDisplay}]".`,
+							span: node.span ?? null,
+						});
+					} else if (node.operator === ':' && node.valueExpr !== undefined) {
+						const scopeDef = getScope(node.key);
+						if (scopeDef !== undefined) {
+							const canonical = scopeDef.canonicalName;
+							const rhsDisplay = formatScopeRhsDisplay(node.valueExpr);
+							const isCanonicalMatch = node.key === canonical.toLowerCase();
+							diagnostics.push({
+								code: 'HINT_PROPERTY_MATCHES_SCOPE',
+								severity: 'hint',
+								issue: isCanonicalMatch
+									? `The property "${node.key}" matches the name of scope "${canonical}".`
+									: `The property "${node.key}" matches an alias of scope "${canonical}".`,
+								hint: `Did you mean "${canonical}:${rhsDisplay}" instead?`,
+								span: node.span ?? null,
+							});
+						}
+					}
 				}
 				return;
 			}

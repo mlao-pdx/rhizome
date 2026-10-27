@@ -559,6 +559,55 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 		});
 		expect(res.diagnostics[0]?.span).not.toBeNull();
 	});
+
+	it('emits HINT_PROPERTY_MATCHES_SCOPE on colon property filters matching scope canonical names or aliases', () => {
+		const directRes = compileQuery('[tag: Foo]', config, PINNED_REF_MS);
+		expect(directRes.executable).toBe(true);
+		expect(directRes.diagnostics).toHaveLength(1);
+		expect(directRes.diagnostics[0]).toMatchObject({
+			code: 'HINT_PROPERTY_MATCHES_SCOPE',
+			severity: 'hint',
+			issue: 'The property "tag" matches the name of scope "tag".',
+			hint: 'Did you mean "tag:Foo" instead?',
+		});
+		expect(directRes.diagnostics[0]?.span).not.toBeNull();
+
+		const aliasRes = compileQuery('[link: "Note A"]', config, PINNED_REF_MS);
+		expect(aliasRes.executable).toBe(true);
+		expect(aliasRes.diagnostics).toHaveLength(1);
+		expect(aliasRes.diagnostics[0]).toMatchObject({
+			code: 'HINT_PROPERTY_MATCHES_SCOPE',
+			severity: 'hint',
+			issue: 'The property "link" matches an alias of scope "links".',
+			hint: 'Did you mean "links:"Note A"" instead?',
+		});
+		expect(aliasRes.diagnostics[0]?.span).not.toBeNull();
+
+		const compoundRes = compileQuery('[heading: (Intro OR Summary)]', config, PINNED_REF_MS);
+		expect(compoundRes.executable).toBe(true);
+		expect(compoundRes.diagnostics).toHaveLength(1);
+		expect(compoundRes.diagnostics[0]).toMatchObject({
+			code: 'HINT_PROPERTY_MATCHES_SCOPE',
+			severity: 'hint',
+			issue: 'The property "heading" matches an alias of scope "headings".',
+			hint: 'Did you mean "headings:(Intro OR Summary)" instead?',
+		});
+		expect(compoundRes.diagnostics[0]?.span).not.toBeNull();
+
+		const nonColonQueries = [
+			'[tag < 20]',
+			'[tag = Foo]',
+			'[tag != Foo]',
+			'[tag]',
+			'[tags: Foo]',
+		];
+		for (const q of nonColonQueries) {
+			const res = compileQuery(q, config, PINNED_REF_MS);
+			expect(res.diagnostics.some((d) => d.code === 'HINT_PROPERTY_MATCHES_SCOPE')).toBe(
+				false,
+			);
+		}
+	});
 });
 
 describe('Step 6: PreparedQuery & AST deep freeze (Conformance Test 16c)', () => {
