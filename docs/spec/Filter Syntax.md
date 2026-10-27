@@ -495,20 +495,21 @@ export const WhiteSpace = createToken({
 
 export const WikiLinkValue = createToken({
   name: 'WikiLinkValue',
-  pattern: /\[\[[^\]\r\n]+\]\]/
+  pattern: /\[\[[^\]\r\n]+\]\]/,
+  label: '[[wikilink]]'
 });
 
-export const LParen = createToken({ name: 'LParen', pattern: /\(/ });
-export const RParen = createToken({ name: 'RParen', pattern: /\)/ });
-export const LBracket = createToken({ name: 'LBracket', pattern: /\[/ });
-export const RBracket = createToken({ name: 'RBracket', pattern: /\]/ });
+export const LParen = createToken({ name: 'LParen', pattern: /\(/, label: '(' });
+export const RParen = createToken({ name: 'RParen', pattern: /\)/, label: ')' });
+export const LBracket = createToken({ name: 'LBracket', pattern: /\[/, label: '[' });
+export const RBracket = createToken({ name: 'RBracket', pattern: /\]/, label: ']' });
 
 // Anchor-free boundary assertion: succeeds before whitespace, (), [], or EOF
-export const Or = createToken({ name: 'Or', pattern: /OR(?![^\s()\[\]])/ });
-export const And = createToken({ name: 'And', pattern: /AND(?![^\s()\[\]])/ });
-export const Not = createToken({ name: 'Not', pattern: /NOT(?![^\s()\[\]])/ });
+export const Or = createToken({ name: 'Or', pattern: /OR(?![^\s()\[\]])/, label: 'OR' });
+export const And = createToken({ name: 'And', pattern: /AND(?![^\s()\[\]])/, label: 'AND' });
+export const Not = createToken({ name: 'Not', pattern: /NOT(?![^\s()\[\]])/, label: 'NOT' });
 
-export const HyphenNot = createToken({ name: 'HyphenNot', pattern: /-(?=\S)/ });
+export const HyphenNot = createToken({ name: 'HyphenNot', pattern: /-(?=\S)/, label: '-' });
 
 // Matches:
 // - ISO dates/datetimes (with optional ±Nd day offset on YYYY-MM-DD)
@@ -517,30 +518,39 @@ export const HyphenNot = createToken({ name: 'HyphenNot', pattern: /-(?=\S)/ });
 export const DateTimeLiteral = createToken({
   name: 'DateTimeLiteral',
   pattern:
-    /(?:(?:\d{4}-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?|@[a-zA-Z0-9_+-]+)(?:\.\.(?:\d{4}(?:-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?)?|@[a-zA-Z0-9_+-]+))?|\d{4}\.\.(?:\d{4}(?:-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?)?|@[a-zA-Z0-9_+-]+))(?![^\s()\[\]])/
+    /(?:(?:\d{4}-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?|@[a-zA-Z0-9_+-]+)(?:\.\.(?:\d{4}(?:-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?)?|@[a-zA-Z0-9_+-]+))?|\d{4}\.\.(?:\d{4}(?:-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?)?|@[a-zA-Z0-9_+-]+))(?![^\s()\[\]])/,
+  label: 'date literal'
 });
 
-export const Colon = createToken({ name: 'Colon', pattern: /:/ });
-export const CompOp = createToken({ name: 'CompOp', pattern: /!=|>=|<=|>|<|=/ });
+export const Colon = createToken({ name: 'Colon', pattern: /:/, label: ':' });
+export const CompOp = createToken({
+  name: 'CompOp',
+  pattern: /!=|>=|<=|>|<|=/,
+  label: 'comparison operator'
+});
 
 export const RegexLiteral = createToken({
   name: 'RegexLiteral',
-  pattern: /\/(?:\\.|[^/\\\r\n])+\/[a-zA-Z]*/
+  pattern: /\/(?:\\.|[^/\\\r\n])+\/[a-zA-Z]*/,
+  label: '/regex/'
 });
 
 export const QuotedString = createToken({
   name: 'QuotedString',
-  pattern: /"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'/
+  pattern: /"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'/,
+  label: 'quoted string'
 });
 
 export const TagLiteral = createToken({
   name: 'TagLiteral',
-  pattern: /#[a-zA-Z0-9_\-/]+/
+  pattern: /#[a-zA-Z0-9_\-/]+/,
+  label: '#tag'
 });
 
 export const Identifier = createToken({
   name: 'Identifier',
-  pattern: /[^\s()\[\]:"'><=!]+/
+  pattern: /[^\s()\[\]:"'><=!]+/,
+  label: 'identifier'
 });
 
 export const ALL_TOKENS = [
@@ -567,6 +577,8 @@ export const SearchLexer = new Lexer(ALL_TOKENS);
 ```
 
 ### 3.3 Disambiguated LL(k) Grammar
+
+> **Visual Reference**: See [Filter Syntax Railroad Diagrams](../railroad/README.md) for interactive-style SVG railroad diagrams of every production rule below.
 
 ```ebnf
 Query             ::= OrExpression? EOF

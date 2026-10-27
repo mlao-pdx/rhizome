@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" class="railroad-diagram" width="485" height="81" viewBox="0 0 485 81" aria-label="orExpression railroad diagram">
+<style>
+  :root {
+    --rr-bg: #f8fafc;
+    --rr-card-border: #e2e8f0;
+    --rr-track: #334155;
+    --rr-term-fill: #e0f2fe;
+    --rr-term-stroke: #0284c7;
+    --rr-term-text: #0c4a6e;
+    --rr-nonterm-fill: #ede9fe;
+    --rr-nonterm-stroke: #7c3aed;
+    --rr-nonterm-text: #2e1065;
+    --rr-comment-text: #475569;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --rr-bg: #0f172a;
+      --rr-card-border: #334155;
+      --rr-track: #cbd5e1;
+      --rr-term-fill: #0c4a6e;
+      --rr-term-stroke: #38bdf8;
+      --rr-term-text: #f0f9ff;
+      --rr-nonterm-fill: #2e1065;
+      --rr-nonterm-stroke: #a78bfa;
+      --rr-nonterm-text: #f5f3ff;
+      --rr-comment-text: #94a3b8;
+    }
+  }
+  svg.railroad-diagram {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  }
+  rect.railroad-card {
+    fill: var(--rr-bg);
+    stroke: var(--rr-card-border);
+    stroke-width: 1.5;
+  }
+  svg.railroad-diagram path {
+    stroke-width: 2;
+    stroke: var(--rr-track);
+    fill: none;
+  }
+  svg.railroad-diagram text {
+    font: 600 13px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    text-anchor: middle;
+  }
+  svg.railroad-diagram g.terminal rect {
+    fill: var(--rr-term-fill);
+    stroke: var(--rr-term-stroke);
+    stroke-width: 1.5;
+  }
+  svg.railroad-diagram g.terminal text {
+    fill: var(--rr-term-text);
+  }
+  svg.railroad-diagram g.non-terminal rect {
+    fill: var(--rr-nonterm-fill);
+    stroke: var(--rr-nonterm-stroke);
+    stroke-width: 1.5;
+  }
+  svg.railroad-diagram g.non-terminal text {
+    fill: var(--rr-nonterm-text);
+  }
+  svg.railroad-diagram text.comment {
+    font: italic 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    fill: var(--rr-comment-text);
+  }
+</style>
+<rect class="railroad-card" x="1" y="1" width="483" height="79" rx="8" ry="8"></rect>
+<g transform="translate(.5 .5)">
+<path d="M 20 31 v 20 m 10 -20 v 20 m -10 -10 h 20.5"></path>
+<path d="M40 41h10"></path>
+<g class="non-terminal">
+<path d="M50 41h0"></path>
+<path d="M174 41h0"></path>
+<rect x="50" y="30" width="124" height="22"></rect>
+<text x="112" y="45" topRuleName="orExpression" ruleName="andExpression">andExpression</text>
+</g>
+<path d="M174 41h10"></path>
+<g>
+<path d="M184 41h0"></path>
+<path d="M444 41h0"></path>
+<path d="M184 41a10 10 0 0 0 10 -10v0a10 10 0 0 1 10 -10"></path>
+<g>
+<path d="M204 21h220"></path>
+</g>
+<path d="M424 21a10 10 0 0 1 10 10v0a10 10 0 0 0 10 10"></path>
+<path d="M184 41h20"></path>
+<g>
+<path d="M204 41h0"></path>
+<path d="M424 41h0"></path>
+<path d="M204 41h10"></path>
+<g>
+<path d="M214 41h0"></path>
+<path d="M414 41h0"></path>
+<path d="M214 41h10"></path>
+<g class="terminal">
+<path d="M224 41h0"></path>
+<path d="M260 41h0"></path>
+<rect x="224" y="30" width="36" height="22" rx="10" ry="10"></rect>
+<text x="242" y="45" topRuleName="orExpression" dslRuleName="consume" tokenName="Or" label="OR">OR</text>
+<title>OR(?![^\s()[\]])</title>
+</g>
+<path d="M260 41h10"></path>
+<path d="M270 41h10"></path>
+<g class="non-terminal">
+<path d="M280 41h0"></path>
+<path d="M404 41h0"></path>
+<rect x="280" y="30" width="124" height="22"></rect>
+<text x="342" y="45" topRuleName="orExpression" ruleName="andExpression">andExpression</text>
+</g>
+<path d="M404 41h10"></path>
+</g>
+<path d="M414 41h10"></path>
+<path d="M214 41a10 10 0 0 0 -10 10v0a10 10 0 0 0 10 10"></path>
+<g>
+<path d="M214 61h200"></path>
+</g>
+<path d="M414 61a10 10 0 0 0 10 -10v0a10 10 0 0 0 -10 -10"></path>
+</g>
+<path d="M424 41h20"></path>
+</g>
+<path d="M 444 41 h 20 m -10 -10 v 20 m 10 -20 v 20"></path>
+</g>
+</svg>

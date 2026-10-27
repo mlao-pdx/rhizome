@@ -15,7 +15,8 @@
   "type": "module",
   "scripts": {
     "dev": "node esbuild.config.mjs",
-    "build": "prettier --check . && tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "build": "node scripts/generate-railroad.mjs && prettier --check . && tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "docs:railroad": "node scripts/generate-railroad.mjs",
     "typecheck": "tsc --noEmit",
     "version": "node version-bump.mjs && git add manifest.json versions.json",
     "lint": "eslint .",

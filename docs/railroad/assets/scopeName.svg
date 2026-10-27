@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" class="railroad-diagram" width="201" height="62" viewBox="0 0 201 62" aria-label="scopeName railroad diagram">
+<style>
+  :root {
+    --rr-bg: #f8fafc;
+    --rr-card-border: #e2e8f0;
+    --rr-track: #334155;
+    --rr-term-fill: #e0f2fe;
+    --rr-term-stroke: #0284c7;
+    --rr-term-text: #0c4a6e;
+    --rr-nonterm-fill: #ede9fe;
+    --rr-nonterm-stroke: #7c3aed;
+    --rr-nonterm-text: #2e1065;
+    --rr-comment-text: #475569;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --rr-bg: #0f172a;
+      --rr-card-border: #334155;
+      --rr-track: #cbd5e1;
+      --rr-term-fill: #0c4a6e;
+      --rr-term-stroke: #38bdf8;
+      --rr-term-text: #f0f9ff;
+      --rr-nonterm-fill: #2e1065;
+      --rr-nonterm-stroke: #a78bfa;
+      --rr-nonterm-text: #f5f3ff;
+      --rr-comment-text: #94a3b8;
+    }
+  }
+  svg.railroad-diagram {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  }
+  rect.railroad-card {
+    fill: var(--rr-bg);
+    stroke: var(--rr-card-border);
+    stroke-width: 1.5;
+  }
+  svg.railroad-diagram path {
+    stroke-width: 2;
+    stroke: var(--rr-track);
+    fill: none;
+  }
+  svg.railroad-diagram text {
+    font: 600 13px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    text-anchor: middle;
+  }
+  svg.railroad-diagram g.terminal rect {
+    fill: var(--rr-term-fill);
+    stroke: var(--rr-term-stroke);
+    stroke-width: 1.5;
+  }
+  svg.railroad-diagram g.terminal text {
+    fill: var(--rr-term-text);
+  }
+  svg.railroad-diagram g.non-terminal rect {
+    fill: var(--rr-nonterm-fill);
+    stroke: var(--rr-nonterm-stroke);
+    stroke-width: 1.5;
+  }
+  svg.railroad-diagram g.non-terminal text {
+    fill: var(--rr-nonterm-text);
+  }
+  svg.railroad-diagram text.comment {
+    font: italic 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    fill: var(--rr-comment-text);
+  }
+</style>
+<rect class="railroad-card" x="1" y="1" width="199" height="60" rx="8" ry="8"></rect>
+<g transform="translate(.5 .5)">
+<path d="M 20 21 v 20 m 10 -20 v 20 m -10 -10 h 20.5"></path>
+<path d="M40 31h10"></path>
+<g class="terminal">
+<path d="M50 31h0"></path>
+<path d="M150 31h0"></path>
+<rect x="50" y="20" width="100" height="22" rx="10" ry="10"></rect>
+<text x="100" y="35" topRuleName="scopeName" dslRuleName="consume" tokenName="Identifier" label="identifier">identifier</text>
+<title>[^\s()[\]:"'&gt;&lt;=!]+</title>
+</g>
+<path d="M150 31h10"></path>
+<path d="M 160 31 h 20 m -10 -10 v 20 m 10 -20 v 20"></path>
+</g>
+</svg>

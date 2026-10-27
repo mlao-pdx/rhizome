@@ -40,6 +40,46 @@ describe('Invariant 1a: Lexer & SearchParser self-analysis smoke test', () => {
 			expect(res.ast).toEqual({ type: 'MATCH_ALL' });
 		}
 	});
+
+	it('defines concise human-readable labels on all non-skipped tokens and surfaces them in SYNTAX_ERROR diagnostics', () => {
+		const nonSkippedLabels = Object.fromEntries(
+			ALL_TOKENS.filter((tok) => tok.GROUP !== Lexer.SKIPPED).map((tok) => [
+				tok.name,
+				tok.LABEL,
+			]),
+		);
+
+		expect(nonSkippedLabels).toEqual({
+			WikiLinkValue: '[[wikilink]]',
+			LParen: '(',
+			RParen: ')',
+			LBracket: '[',
+			RBracket: ']',
+			Or: 'OR',
+			And: 'AND',
+			Not: 'NOT',
+			HyphenNot: '-',
+			DateTimeLiteral: 'date literal',
+			Colon: ':',
+			CompOp: 'comparison operator',
+			RegexLiteral: '/regex/',
+			QuotedString: 'quoted string',
+			TagLiteral: '#tag',
+			Identifier: 'identifier',
+		});
+
+		const unclosedParen = parseQuery('(tag:work');
+		expect(unclosedParen.ast).toBeNull();
+		expect(unclosedParen.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
+		expect(unclosedParen.diagnostics[0]?.issue).toContain(')');
+		expect(unclosedParen.diagnostics[0]?.issue).not.toContain('RParen');
+
+		const unclosedBracket = parseQuery('[status = 1');
+		expect(unclosedBracket.ast).toBeNull();
+		expect(unclosedBracket.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
+		expect(unclosedBracket.diagnostics[0]?.issue).toContain(']');
+		expect(unclosedBracket.diagnostics[0]?.issue).not.toContain('RBracket');
+	});
 });
 
 describe('Grammar Disambiguation & Conformance Scenarios', () => {

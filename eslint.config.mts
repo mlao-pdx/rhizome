@@ -19,6 +19,7 @@ export default defineConfig(
 		'tsconfig.json',
 		'scripts/promote-fast-check.mjs',
 		'scripts/check-licenses.mjs',
+		'scripts/generate-railroad.mjs',
 	]),
 	{
 		languageOptions: {

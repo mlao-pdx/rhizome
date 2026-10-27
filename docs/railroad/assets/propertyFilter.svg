@@ -1,0 +1,159 @@
+<svg xmlns="http://www.w3.org/2000/svg" role="img" class="railroad-diagram" width="713" height="102" viewBox="0 0 713 102" aria-label="propertyFilter railroad diagram">
+<style>
+  :root {
+    --rr-bg: #f8fafc;
+    --rr-card-border: #e2e8f0;
+    --rr-track: #334155;
+    --rr-term-fill: #e0f2fe;
+    --rr-term-stroke: #0284c7;
+    --rr-term-text: #0c4a6e;
+    --rr-nonterm-fill: #ede9fe;
+    --rr-nonterm-stroke: #7c3aed;
+    --rr-nonterm-text: #2e1065;
+    --rr-comment-text: #475569;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --rr-bg: #0f172a;
+      --rr-card-border: #334155;
+      --rr-track: #cbd5e1;
+      --rr-term-fill: #0c4a6e;
+      --rr-term-stroke: #38bdf8;
+      --rr-term-text: #f0f9ff;
+      --rr-nonterm-fill: #2e1065;
+      --rr-nonterm-stroke: #a78bfa;
+      --rr-nonterm-text: #f5f3ff;
+      --rr-comment-text: #94a3b8;
+    }
+  }
+  svg.railroad-diagram {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  }
+  rect.railroad-card {
+    fill: var(--rr-bg);
+    stroke: var(--rr-card-border);
+    stroke-width: 1.5;
+  }
+  svg.railroad-diagram path {
+    stroke-width: 2;
+    stroke: var(--rr-track);
+    fill: none;
+  }
+  svg.railroad-diagram text {
+    font: 600 13px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    text-anchor: middle;
+  }
+  svg.railroad-diagram g.terminal rect {
+    fill: var(--rr-term-fill);
+    stroke: var(--rr-term-stroke);
+    stroke-width: 1.5;
+  }
+  svg.railroad-diagram g.terminal text {
+    fill: var(--rr-term-text);
+  }
+  svg.railroad-diagram g.non-terminal rect {
+    fill: var(--rr-nonterm-fill);
+    stroke: var(--rr-nonterm-stroke);
+    stroke-width: 1.5;
+  }
+  svg.railroad-diagram g.non-terminal text {
+    fill: var(--rr-nonterm-text);
+  }
+  svg.railroad-diagram text.comment {
+    font: italic 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    fill: var(--rr-comment-text);
+  }
+</style>
+<rect class="railroad-card" x="1" y="1" width="711" height="100" rx="8" ry="8"></rect>
+<g transform="translate(.5 .5)">
+<path d="M 20 31 v 20 m 10 -20 v 20 m -10 -10 h 20.5"></path>
+<path d="M40 41h10"></path>
+<g class="terminal">
+<path d="M50 41h0"></path>
+<path d="M78 41h0"></path>
+<rect x="50" y="30" width="28" height="22" rx="10" ry="10"></rect>
+<text x="64" y="45" topRuleName="propertyFilter" dslRuleName="consume" tokenName="LBracket" label="[">[</text>
+<title>\[</title>
+</g>
+<path d="M78 41h10"></path>
+<path d="M88 41h10"></path>
+<g class="non-terminal">
+<path d="M98 41h0"></path>
+<path d="M206 41h0"></path>
+<rect x="98" y="30" width="108" height="22"></rect>
+<text x="152" y="45" topRuleName="propertyFilter" ruleName="propertyKey">propertyKey</text>
+</g>
+<path d="M206 41h10"></path>
+<g>
+<path d="M216 41h0"></path>
+<path d="M624 41h0"></path>
+<path d="M216 41a10 10 0 0 0 10 -10v0a10 10 0 0 1 10 -10"></path>
+<g>
+<path d="M236 21h368"></path>
+</g>
+<path d="M604 21a10 10 0 0 1 10 10v0a10 10 0 0 0 10 10"></path>
+<path d="M216 41h20"></path>
+<g>
+<path d="M236 41h0"></path>
+<path d="M604 41h0"></path>
+<path d="M236 41h20"></path>
+<g>
+<path d="M256 41h64"></path>
+<path d="M520 41h64"></path>
+<path d="M320 41h10"></path>
+<g class="terminal">
+<path d="M330 41h0"></path>
+<path d="M358 41h0"></path>
+<rect x="330" y="30" width="28" height="22" rx="10" ry="10"></rect>
+<text x="344" y="45" topRuleName="propertyFilter" dslRuleName="consume" tokenName="Colon" label=":">:</text>
+<title>:</title>
+</g>
+<path d="M358 41h10"></path>
+<path d="M368 41h10"></path>
+<g class="non-terminal">
+<path d="M378 41h0"></path>
+<path d="M510 41h0"></path>
+<rect x="378" y="30" width="132" height="22"></rect>
+<text x="444" y="45" topRuleName="propertyFilter" ruleName="scopeOrPropRhs">scopeOrPropRhs</text>
+</g>
+<path d="M510 41h10"></path>
+</g>
+<path d="M584 41h20"></path>
+<path d="M236 41a10 10 0 0 1 10 10v10a10 10 0 0 0 10 10"></path>
+<g>
+<path d="M256 71h0"></path>
+<path d="M584 71h0"></path>
+<path d="M256 71h10"></path>
+<g class="terminal">
+<path d="M266 71h0"></path>
+<path d="M438 71h0"></path>
+<rect x="266" y="60" width="172" height="22" rx="10" ry="10"></rect>
+<text x="352" y="75" topRuleName="propertyFilter" dslRuleName="consume" tokenName="CompOp" label="comparison operator">comparison operator</text>
+<title>!=|&gt;=|&lt;=|&gt;|&lt;|=</title>
+</g>
+<path d="M438 71h10"></path>
+<path d="M448 71h10"></path>
+<g class="non-terminal">
+<path d="M458 71h0"></path>
+<path d="M574 71h0"></path>
+<rect x="458" y="60" width="116" height="22"></rect>
+<text x="516" y="75" topRuleName="propertyFilter" ruleName="rhsLeafValue">rhsLeafValue</text>
+</g>
+<path d="M574 71h10"></path>
+</g>
+<path d="M584 71a10 10 0 0 0 10 -10v-10a10 10 0 0 1 10 -10"></path>
+</g>
+<path d="M604 41h20"></path>
+</g>
+<path d="M624 41h10"></path>
+<g class="terminal">
+<path d="M634 41h0"></path>
+<path d="M662 41h0"></path>
+<rect x="634" y="30" width="28" height="22" rx="10" ry="10"></rect>
+<text x="648" y="45" topRuleName="propertyFilter" dslRuleName="consume" tokenName="RBracket" label="]">]</text>
+<title>\]</title>
+</g>
+<path d="M662 41h10"></path>
+<path d="M 672 41 h 20 m -10 -10 v 20 m 10 -20 v 20"></path>
+</g>
+</svg>
