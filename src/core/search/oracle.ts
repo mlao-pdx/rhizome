@@ -21,8 +21,8 @@ export function getTypedPropertyEntries(
 	doc: NormalizedDocument,
 	lowerKey: string,
 ): TypedPropertyValue[] {
-	if (lowerKey === 'file.mtime' || lowerKey === 'file.ctime') {
-		const t = doc.file.stat[lowerKey === 'file.mtime' ? 'mtime' : 'ctime'];
+	if (lowerKey === 'file.modified' || lowerKey === 'file.created') {
+		const t = doc.file[lowerKey === 'file.modified' ? 'modified' : 'created'];
 		return [
 			{
 				kind: 'datetime',
@@ -32,10 +32,10 @@ export function getTypedPropertyEntries(
 		];
 	}
 	if (lowerKey === 'file.size') {
-		const s = doc.file.stat.size;
+		const s = doc.file.size;
 		return [{ kind: 'number', value: s, raw: String(s) }];
 	}
-	if (lowerKey === 'file.ext' || lowerKey === 'file.extension') {
+	if (lowerKey === 'file.extension') {
 		return [{ kind: 'text', value: doc.file.extension }];
 	}
 	if (lowerKey === 'file.name') return [{ kind: 'text', value: doc.file.name }];
@@ -88,10 +88,7 @@ function evalColonExprOnEntry(
 			if (expr.matcher.kind === 'regex') {
 				if (propType === 'checkbox' || entry.kind === 'checkbox') return false;
 				if (propType === 'tags') {
-					return (
-						entry.kind === 'text' &&
-						testRegex(normalizeTagBody(entry.value), expr.matcher)
-					);
+					return entry.kind === 'text' && testRegex(entry.value, expr.matcher);
 				}
 				const target = entry.kind === 'text' ? entry.value : entry.raw;
 				return testRegex(target, expr.matcher);

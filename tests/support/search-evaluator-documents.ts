@@ -37,8 +37,8 @@ const propertyKeyArb = fc.constantFrom(
 	'tags',
 	'unknown',
 	'file.size',
-	'file.mtime',
-	'file.ctime',
+	'file.modified',
+	'file.created',
 );
 const scalarArb = fc.oneof(
 	textArb,

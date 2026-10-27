@@ -77,7 +77,7 @@ const timestampCaseArb = fc
 			.tuple(
 				normalizedVaultArb(config),
 				printableTemporalLiteralArb(config, sample.referenceTimeMs),
-				fc.constantFrom('file.mtime', 'file.ctime'),
+				fc.constantFrom('file.modified', 'file.created'),
 			)
 			.map(([docs, literal, key]) => ({ ...sample, config, docs, literal, key }));
 	});

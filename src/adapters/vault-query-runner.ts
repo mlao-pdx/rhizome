@@ -8,6 +8,9 @@ import {
 	isValidPropertyType,
 	isValidReferenceTimeMs,
 	type NormalizedDocument,
+	type NormalizedFileInfo,
+	type NormalizedHeading,
+	type NormalizedLink,
 	normalizeObsidianMetadata,
 	type PropertyTypeRegistry,
 	type ResolveLinkPathFn,
@@ -54,6 +57,20 @@ export interface QueryDiagnostics {
 }
 
 /**
+ * User-facing matched note metadata returned in `VaultQueryResult.matches`.
+ */
+export interface VaultQueryMatch {
+	readonly file: NormalizedFileInfo;
+	readonly aliases: string[];
+	readonly tags: string[];
+	readonly headings: NormalizedHeading[];
+	readonly links: NormalizedLink[];
+	readonly embeds: NormalizedLink[];
+	readonly blocks: string[];
+	readonly properties: Record<string, unknown>;
+}
+
+/**
  * Result returned by `runVaultQuery` and `plugin.query`.
  */
 export interface VaultQueryResult {
@@ -62,7 +79,23 @@ export interface VaultQueryResult {
 	/** Query compilation and lint diagnostics. */
 	readonly diagnostics: QueryDiagnostics;
 	/** Matched Markdown notes in vault evaluation order. */
-	readonly matches: NormalizedDocument[];
+	readonly matches: VaultQueryMatch[];
+}
+
+/**
+ * Projects a `NormalizedDocument` into a user-facing `VaultQueryMatch` POJO.
+ */
+export function toVaultQueryMatch(doc: NormalizedDocument): VaultQueryMatch {
+	return {
+		file: doc.file,
+		aliases: doc.aliases,
+		tags: doc.tags,
+		headings: doc.headings,
+		links: doc.links,
+		embeds: doc.embeds,
+		blocks: doc.blocks,
+		properties: doc.properties,
+	};
 }
 
 /**
@@ -260,6 +293,7 @@ export async function runVaultQuery(
 
 	const docs: NormalizedDocument[] = app.vault
 		.getMarkdownFiles()
+		.filter((file) => !(file as { deleted?: boolean }).deleted)
 		.map((file) =>
 			normalizeObsidianMetadata(
 				file,
@@ -278,7 +312,7 @@ export async function runVaultQuery(
 			executable: true,
 			findings: compileResult.diagnostics,
 		},
-		matches: report.matches,
+		matches: report.matches.map(toVaultQueryMatch),
 	};
 }
 
@@ -325,6 +359,7 @@ export async function diagnoseVaultQuery(
 
 	const docs: NormalizedDocument[] = app.vault
 		.getMarkdownFiles()
+		.filter((file) => !(file as { deleted?: boolean }).deleted)
 		.map((file) =>
 			normalizeObsidianMetadata(
 				file,

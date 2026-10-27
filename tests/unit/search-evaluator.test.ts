@@ -185,26 +185,67 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		assertEval(docs, '-headings:intro', config, ['empty.md']);
 	});
 
-	it('resolves all virtual file.* keys exclusively from doc.file despite conflicting shadow properties', () => {
+	it('resolves all virtual file.* keys exclusively from doc.file despite conflicting shadow properties, while retired keys act as ordinary user properties', () => {
 		const config = makeConfig();
 		const shadowFm = {
-			'file.mtime': '1999-01-01',
-			'file.ctime': '1999-01-01',
+			'file.modified': '1999-01-01',
+			'file.created': '1999-01-01',
 			'file.size': 1,
-			'file.ext': 'txt',
 			'file.extension': 'txt',
 			'file.name': 'Fake.txt',
 			'file.basename': 'Fake',
 			'file.path': 'Wrong/Fake.txt',
 			'file.parent': 'Wrong',
+			'file.mtime': 'legacy-mtime',
+			'file.ctime': 'legacy-ctime',
+			'file.ext': 'legacy-ext',
 		};
 		const docs = [makeDoc(config, 'Archive/2026/Report.md', { frontmatter: shadowFm })];
-		for (const q of '[file.mtime = 2026-06-15];[file.ctime = 2026-03-01];[file.size = 4096];[file.ext = md];[file.extension = md];[file.name = Report.md];[file.basename = Report];[file.path = Archive/2026/Report.md];[file.parent = Archive/2026]'.split(
+		for (const q of '[file.modified = 2026-06-15];[file.created = 2026-03-01];[file.size = 4096];[file.extension = md];[file.name = Report.md];[file.basename = Report];[file.path = Archive/2026/Report.md];[file.parent = Archive/2026];[file.mtime = legacy-mtime];[file.ctime = legacy-ctime];[file.ext = legacy-ext]'.split(
 			';',
 		)) {
 			assertEval(docs, q, config, ['Archive/2026/Report.md']);
 		}
 		assertEval(docs, '[file.name = Fake.txt]', config, []);
+	});
+
+	it('evaluates case-sensitive vs case-insensitive regexes on tags and blocks while keeping non-regex queries case-insensitive', () => {
+		const config = makeConfig();
+		const doc1 = makeDoc(config, 'upper.md', {
+			frontmatter: { tags: ['#Work/Urgent'] },
+			tags: [{ tag: '#BodyTag' }],
+			blocks: { 'blk-alpha': { id: '^Blk-Alpha' } },
+		});
+		const doc2 = makeDoc(config, 'lower.md', {
+			frontmatter: { tags: ['work/urgent'] },
+			tags: [{ tag: '#bodytag' }],
+			blocks: { 'blk-alpha': { id: 'blk-alpha' } },
+		});
+		const docs = [doc1, doc2];
+
+		// Case-sensitive regex matches only exact authored casing
+		assertEval(docs, 'tag:/^Work/', config, ['upper.md']);
+		assertEval(docs, 'tag:/^work/', config, ['lower.md']);
+		assertEval(docs, 'tag:/^BodyTag$/', config, ['upper.md']);
+		assertEval(docs, '[tags: /^Work/]', config, ['upper.md']);
+		assertEval(docs, '[tags: /^work/]', config, ['lower.md']);
+		assertEval(docs, 'blocks:/^Blk-Alpha$/', config, ['upper.md']);
+		assertEval(docs, 'blocks:/^blk-alpha$/', config, ['lower.md']);
+
+		// Case-insensitive regex (/.../i) and non-regex queries match both
+		for (const q of [
+			'tag:/^work/i',
+			'[tags: /^work/i]',
+			'#work',
+			'tag:work',
+			'[tags: work]',
+			'[tags = work/urgent]',
+			'blocks:/^blk-alpha$/i',
+			'blocks:blk-alpha',
+			'blocks:^BLK-ALPHA',
+		]) {
+			assertEval(docs, q, config, ['upper.md', 'lower.md']);
+		}
 	});
 
 	it('matches bare text and regex against basename, path, aliases, and tags only', () => {

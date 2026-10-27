@@ -21,14 +21,12 @@ function createFixtureDoc(): NormalizedDocument {
 			basename: 'Sprint-12',
 			extension: 'md',
 			parent: 'Projects/Active',
-			stat: {
-				ctime: 1700000000000,
-				mtime: 1700000005000,
-				size: 2048,
-			},
+			created: 1700000000000,
+			modified: 1700000005000,
+			size: 2048,
 		},
 		aliases: ['Q4 Sprint', 'Active Roadmap'],
-		tags: ['#project', '#work/urgent'],
+		tags: ['project', 'work/urgent'],
 		headings: [
 			{ text: 'Overview', level: 1 },
 			{ text: 'Action Items', level: 2 },
@@ -113,10 +111,9 @@ describe('types & constants', () => {
 
 	it('validates virtual file keys with isVirtualFileKey', () => {
 		expect(VIRTUAL_FILE_KEYS_LIST).toEqual([
-			'file.mtime',
-			'file.ctime',
+			'file.modified',
+			'file.created',
 			'file.size',
-			'file.ext',
 			'file.extension',
 			'file.name',
 			'file.basename',
@@ -126,6 +123,9 @@ describe('types & constants', () => {
 		for (const key of VIRTUAL_FILE_KEYS_LIST) {
 			expect(isVirtualFileKey(key)).toBe(true);
 		}
+		expect(isVirtualFileKey('file.mtime')).toBe(false);
+		expect(isVirtualFileKey('file.ctime')).toBe(false);
+		expect(isVirtualFileKey('file.ext')).toBe(false);
 		expect(isVirtualFileKey('status')).toBe(false);
 		expect(isVirtualFileKey('file.unknown')).toBe(false);
 		expect(isVirtualFileKey('FILE.SIZE')).toBe(false);
@@ -199,12 +199,12 @@ describe('BUILT_IN_SCOPES & substringStringMatch', () => {
 		if (!res.ok) throw new Error('Expected ok config');
 
 		const tagScope = res.config.getScope('tag')!;
-		expect(tagScope.extract(doc)).toEqual(['#project', '#work/urgent']);
-		expect(tagScope.matchString('#work/urgent', 'work', false)).toBe(true);
-		expect(tagScope.matchString('#work/urgent', '#WORK', false)).toBe(true);
-		expect(tagScope.matchString('#work/urgent', '#work/urgent', false)).toBe(true);
-		expect(tagScope.matchString('#work-other', 'work', false)).toBe(false);
-		expect(tagScope.matchString('#project', 'proj', false)).toBe(false);
+		expect(tagScope.extract(doc)).toEqual(['project', 'work/urgent']);
+		expect(tagScope.matchString('work/urgent', 'work', false)).toBe(true);
+		expect(tagScope.matchString('work/urgent', '#WORK', false)).toBe(true);
+		expect(tagScope.matchString('work/urgent', '#work/urgent', false)).toBe(true);
+		expect(tagScope.matchString('work-other', 'work', false)).toBe(false);
+		expect(tagScope.matchString('project', 'proj', false)).toBe(false);
 	});
 
 	it('extracts and matches aliases, headings, links, embeds, and blocks', () => {

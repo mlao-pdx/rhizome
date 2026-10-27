@@ -14,7 +14,7 @@ import {
 	type InlinePropertyInput,
 	type LogicalNode,
 	type NormalizedDocument,
-	type NormalizedFileStat,
+	type ObsidianFileInput,
 	type ObsidianMetadataCacheInput,
 	type ResolvedEngineConfig,
 	type ScopedFilterNode,
@@ -53,7 +53,7 @@ function makeDoc(
 	cache: ObsidianMetadataCacheInput = {},
 	resolvedConfig = config,
 	inline: readonly InlinePropertyInput[] = [],
-	stat: Partial<NormalizedFileStat> = {},
+	stat: Partial<ObsidianFileInput['stat']> = {},
 ): NormalizedDocument {
 	const name = path.split('/').at(-1)!;
 	const dot = name.lastIndexOf('.');

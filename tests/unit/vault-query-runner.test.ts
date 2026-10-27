@@ -14,6 +14,7 @@ interface MockNoteSpec {
 	ctime?: number;
 	mtime?: number;
 	size?: number;
+	deleted?: boolean;
 	cache?: Partial<CachedMetadata> | null;
 }
 
@@ -23,6 +24,7 @@ interface MockFileEntry {
 	basename: string;
 	extension: string;
 	parent: { path: string };
+	deleted?: boolean;
 	stat: {
 		ctime: number;
 		mtime: number;
@@ -44,6 +46,7 @@ function makeMockFileEntry(spec: MockNoteSpec): MockFileEntry {
 		basename,
 		extension,
 		parent: { path: parentPath },
+		...(spec.deleted !== undefined ? { deleted: spec.deleted } : {}),
 		stat: {
 			ctime: spec.ctime ?? 1700000000000,
 			mtime: spec.mtime ?? 1700000000000,
@@ -377,10 +380,50 @@ describe('runVaultQuery', () => {
 			findings: [],
 		});
 		expect(res.matches).toHaveLength(1);
-		expect(res.matches[0]?.file.path).toBe('tasks/task-1.md');
-		expect(res.matches[0]?.links[0]?.resolvedPath).toBe('projects/roadmap.md');
+		const match = res.matches[0]!;
+		expect(match.file.path).toBe('tasks/task-1.md');
+		expect(match.links[0]?.resolvedPath).toBe('projects/roadmap.md');
+		expect(Object.keys(match)).toEqual([
+			'file',
+			'aliases',
+			'tags',
+			'headings',
+			'links',
+			'embeds',
+			'blocks',
+			'properties',
+		]);
+		expect('normalizationFingerprint' in match).toBe(false);
+		expect('propertyOccurrences' in match).toBe(false);
+		expect('propertyKeys' in match).toBe(false);
+		expect('diagnostics' in match).toBe(false);
+		expect(Object.isFrozen(match)).toBe(false);
+		expect(Object.isFrozen(match.file)).toBe(false);
 		expect('paths' in res).toBe(false);
 		expect('propertyDiagnostics' in res).toBe(false);
+	});
+
+	it('skips files marked deleted: true in both runVaultQuery and diagnoseVaultQuery', async () => {
+		const app = makeMockApp({
+			notes: [
+				{
+					path: 'notes/active.md',
+					cache: { frontmatter: { status: 'active' } },
+				},
+				{
+					path: 'notes/deleted.md',
+					deleted: true,
+					cache: { frontmatter: { status: 'active' } },
+				},
+			],
+		});
+
+		const runRes = await runVaultQuery(app, '[status: active]', { timeZone: 'UTC' });
+		expect(runRes.matches.map((m) => m.file.path)).toEqual(['notes/active.md']);
+
+		const diagRes = await diagnoseVaultQuery(app, '[status: active]', { timeZone: 'UTC' });
+		expect(diagRes.paths).toEqual(['notes/active.md']);
+		expect(diagRes.matches.map((d) => d.file.path)).toEqual(['notes/active.md']);
 	});
 
 	it('overrides types.json entries case-insensitively via options.propertyTypes', async () => {

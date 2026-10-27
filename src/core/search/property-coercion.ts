@@ -242,7 +242,7 @@ export function resolveQueryPropertyType(
 	lowerKey: string,
 	normalizedRegistry: Readonly<PropertyTypeRegistry>,
 ): ObsidianPropertyType {
-	if (lowerKey === 'file.mtime' || lowerKey === 'file.ctime') return 'datetime';
+	if (lowerKey === 'file.modified' || lowerKey === 'file.created') return 'datetime';
 	if (lowerKey === 'file.size') return 'number';
 	if (isVirtualFileKey(lowerKey)) return 'text';
 	return resolveUserPropertyType(lowerKey, normalizedRegistry);

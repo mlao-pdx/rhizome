@@ -4,8 +4,12 @@ export function substringStringMatch(target: string, queryValue: string): boolea
 	return target.toLowerCase().includes(queryValue.toLowerCase());
 }
 
+export function stripTagHash(raw: string): string {
+	return raw.trim().replace(/^#+/, '').trim();
+}
+
 export function normalizeTagBody(raw: string): string {
-	return raw.trim().replace(/^#+/, '').toLowerCase();
+	return stripTagHash(raw).toLowerCase();
 }
 
 export function hierarchicalTagMatch(target: string, queryValue: string): boolean {

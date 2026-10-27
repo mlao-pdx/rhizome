@@ -6,6 +6,7 @@ import {
 	sanitizeLineNumber,
 	sanitizeScalar,
 } from './property-coercion';
+import { stripTagHash } from './scopes';
 import { MAX_SAFE_EPOCH_MS } from './temporal';
 import type {
 	DocumentDiagnostic,
@@ -187,9 +188,17 @@ export function normalizeObsidianMetadata(
 			for (const item of val as readonly unknown[]) {
 				const s = sanitizeScalar(item);
 				if (!s.valid) continue;
-				sanitizedList.push(s.scalar);
+				let scalar = s.scalar;
+				let itemForCoerce: unknown = item;
+				if (propertyType === 'tags' && typeof scalar === 'string') {
+					const stripped = stripTagHash(scalar);
+					if (!stripped) continue;
+					scalar = stripped;
+					itemForCoerce = stripped;
+				}
+				sanitizedList.push(scalar);
 				const valueIndex = typedValues.length;
-				const tv = coercePropertyValue(item, propertyType, timeZone);
+				const tv = coercePropertyValue(itemForCoerce, propertyType, timeZone);
 				typedValues.push(tv);
 				recordDocDiagnosticIfInvalid(
 					tv,
@@ -213,7 +222,15 @@ export function normalizeObsidianMetadata(
 		} else {
 			const s = sanitizeScalar(val);
 			if (!s.valid) return;
-			const tv = coercePropertyValue(val, propertyType, timeZone);
+			let scalar = s.scalar;
+			let valForCoerce: unknown = val;
+			if (propertyType === 'tags' && typeof scalar === 'string') {
+				const stripped = stripTagHash(scalar);
+				if (!stripped) return;
+				scalar = stripped;
+				valForCoerce = stripped;
+			}
+			const tv = coercePropertyValue(valForCoerce, propertyType, timeZone);
 			recordDocDiagnosticIfInvalid(tv, key, rawKey, source, line, occurrenceIndex, 0);
 			propertyOccurrences.push({
 				key,
@@ -221,7 +238,7 @@ export function normalizeObsidianMetadata(
 				source,
 				line,
 				propertyType,
-				rawValue: s.scalar,
+				rawValue: scalar,
 				typedValues: [tv],
 			});
 		}
@@ -245,20 +262,20 @@ export function normalizeObsidianMetadata(
 		}
 	}
 
-	const tagSet = new Set<string>();
-	for (const t of cache?.tags ?? []) {
-		const body = t.tag.trim().replace(/^#+/, '').toLowerCase();
-		if (body) tagSet.add(`#${body}`);
-	}
+	const tags: string[] = [];
 	for (const occ of propertyOccurrences) {
 		if (occ.key === 'tags' || occ.key === 'tag') {
 			for (const tv of occ.typedValues) {
 				if (tv.kind === 'text') {
-					const body = tv.value.trim().replace(/^#+/, '').toLowerCase();
-					if (body) tagSet.add(`#${body}`);
+					const stripped = stripTagHash(tv.value);
+					if (stripped) tags.push(stripped);
 				}
 			}
 		}
+	}
+	for (const t of cache?.tags ?? []) {
+		const stripped = stripTagHash(t.tag);
+		if (stripped) tags.push(stripped);
 	}
 
 	const headings: NormalizedHeading[] = (cache?.headings ?? []).map((h) => ({
@@ -280,9 +297,9 @@ export function normalizeObsidianMetadata(
 		normalizeLinkItem(e, 'embed', tfile.path, resolveLinkPath),
 	);
 
-	const blocks = Object.keys(cache?.blocks ?? {}).map((b) =>
-		b.startsWith('^') ? b.slice(1).toLowerCase() : b.toLowerCase(),
-	);
+	const blocks = Object.values(cache?.blocks ?? {})
+		.map((b) => (b.id.startsWith('^') ? b.id.slice(1) : b.id))
+		.filter((id) => id.length > 0);
 
 	const size = tfile.stat.size === 0 ? 0 : tfile.stat.size;
 
@@ -294,14 +311,12 @@ export function normalizeObsidianMetadata(
 			basename: tfile.basename,
 			extension: tfile.extension,
 			parent: tfile.parent?.path && tfile.parent.path !== '/' ? tfile.parent.path : '',
-			stat: {
-				ctime,
-				mtime,
-				size,
-			},
+			created: ctime,
+			modified: mtime,
+			size,
 		},
 		aliases,
-		tags: Array.from(tagSet).sort(),
+		tags,
 		headings,
 		links,
 		embeds,

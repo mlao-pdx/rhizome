@@ -123,7 +123,7 @@ const checkboxComparisonArb = fc
 	.map(([op, value]) => `[done ${op} ${value}]`);
 const temporalComparisonArb = fc
 	.tuple(
-		fc.constantFrom('due', 'meeting', 'sprint', 'file.mtime', 'file.ctime'),
+		fc.constantFrom('due', 'meeting', 'sprint', 'file.modified', 'file.created'),
 		comparisonOperatorArb,
 		temporalLiteralArb,
 	)
@@ -138,7 +138,7 @@ const textComparisonArb = fc
 			'aliases',
 			'unknown',
 			...VIRTUAL_FILE_KEYS_LIST.filter(
-				(key) => !['file.mtime', 'file.ctime', 'file.size'].includes(key),
+				(key) => !['file.modified', 'file.created', 'file.size'].includes(key),
 			),
 		),
 		comparisonOperatorArb,

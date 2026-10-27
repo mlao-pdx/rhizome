@@ -91,14 +91,18 @@ describe('property-coercion helpers', () => {
 
 		// User properties named after virtual file.* keys do NOT get virtual types unless registered
 		expect(resolveUserPropertyType('file.size', reg)).toBe('text');
-		expect(resolveUserPropertyType('file.mtime', reg)).toBe('text');
+		expect(resolveUserPropertyType('file.modified', reg)).toBe('text');
 
 		// Query properties DO apply virtual file.* types with highest precedence
-		expect(resolveQueryPropertyType('file.mtime', reg)).toBe('datetime');
-		expect(resolveQueryPropertyType('file.ctime', reg)).toBe('datetime');
+		expect(resolveQueryPropertyType('file.modified', reg)).toBe('datetime');
+		expect(resolveQueryPropertyType('file.created', reg)).toBe('datetime');
 		expect(resolveQueryPropertyType('file.size', reg)).toBe('number');
+		expect(resolveQueryPropertyType('file.extension', reg)).toBe('text');
 		expect(resolveQueryPropertyType('file.name', reg)).toBe('text');
 		expect(resolveQueryPropertyType('file.path', reg)).toBe('text');
+		expect(resolveQueryPropertyType('file.mtime', reg)).toBe('text');
+		expect(resolveQueryPropertyType('file.ctime', reg)).toBe('text');
+		expect(resolveQueryPropertyType('file.ext', reg)).toBe('text');
 		expect(resolveQueryPropertyType('score', reg)).toBe('number');
 		expect(resolveQueryPropertyType('tags', reg)).toBe('tags');
 	});
@@ -407,7 +411,16 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		);
 
 		expect(doc.file.parent).toBe('');
-		expect(doc.tags).toEqual(['#extra-tag', '#inline-tag', '#project', '#work/urgent']);
+		expect(doc.tags).toEqual([
+			'Project',
+			'work/urgent',
+			'work/urgent',
+			'extra-tag',
+			'work/urgent',
+			'inline-tag',
+		]);
+		expect(doc.properties['tags']).toEqual(['Project', 'work/urgent', 'work/urgent']);
+		expect(doc.properties['tag']).toBe('extra-tag');
 		expect(doc.aliases).toEqual(['First Alias', '42', 'Second Alias']);
 		expect(doc.headings).toEqual([
 			{ text: 'H1', level: 1 },
@@ -434,7 +447,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				source: 'embed',
 			},
 		]);
-		expect(doc.blocks).toEqual(['block-one', 'block-two']);
+		expect(doc.blocks).toEqual(['Block-One', 'block-two']);
 		expect(doc.propertyKeys).not.toContain('position');
 	});
 
@@ -524,7 +537,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		cacheTags.push({ tag: '#mutated' });
 		cacheHeadings[0]!.heading = 'Mutated Heading';
 
-		expect(doc.tags).toEqual(['#initial']);
+		expect(doc.tags).toEqual(['initial']);
 		expect(doc.headings).toEqual([{ text: 'Initial Heading', level: 2 }]);
 	});
 
@@ -566,7 +579,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		expect(cloned).toEqual(doc);
 	});
 
-	it('defensively copies tfile.stat, frontmatter arrays, occurrence.rawValue, and single-occurrence array views in doc.properties', () => {
+	it('populates flattened doc.file fields and defensively copies frontmatter arrays, occurrence.rawValue, and single-occurrence array views in doc.properties', () => {
 		const config = getStandardConfig();
 		const inputStat = { ctime: 1700000000000, mtime: 1700000005000, size: 512 };
 		const tfile = makeFile({ stat: inputStat });
@@ -582,7 +595,10 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			config,
 		);
 
-		expect(doc.file.stat).not.toBe(tfile.stat);
+		expect('stat' in doc.file).toBe(false);
+		expect(doc.file.created).toBe(1700000000000);
+		expect(doc.file.modified).toBe(1700000005000);
+		expect(doc.file.size).toBe(512);
 		expect(doc.propertyOccurrences[0]?.rawValue).not.toBe(fmList);
 		expect(doc.properties['tags']).not.toBe(fmList);
 		expect(doc.properties['tags']).not.toBe(doc.propertyOccurrences[0]?.rawValue);
@@ -590,7 +606,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		// Mutating caller inputs must not affect the normalized document
 		inputStat.size = 999999;
 		fmList.push('mutated-input');
-		expect(doc.file.stat.size).toBe(512);
+		expect(doc.file.size).toBe(512);
 		expect(doc.propertyOccurrences[0]?.rawValue).toEqual(['alpha', 'beta']);
 		expect(doc.properties['tags']).toEqual(['alpha', 'beta']);
 

@@ -8,6 +8,7 @@ import {
 	normalizeObsidianMetadata,
 	resolveQueryPropertyType,
 	resolveUserPropertyType,
+	stripTagHash,
 	VALID_PROPERTY_TYPES_LIST,
 	VIRTUAL_FILE_KEYS_LIST,
 	type DocumentDiagnostic,
@@ -462,7 +463,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 		);
 		const blocksArb = fc.dictionary(
 			fc.string({ minLength: 1, maxLength: 12 }),
-			fc.constant({ id: 'x' }),
+			fc.record({ id: fc.string({ maxLength: 12 }) }),
 			{ maxKeys: 6 },
 		);
 		await assertProperty(
@@ -496,14 +497,43 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						(target) => `Resolved/${target}.md`,
 					);
 
-					// 1. tags: non-empty, lowercase, starts with '#', strictly sorted & deduplicated
-					for (let i = 0; i < doc.tags.length; i++) {
-						const t = doc.tags[i]!;
-						expect(t.startsWith('#')).toBe(true);
-						expect(t.length).toBeGreaterThan(1);
-						expect(t).toBe(t.toLowerCase());
-						if (i > 0) {
-							expect(doc.tags[i - 1]! < t).toBe(true);
+					// 0. Flattened file schema
+					expect(Object.keys(doc.file)).toEqual([
+						'path',
+						'name',
+						'basename',
+						'extension',
+						'parent',
+						'created',
+						'modified',
+						'size',
+					]);
+					expect('stat' in doc.file).toBe(false);
+
+					// 1. tags: non-empty, no leading '#', preserves casing, appearance order, and duplicates
+					const expectedFmTags = fmTags
+						.map((t) => stripTagHash(t))
+						.filter((t) => t.length > 0);
+					const expectedCacheTags = tags
+						.map((t) => stripTagHash(t.tag))
+						.filter((t) => t.length > 0);
+					expect(doc.tags).toEqual([...expectedFmTags, ...expectedCacheTags]);
+					for (const t of doc.tags) {
+						expect(t.length).toBeGreaterThan(0);
+						expect(t.startsWith('#')).toBe(false);
+					}
+					expect(doc.properties['tags']).toEqual(expectedFmTags);
+					for (const occ of doc.propertyOccurrences) {
+						if (occ.propertyType === 'tags') {
+							const rawList = Array.isArray(occ.rawValue)
+								? occ.rawValue
+								: [occ.rawValue];
+							for (const item of rawList) {
+								if (typeof item === 'string') {
+									expect(item.length).toBeGreaterThan(0);
+									expect(item.startsWith('#')).toBe(false);
+								}
+							}
 						}
 					}
 
@@ -514,9 +544,14 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						expect(h.level).toBeLessThanOrEqual(6);
 					}
 
-					// 3. blocks: always lowercase
+					// 3. blocks: non-empty, no leading '^', preserves exact casing from BlockCache.id
+					const expectedBlocks = Object.values(blocks)
+						.map((b) => (b.id.startsWith('^') ? b.id.slice(1) : b.id))
+						.filter((id) => id.length > 0);
+					expect(doc.blocks).toEqual(expectedBlocks);
 					for (const b of doc.blocks) {
-						expect(b).toBe(b.toLowerCase());
+						expect(b.length).toBeGreaterThan(0);
+						expect(b.startsWith('^')).toBe(false);
 					}
 
 					// 4. links & embeds: self-link vs target+subpath decomposition
@@ -571,7 +606,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 				const queryType = resolveQueryPropertyType(lowerKey, reg);
 
 				if (isVirtualFileKey(lowerKey)) {
-					if (lowerKey === 'file.mtime' || lowerKey === 'file.ctime') {
+					if (lowerKey === 'file.modified' || lowerKey === 'file.created') {
 						expect(queryType).toBe('datetime');
 					} else if (lowerKey === 'file.size') {
 						expect(queryType).toBe('number');

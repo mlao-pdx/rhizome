@@ -252,9 +252,9 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 			'due',
 			'status',
 			'done',
-			'file.mtime',
+			'file.modified',
 			'file.size',
-			'file.ext',
+			'file.extension',
 		);
 		const compOpArb = fc.constantFrom('=', '!=', '<', '>', '<=', '>=');
 		await assertProperty(

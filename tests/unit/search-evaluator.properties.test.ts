@@ -164,16 +164,19 @@ describe('Phase 6 evaluator invariants', () => {
 					const { start, end } = parsed.interval;
 					const times = [start - 1, start, end - 1, end, referenceTimeMs];
 					const operators = ['<', '=', '>', '>=', '<=', '!='] as const;
-					for (const key of ['mtime', 'ctime'] as const) {
+					for (const [inputKey, virtualKey] of [
+						['mtime', 'modified'],
+						['ctime', 'created'],
+					] as const) {
 						const docs = evaluatorVault(
-							times.map((time) => ({ ...source, [key]: time })),
+							times.map((time) => ({ ...source, [inputKey]: time })),
 							config,
 						);
 						const queries = new Map(
 							operators.map((op) => [
 								op,
 								evaluatorQuery(
-									`[file.${key} ${op} ${literal}]`,
+									`[file.${virtualKey} ${op} ${literal}]`,
 									config,
 									referenceTimeMs,
 								),
@@ -189,7 +192,7 @@ describe('Phase 6 evaluator invariants', () => {
 							for (const doc of docs) {
 								const matches = (op: (typeof operators)[number]) =>
 									results.get(op)!.has(doc);
-								const t = doc.file.stat[key];
+								const t = doc.file[virtualKey];
 								expect([matches('<'), matches('='), matches('>')]).toEqual([
 									t < start,
 									t >= start && t < end,

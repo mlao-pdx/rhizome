@@ -18,10 +18,9 @@ export function isValidPropertyType(val: unknown): val is ObsidianPropertyType {
 }
 
 export const VIRTUAL_FILE_KEYS_LIST: readonly string[] = Object.freeze([
-	'file.mtime',
-	'file.ctime',
+	'file.modified',
+	'file.created',
 	'file.size',
-	'file.ext',
 	'file.extension',
 	'file.name',
 	'file.basename',
@@ -122,19 +121,15 @@ export interface DocumentDiagnostic {
 	hint: string | null;
 }
 
-export interface NormalizedFileStat {
-	ctime: number; // Safe integer UTC epoch ms within [-8.64e15, 8.64e15]
-	mtime: number; // Safe integer UTC epoch ms within [-8.64e15, 8.64e15]
-	size: number; // Safe integer >= 0
-}
-
 export interface NormalizedFileInfo {
 	path: string;
 	name: string;
 	basename: string;
 	extension: string;
 	parent: string; // "" for vault root
-	stat: NormalizedFileStat;
+	created: number; // Safe integer UTC epoch ms within [-8.64e15, 8.64e15]
+	modified: number; // Safe integer UTC epoch ms within [-8.64e15, 8.64e15]
+	size: number; // Safe integer >= 0 (bytes)
 }
 
 export interface NormalizedHeading {
@@ -156,11 +151,11 @@ export interface NormalizedDocument {
 	normalizationFingerprint: string;
 	file: NormalizedFileInfo;
 	aliases: string[];
-	tags: string[]; // Explicit tags only, lowercase with '#', sorted & deduplicated
+	tags: string[]; // Authored-case tags with leading '#' stripped, in appearance order
 	headings: NormalizedHeading[];
 	links: NormalizedLink[]; // Outgoing links (body + frontmatterLinks, excluding embeds)
 	embeds: NormalizedLink[]; // Outgoing embeds
-	blocks: string[]; // Lowercase block IDs with any leading '^' stripped
+	blocks: string[]; // Authored-case block IDs with any leading '^' stripped
 	propertyOccurrences: PropertyOccurrence[]; // Cache-level occurrence stream
 	propertyKeys: string[]; // Exact first-seen order of normalized property keys
 	properties: Record<string, unknown>; // Null-prototype O(1) lookup map with per-key local occurrence order

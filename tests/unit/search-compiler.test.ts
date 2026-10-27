@@ -473,8 +473,8 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 	it('emits WARN_SINGLE_VALUE_CONTRADICTION on contradicting single-valued fields in AND', () => {
 		const contradictions: Array<[string, string, string]> = [
 			['ext:md AND ext:pdf', 'md', 'pdf'],
-			['ext:md AND [file.ext = pdf]', 'md', 'pdf'],
-			['[file.extension = ".md"] AND [file.ext = "pdf"]', '.md', 'pdf'],
+			['ext:md AND [file.extension = pdf]', 'md', 'pdf'],
+			['[file.extension = ".md"] AND [file.extension = "pdf"]', '.md', 'pdf'],
 			['[file.name = "a.md"] AND [file.name = "b.md"]', 'a.md', 'b.md'],
 			['[file.basename = alpha] AND [file.basename = beta]', 'alpha', 'beta'],
 			['[file.path = "a/b.md"] AND [file.path = "c/d.md"]', 'a/b.md', 'c/d.md'],
@@ -496,7 +496,7 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 
 		// Same normalized extension (.md vs md) does not warn
 		const sameExt = compileQuery(
-			'ext:md AND ext:.md AND [file.ext = MD]',
+			'ext:md AND ext:.md AND [file.extension = MD]',
 			config,
 			PINNED_REF_MS,
 		);

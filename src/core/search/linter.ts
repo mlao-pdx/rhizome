@@ -7,7 +7,8 @@ import type {
 	ValueExprAST,
 } from './types';
 
-type SingleValuedField = 'file.ext' | 'file.name' | 'file.basename' | 'file.path' | 'file.parent';
+type SingleValuedField =
+	'file.extension' | 'file.name' | 'file.basename' | 'file.path' | 'file.parent';
 
 interface SingleValueEquality {
 	readonly field: SingleValuedField;
@@ -55,7 +56,7 @@ function extractSingleValueEquality(child: SearchAST): SingleValueEquality | nul
 	) {
 		const raw = child.expr.matcher.value;
 		return {
-			field: 'file.ext',
+			field: 'file.extension',
 			normalized: raw.trim().toLowerCase().replace(/^\./, ''),
 			raw,
 		};
@@ -68,9 +69,9 @@ function extractSingleValueEquality(child: SearchAST): SingleValueEquality | nul
 		child.valueExpr.matcher.kind === 'string'
 	) {
 		const raw = child.valueExpr.matcher.value;
-		if (child.key === 'file.ext' || child.key === 'file.extension') {
+		if (child.key === 'file.extension') {
 			return {
-				field: 'file.ext',
+				field: 'file.extension',
 				normalized: raw.trim().toLowerCase().replace(/^\./, ''),
 				raw,
 			};

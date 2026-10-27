@@ -8,6 +8,7 @@ import {
 	diagnoseVaultQuery,
 	parseObsidianTypesJson,
 	runVaultQuery,
+	toVaultQueryMatch,
 	type VaultQueryOptions,
 } from '../../src/adapters/vault-query-runner';
 import {
@@ -39,6 +40,7 @@ interface MockNoteSpec {
 	ctime: number;
 	mtime: number;
 	size: number;
+	deleted: boolean;
 	cache: Partial<CachedMetadata> | null;
 }
 
@@ -65,6 +67,7 @@ function makeSpyMockApp(options: {
 			basename,
 			extension,
 			parent: { path: parentPath },
+			deleted: spec.deleted,
 			stat: {
 				ctime: spec.ctime,
 				mtime: spec.mtime,
@@ -170,6 +173,7 @@ const mockNoteSpecArb: fc.Arbitrary<MockNoteSpec> = fc.record({
 	ctime: fc.integer({ min: 1_600_000_000_000, max: 1_800_000_000_000 }),
 	mtime: fc.integer({ min: 1_600_000_000_000, max: 1_800_000_000_000 }),
 	size: fc.integer({ min: 0, max: 50_000 }),
+	deleted: fc.boolean(),
 	cache: fc.oneof(
 		fc.constant(null),
 		fc.record({
@@ -285,8 +289,14 @@ describe('Vault Query Runner Property Invariants', () => {
 								? rawOptions.referenceTimeMs
 								: PINNED_REF_MS,
 					};
-					const { app: appRun } = makeSpyMockApp({ notes, typesJson });
-					const { app: appDiag } = makeSpyMockApp({ notes, typesJson });
+					const { app: appRun, getFileCacheSpy: runCacheSpy } = makeSpyMockApp({
+						notes,
+						typesJson,
+					});
+					const { app: appDiag, getFileCacheSpy: diagCacheSpy } = makeSpyMockApp({
+						notes,
+						typesJson,
+					});
 
 					const [runRes, diagRes] = await Promise.all([
 						runVaultQuery(appRun, queryInput, options),
@@ -295,10 +305,35 @@ describe('Vault Query Runner Property Invariants', () => {
 
 					expect(runRes.diagnostics.executable).toBe(diagRes.executable);
 					expect(runRes.diagnostics.findings).toEqual(diagRes.diagnostics);
-					expect(runRes.matches).toEqual(diagRes.matches);
+					expect(runRes.matches).toEqual(diagRes.matches.map(toVaultQueryMatch));
 					expect(diagRes.paths).toEqual(runRes.matches.map((doc) => doc.file.path));
 					expect('paths' in runRes).toBe(false);
 					expect('propertyDiagnostics' in runRes).toBe(false);
+
+					for (const m of runRes.matches) {
+						expect(Object.keys(m)).toEqual([
+							'file',
+							'aliases',
+							'tags',
+							'headings',
+							'links',
+							'embeds',
+							'blocks',
+							'properties',
+						]);
+						expect('normalizationFingerprint' in m).toBe(false);
+						expect('propertyOccurrences' in m).toBe(false);
+						expect('propertyKeys' in m).toBe(false);
+						expect('diagnostics' in m).toBe(false);
+						expect(Object.isFrozen(m)).toBe(false);
+						expect(Object.isFrozen(m.file)).toBe(false);
+					}
+
+					// Deleted files are never normalized or returned in matches
+					for (const call of [...runCacheSpy.mock.calls, ...diagCacheSpy.mock.calls]) {
+						const arg = call[0] as { deleted?: boolean };
+						expect(arg.deleted).toBe(false);
+					}
 				},
 			),
 		);
@@ -413,15 +448,25 @@ describe('Vault Query Runner Property Invariants', () => {
 							[baseKey]: vaultType,
 						},
 					});
-					const { app } = makeSpyMockApp({ notes, typesJson });
+					const { app: appRun } = makeSpyMockApp({ notes, typesJson });
+					const { app: appDiag } = makeSpyMockApp({ notes, typesJson });
 
-					const res = await runVaultQuery(app, '', {
-						timeZone: rawTz,
-						referenceTimeMs: PINNED_REF_MS,
-						propertyTypes: {
-							[variantKey]: overrideType,
-						},
-					});
+					const [res, diagRes] = await Promise.all([
+						runVaultQuery(appRun, '', {
+							timeZone: rawTz,
+							referenceTimeMs: PINNED_REF_MS,
+							propertyTypes: {
+								[variantKey]: overrideType,
+							},
+						}),
+						diagnoseVaultQuery(appDiag, '', {
+							timeZone: rawTz,
+							referenceTimeMs: PINNED_REF_MS,
+							propertyTypes: {
+								[variantKey]: overrideType,
+							},
+						}),
+					]);
 
 					expect(res.diagnostics.executable).toBe(true);
 					expect(res.context.timeZone).toBe(rawTz.trim());
@@ -436,13 +481,16 @@ describe('Vault Query Runner Property Invariants', () => {
 						types: sortedTypePairs,
 					});
 
-					for (const doc of res.matches) {
+					for (const m of res.matches) {
+						expect('normalizationFingerprint' in m).toBe(false);
+					}
+					for (const doc of diagRes.matches) {
 						expect(doc.normalizationFingerprint).toBe(expectedFingerprint);
 					}
 
 					// Conflicting case-colliding keys within options.propertyTypes itself must fail config validation
 					if (vaultType !== overrideType) {
-						const conflictRes = await runVaultQuery(app, '', {
+						const conflictRes = await runVaultQuery(appRun, '', {
 							timeZone: 'UTC',
 							referenceTimeMs: PINNED_REF_MS,
 							propertyTypes: {

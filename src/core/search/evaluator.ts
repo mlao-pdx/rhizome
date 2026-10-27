@@ -50,7 +50,7 @@ function evalCompiledColonExpr(
 		case 'COLON_REGEX': {
 			if (expr.propType === 'checkbox' || entry.kind === 'checkbox') return false;
 			if (expr.propType === 'tags') {
-				return entry.kind === 'text' && expr.regex.test(normalizeTagBody(entry.value));
+				return entry.kind === 'text' && expr.regex.test(entry.value);
 			}
 			const target = entry.kind === 'text' ? entry.value : entry.raw;
 			return expr.regex.test(target);
