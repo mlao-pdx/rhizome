@@ -95,7 +95,13 @@ describe('explain-helpers', () => {
 		);
 		expect(formatDateIntervalWindow(interval, '<', 'UTC').inequality).toBe('D.end <= Q.start');
 		expect(formatDateIntervalWindow(interval, '<=', 'UTC').inequality).toBe('D.end <= Q.end');
+		expect(formatDateIntervalWindow(interval, '<=', 'UTC').plainEnglish).toContain(
+			'ends at or before `2026-10-23 04:00` (`UTC`) (end of `@today`)',
+		);
 		expect(formatDateIntervalWindow(interval, '>', 'UTC').inequality).toBe('D.start >= Q.end');
+		expect(formatDateIntervalWindow(interval, '>', 'UTC').plainEnglish).toContain(
+			'is on or after `2026-10-23 04:00` (`UTC`) (end of `@today`)',
+		);
 		expect(formatDateIntervalWindow(interval, '>=', 'UTC').inequality).toBe(
 			'D.start >= Q.start',
 		);
@@ -122,7 +128,7 @@ describe('explainQuery', () => {
 		expect(md).toContain('**Status**: **Executable** — 0 errors, 0 warnings, 0 hints.');
 		expect(md).toContain('Match All Notes (`MATCH_ALL`)');
 		expect(md).toContain('```mermaid\nflowchart TD');
-		expect(md).toContain('Match every note in vault (MATCH_ALL)');
+		expect(md).toContain('Match every note in vault');
 		expect(md).toContain('## Reference — Execution Context & Resolution');
 		expect(md).toContain('_No scoped or property filters in this query._');
 		expect(md).toContain('_None configured');
@@ -138,18 +144,18 @@ describe('explainQuery', () => {
 
 		expect(md).toContain('**Status**: **Executable**');
 		// Scope alias resolution
-		expect(md).toContain('scope alias `folder:`, resolved to canonical scope `path`');
-		expect(md).toContain('tag shorthand `#`, lowered to canonical scope `tag`');
+		expect(md).toContain('(`folder:` is an alias for `path:`)');
+		expect(md).toContain('**Tag filter** `#work/auth`');
 		// Compound ValueExprAST explanation
+		expect(md).toContain('The note has **at least one tag** where that single tag matches:');
+		expect(md).toContain('**Either / any (`OR`)**');
+		expect(md).toContain('**Not (`-`)**: Does **not** match:');
+		// Plain-English != phrasing & existence tip
+		expect(md).toContain('whose value does not equal `"done"` (case-insensitive)');
 		expect(md).toContain(
-			'requires **a single extracted target value** on the note to satisfy the inner value expression',
+			'*Tip: `[status != ...]` only matches notes that have a `status` property. To also include notes without `status`, use `-[status = ...]`.*',
 		);
-		expect(md).toContain('**Any value condition (`OR`)**');
-		expect(md).toContain('**Exclude value (`-`)**');
-		// Property != existence nuance
-		expect(md).toContain(
-			'`[status != ...]` requires `status` to exist on the note; use `-[status = ...]` to also match notes missing `status`',
-		);
+		expect(md).toContain('case-insensitive inequality (`!=`, does not equal `"done"`)');
 		// Hint callout for != existence
 		expect(md).toContain('HINT: `HINT_PROP_NEQ_EXISTENCE`');
 	});
@@ -246,10 +252,10 @@ describe('explainQuery', () => {
 		expect(badConfigMd).toContain('```mermaid');
 	});
 
-	it('escapes pipes, quotes, brackets, and angle brackets in Mermaid labels and Markdown tables', () => {
+	it('escapes pipes, quotes, backticks, and angle brackets in Mermaid labels and Markdown tables while keeping parentheses and brackets readable', () => {
 		const cfg = makeConfig();
 		const md = explainQuery(
-			'file:"a|b<c>[d]{e}" [status: (/foo|bar/ OR "x|y")]',
+			'file:"a|b<c>`d`[e]" tag:"x`y" blocks:"^id`1" ["prop`key" != "val"] [status: (/foo|bar/ OR "x|y")]',
 			cfg,
 			REF_TIME_MS,
 		);
@@ -257,8 +263,12 @@ describe('explainQuery', () => {
 		expect(md).toContain('&quot;');
 		expect(md).toContain('&lt;');
 		expect(md).toContain('&gt;');
-		expect(md).toContain('&#91;');
-		expect(md).toContain('&#93;');
+		expect(md).toContain('&#96;');
 		expect(md).toContain('\\|');
+		expect(md).toContain('``#x`y``');
+		expect(md).toContain('``^id`1``');
+		expect(md).toContain('``prop`key``');
+		expect(md).not.toContain('&#40;');
+		expect(md).not.toContain('&#91;');
 	});
 });

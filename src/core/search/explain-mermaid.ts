@@ -7,7 +7,8 @@ import type {
 } from './types';
 
 /**
- * Escapes arbitrary user text so it can be embedded safely inside a double-quoted Mermaid node label.
+ * Escapes characters that could break double-quoted Mermaid HTML/node labels (`&`, `"`, `<`, `>`, backticks, newlines)
+ * while preserving readable parentheses and brackets inside `"..."`.
  */
 export function escapeMermaidLabel(raw: string): string {
 	let out = '';
@@ -24,27 +25,6 @@ export function escapeMermaidLabel(raw: string): string {
 				break;
 			case '>':
 				out += '&gt;';
-				break;
-			case '[':
-				out += '&#91;';
-				break;
-			case ']':
-				out += '&#93;';
-				break;
-			case '(':
-				out += '&#40;';
-				break;
-			case ')':
-				out += '&#41;';
-				break;
-			case '{':
-				out += '&#123;';
-				break;
-			case '}':
-				out += '&#125;';
-				break;
-			case '|':
-				out += '&#124;';
 				break;
 			case '`':
 				out += '&#96;';
@@ -83,11 +63,11 @@ export function renderExplainMermaid(ast: SearchAST, ctx: MermaidRenderContext):
 
 		switch (node.type) {
 			case 'MATCH_ALL': {
-				lines.push(`    ${id}["Match every note in vault (MATCH_ALL)"]`);
+				lines.push(`    ${id}["Match every note in vault"]`);
 				return id;
 			}
 			case 'LOGICAL': {
-				const groupSuffix = node.parenthesized ? ' (parenthesized)' : '';
+				const groupSuffix = node.parenthesized ? ' (grouped)' : '';
 				const header =
 					node.operator === 'AND' ? `ALL (AND)${groupSuffix}` : `ANY (OR)${groupSuffix}`;
 				const subtitle =
@@ -120,12 +100,12 @@ export function renderExplainMermaid(ast: SearchAST, ctx: MermaidRenderContext):
 				if (isInvalid) {
 					subtitle = `❌ Invalid scope filter (${escapeMermaidLabel(node.rawScope)})`;
 				} else if (node.rawScope === '#') {
-					subtitle = 'Scope: tag (shorthand #)';
+					subtitle = 'Scope: tag';
 				} else if (node.rawScope.trim().toLowerCase() !== node.scope.toLowerCase()) {
-					const compound = node.expr.type !== 'VALUE_LEAF' ? ', compound expr' : '';
-					subtitle = `Scope: ${escapeMermaidLabel(node.scope)} (alias ${escapeMermaidLabel(node.rawScope)}:${compound})`;
+					const compound = node.expr.type !== 'VALUE_LEAF' ? ', compound' : '';
+					subtitle = `Scope: ${escapeMermaidLabel(node.scope)} (from ${escapeMermaidLabel(node.rawScope)}:${compound})`;
 				} else {
-					const compound = node.expr.type !== 'VALUE_LEAF' ? ' (compound expr)' : '';
+					const compound = node.expr.type !== 'VALUE_LEAF' ? ' (compound)' : '';
 					subtitle = `Scope: ${escapeMermaidLabel(node.scope)}${compound}`;
 				}
 				lines.push(`    ${id}["${authored}<br/>${subtitle}"]`);
@@ -140,9 +120,9 @@ export function renderExplainMermaid(ast: SearchAST, ctx: MermaidRenderContext):
 				if (isInvalid) {
 					subtitle = `❌ Invalid property filter (${escapeMermaidLabel(node.key)}: ${typeInfo.type})`;
 				} else if (node.operator === 'EXISTS') {
-					subtitle = `Property: ${escapeMermaidLabel(node.key)} (${typeInfo.type}) — EXISTS`;
+					subtitle = `Property: ${escapeMermaidLabel(node.key)} (${typeInfo.type}, exists)`;
 				} else {
-					subtitle = `Property: ${escapeMermaidLabel(node.key)} (${typeInfo.type}, op ${escapeMermaidLabel(node.operator)})`;
+					subtitle = `Property: ${escapeMermaidLabel(node.key)} (${typeInfo.type}, ${escapeMermaidLabel(node.operator)})`;
 				}
 				lines.push(`    ${id}["${authored}<br/>${subtitle}"]`);
 				return id;
@@ -154,9 +134,9 @@ export function renderExplainMermaid(ast: SearchAST, ctx: MermaidRenderContext):
 				if (isInvalid) {
 					subtitle = '❌ Invalid regex in bare term';
 				} else if (node.matcher.kind === 'regex') {
-					subtitle = 'Bare regex (basename, path, aliases, tags)';
+					subtitle = 'Bare regex (filename, path, aliases, tags)';
 				} else {
-					subtitle = 'Bare text (basename, path, aliases, tags)';
+					subtitle = 'Bare text (filename, path, aliases, tags)';
 				}
 				lines.push(`    ${id}["${authored}<br/>${subtitle}"]`);
 				return id;

@@ -2,6 +2,7 @@ import { initEngineConfig } from './config';
 import {
 	buildRegex101Url,
 	describeScopeSemantics,
+	describeVirtualFileKey,
 	escapeMarkdownTableCell,
 	formatAuthoredFilter,
 	formatDateIntervalWindow,
@@ -11,6 +12,7 @@ import {
 	formatScopeRhsDisplay,
 	formatSourceCaretSnippet,
 	resolvePropertyTypeWithOrigin,
+	type ResolvedPropertyTypeInfo,
 } from './explain-helpers';
 import { renderExplainMermaid } from './explain-mermaid';
 import { lintQueryAST } from './linter';
@@ -78,25 +80,56 @@ function formatRegexLink(matcher: Extract<LeafMatcher, { kind: 'regex' }>): stri
 	return `${formatInlineCode(literal)} ([Explain on regex101 ↗](${url}))`;
 }
 
-function describePropertyLeafCoercion(
+function capitalizeFirst(text: string): string {
+	if (!text) return text;
+	return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function formatFriendlyTypeNote(typeInfo: ResolvedPropertyTypeInfo): string {
+	switch (typeInfo.origin) {
+		case 'virtual':
+			return `built-in file metadata, type \`${typeInfo.type}\``;
+		case 'built-in':
+			return `built-in Obsidian property, type \`${typeInfo.type}\``;
+		case 'configured':
+			return `configured as \`${typeInfo.type}\``;
+		case 'default':
+			return `unconfigured property, defaults to \`text\``;
+	}
+}
+
+interface PropertyLeafExplanation {
+	readonly plainEnglish: string;
+	readonly reference: string;
+}
+
+function describePropertyLeaf(
 	matcher: LeafMatcher,
 	propType: ObsidianPropertyType,
 	operator: PropertyOperator,
 	timeZone: string,
 	referenceTimeMs: number,
 	validRefTime: boolean,
-): string {
+): PropertyLeafExplanation {
 	if (matcher.kind === 'regex') {
 		const valid = validateRegexLiteral(matcher.pattern, matcher.flags) !== null;
 		const link = formatRegexLink(matcher);
 		if (operator !== ':' || propType === 'checkbox') {
-			return `❌ ${link} — regular expressions cannot be used with operator \`${operator}\` on \`${propType}\``;
+			return {
+				plainEnglish: `❌ ${link} — regular expressions cannot be used with operator \`${operator}\` on \`${propType}\` properties`,
+				reference: `❌ ${link} — regular expressions cannot be used with operator \`${operator}\` on \`${propType}\``,
+			};
 		}
-		const targetDesc =
-			propType === 'number' || propType === 'date' || propType === 'datetime'
-				? `raw authored string (\`entry.raw\`) of \`${propType}\``
-				: `\`${propType}\` value`;
-		return `${valid ? '' : '❌ Invalid regex: '}${link} tested against ${targetDesc}`;
+		const isRawTarget = propType === 'number' || propType === 'date' || propType === 'datetime';
+		const targetDesc = isRawTarget
+			? `raw authored string (\`entry.raw\`) of \`${propType}\``
+			: `\`${propType}\` value`;
+		return {
+			plainEnglish: isRawTarget
+				? `${valid ? 'has raw text matching' : '❌ invalid regex'} ${link}`
+				: `${valid ? 'matches regular expression' : '❌ invalid regex'} ${link}`,
+			reference: `${valid ? '' : '❌ Invalid regex: '}${link} tested against ${targetDesc}`,
+		};
 	}
 
 	const rawLit = formatInlineCode(formatLeafMatcher(matcher));
@@ -107,19 +140,58 @@ function describePropertyLeafCoercion(
 				!matcher.quoted &&
 				STRICT_NUMBER_RE.test(trimmed) &&
 				Number.isFinite(Number(trimmed));
-			return ok
-				? `${rawLit} → numeric \`${Number(trimmed)}\` (\`entry.value ${operator === ':' ? '=' : operator} ${Number(trimmed)}\`)`
-				: `❌ ${rawLit} (not a valid unquoted finite number)`;
+			if (!ok) {
+				return {
+					plainEnglish: `❌ ${rawLit} (expected an unquoted number such as \`42\` or \`-3.5\`)`,
+					reference: `❌ ${rawLit} (not a valid unquoted finite number)`,
+				};
+			}
+			const num = Number(trimmed);
+			let plainEnglish: string;
+			switch (operator) {
+				case ':':
+				case '=':
+					plainEnglish = `equals \`${num}\``;
+					break;
+				case '!=':
+					plainEnglish = `does not equal \`${num}\``;
+					break;
+				case '<':
+					plainEnglish = `is less than \`${num}\``;
+					break;
+				case '<=':
+					plainEnglish = `is at most \`${num}\` (\`<= ${num}\`)`;
+					break;
+				case '>':
+					plainEnglish = `is greater than \`${num}\``;
+					break;
+				case '>=':
+					plainEnglish = `is at least \`${num}\` (\`>= ${num}\`)`;
+					break;
+				default:
+					plainEnglish = `matches \`${num}\``;
+					break;
+			}
+			return {
+				plainEnglish,
+				reference: `${rawLit} → numeric \`${num}\` (\`entry.value ${operator === ':' ? '=' : operator} ${num}\`)`,
+			};
 		}
 		case 'checkbox': {
 			if (operator === '<' || operator === '>' || operator === '<=' || operator === '>=') {
-				return `❌ ${rawLit} — ordering operator \`${operator}\` cannot be used on \`checkbox\` properties`;
+				const msg = `❌ ${rawLit} — ordering operator \`${operator}\` cannot be used on \`checkbox\` properties`;
+				return { plainEnglish: msg, reference: msg };
 			}
 			const lower = matcher.value.trim().toLowerCase();
 			const ok = !matcher.quoted && (lower === 'true' || lower === 'false');
-			return ok
-				? `${rawLit} → boolean \`${lower}\` (\`entry.value ${operator === ':' ? '=' : operator} ${lower}\`)`
-				: `❌ ${rawLit} (checkbox requires unquoted \`true\` or \`false\`)`;
+			if (!ok) {
+				const msg = `❌ ${rawLit} (checkbox requires unquoted \`true\` or \`false\`)`;
+				return { plainEnglish: msg, reference: msg };
+			}
+			return {
+				plainEnglish: operator === '!=' ? `is not \`${lower}\`` : `is \`${lower}\``,
+				reference: `${rawLit} → boolean \`${lower}\` (\`entry.value ${operator === ':' ? '=' : operator} ${lower}\`)`,
+			};
 		}
 		case 'date':
 		case 'datetime': {
@@ -130,53 +202,135 @@ function describePropertyLeafCoercion(
 				referenceTimeMs,
 			});
 			if (!res.ok) {
-				return `❌ ${rawLit} (invalid ${propType} expression: \`${res.reason}\`)`;
+				const msg = `❌ ${rawLit} (invalid ${propType} expression: \`${res.reason}\`)`;
+				return { plainEnglish: msg, reference: msg };
 			}
 			const win = formatDateIntervalWindow(res.interval, operator, timeZone);
 			const fallbackNote =
 				!validRefTime && /(?:^|\.\.)\s*@/.test(matcher.value.trim())
 					? ' *(resolved against fallback epoch `0` because `referenceTimeMs` is invalid)*'
 					: '';
-			return `${rawLit} → \`${win.grain}\` window \`${win.localWindow}\` (UTC \`${win.utcWindow}\`; matches when \`${win.inequality}\`, i.e. ${win.description})${fallbackNote}`;
+			return {
+				plainEnglish: `${win.plainEnglish}${fallbackNote}`,
+				reference: `${rawLit} → \`${win.grain}\` window \`${win.localWindow}\` (UTC \`${win.utcWindow}\`; matches when \`${win.inequality}\`, i.e. ${win.description})${fallbackNote}`,
+			};
 		}
 		case 'tags': {
 			const normTag = normalizeTagBody(matcher.value);
-			return operator === ':'
-				? `${rawLit} → hierarchical tag match on \`#${normTag}\` (matches \`#${normTag}\` or \`#${normTag}/...\`)`
-				: `${rawLit} → normalized tag \`${normTag}\` compared with \`${operator}\``;
+			const hashTagCode = formatInlineCode(`#${normTag}`);
+			const subTagCode = formatInlineCode(`#${normTag}/...`);
+			let plainEnglish: string;
+			let reference: string;
+			switch (operator) {
+				case ':':
+					plainEnglish = `is ${hashTagCode} (or a subtag like ${subTagCode}, case-insensitive)`;
+					reference = `${rawLit} → hierarchical tag match on ${hashTagCode} (matches ${hashTagCode} or ${subTagCode})`;
+					break;
+				case '=':
+					plainEnglish = `equals tag ${hashTagCode} (exact match, excluding subtags)`;
+					reference = `${rawLit} → exact normalized tag equality (${formatInlineCode(`tag = #${normTag}`)})`;
+					break;
+				case '!=':
+					plainEnglish = `does not equal tag ${hashTagCode}`;
+					reference = `${rawLit} → normalized tag inequality (${formatInlineCode(`tag != #${normTag}`)})`;
+					break;
+				case '<':
+					plainEnglish = `comes alphabetically before tag ${hashTagCode}`;
+					reference = `${rawLit} → alphabetical tag comparison (${formatInlineCode(`tag < #${normTag}`)})`;
+					break;
+				case '<=':
+					plainEnglish = `comes alphabetically at or before tag ${hashTagCode}`;
+					reference = `${rawLit} → alphabetical tag comparison (${formatInlineCode(`tag <= #${normTag}`)})`;
+					break;
+				case '>':
+					plainEnglish = `comes alphabetically after tag ${hashTagCode}`;
+					reference = `${rawLit} → alphabetical tag comparison (${formatInlineCode(`tag > #${normTag}`)})`;
+					break;
+				case '>=':
+					plainEnglish = `comes alphabetically at or after tag ${hashTagCode}`;
+					reference = `${rawLit} → alphabetical tag comparison (${formatInlineCode(`tag >= #${normTag}`)})`;
+					break;
+				default:
+					plainEnglish = `matches tag ${hashTagCode}`;
+					reference = `${rawLit} → tag comparison (${formatInlineCode(`tag ${operator} #${normTag}`)})`;
+					break;
+			}
+			return { plainEnglish, reference };
 		}
 		case 'text':
-		case 'multitext':
-			return operator === ':'
-				? `${rawLit} → case-insensitive substring match`
-				: `${rawLit} → case-insensitive lexicographical comparison (\`${operator}\`)`;
+		case 'multitext': {
+			let plainEnglish: string;
+			let reference: string;
+			switch (operator) {
+				case ':':
+					plainEnglish = `contains ${rawLit} (case-insensitive)`;
+					reference = `${rawLit} → case-insensitive substring match`;
+					break;
+				case '=':
+					plainEnglish = `equals ${rawLit} (case-insensitive)`;
+					reference = `${rawLit} → case-insensitive equality (\`=\`)`;
+					break;
+				case '!=':
+					plainEnglish = `does not equal ${rawLit} (case-insensitive)`;
+					reference = `${rawLit} → case-insensitive inequality (\`!=\`, does not equal ${rawLit})`;
+					break;
+				case '<':
+					plainEnglish = `comes alphabetically before ${rawLit} (case-insensitive)`;
+					reference = `${rawLit} → case-insensitive alphabetical comparison (\`<\`)`;
+					break;
+				case '<=':
+					plainEnglish = `comes alphabetically at or before ${rawLit} (case-insensitive)`;
+					reference = `${rawLit} → case-insensitive alphabetical comparison (\`<=\`)`;
+					break;
+				case '>':
+					plainEnglish = `comes alphabetically after ${rawLit} (case-insensitive)`;
+					reference = `${rawLit} → case-insensitive alphabetical comparison (\`>\`)`;
+					break;
+				case '>=':
+					plainEnglish = `comes alphabetically at or after ${rawLit} (case-insensitive)`;
+					reference = `${rawLit} → case-insensitive alphabetical comparison (\`>=\`)`;
+					break;
+				default:
+					plainEnglish = `matches ${rawLit}`;
+					reference = `${rawLit} → case-insensitive comparison (\`${operator}\`)`;
+					break;
+			}
+			return { plainEnglish, reference };
+		}
 	}
 }
 
 function renderValueExprBullets(
 	expr: ValueExprAST,
 	indent: string,
+	targetNoun: string,
 	leafFormatter: (matcher: LeafMatcher) => string,
 	out: string[],
 ): void {
 	switch (expr.type) {
 		case 'VALUE_LEAF':
-			out.push(`${indent}- ${leafFormatter(expr.matcher)}`);
+			out.push(`${indent}- ${capitalizeFirst(leafFormatter(expr.matcher))}`);
 			return;
 		case 'VALUE_NOT':
-			out.push(
-				`${indent}- **Exclude value (\`${expr.syntax}\`)**: Value must **not** match:`,
-			);
-			renderValueExprBullets(expr.child, `${indent}  `, leafFormatter, out);
+			if (expr.child.type === 'VALUE_LEAF') {
+				out.push(
+					`${indent}- **Not (\`${expr.syntax}\`)**: Does **not** match: ${leafFormatter(expr.child.matcher)}`,
+				);
+			} else {
+				out.push(
+					`${indent}- **Not (\`${expr.syntax}\`)**: Does **not** match the following:`,
+				);
+				renderValueExprBullets(expr.child, `${indent}  `, targetNoun, leafFormatter, out);
+			}
 			return;
 		case 'VALUE_LOGICAL': {
 			const opDesc =
 				expr.operator === 'AND'
-					? '**All value conditions (`AND`)**: The **same** extracted value must satisfy:'
-					: '**Any value condition (`OR`)**: The extracted value must satisfy at least one of:';
+					? `**Both / all on that same ${targetNoun} (\`AND\`)**:`
+					: `**Either / any (\`OR\`)**:`;
 			out.push(`${indent}- ${opDesc}`);
 			for (const child of expr.children) {
-				renderValueExprBullets(child, `${indent}  `, leafFormatter, out);
+				renderValueExprBullets(child, `${indent}  `, targetNoun, leafFormatter, out);
 			}
 			return;
 		}
@@ -214,6 +368,7 @@ export function explainQuery(
 			effectiveConfig = buildFallbackResolvedConfig(configOrResolved);
 		}
 	}
+
 	const validRefTime = isValidReferenceTimeMs(referenceTimeMs);
 	const refTimeDiagnostics: SearchDiagnostic[] = validRefTime
 		? []
@@ -312,6 +467,7 @@ export function explainQuery(
 					node.key,
 					effectiveConfig.propertyTypes,
 				);
+				const keyCode = formatInlineCode(node.key);
 				const visitExpr = (expr: ValueExprAST): void => {
 					if (expr.type === 'VALUE_LEAF') {
 						if (expr.matcher.kind === 'regex') {
@@ -321,15 +477,15 @@ export function explainQuery(
 							if (!valid) invalidRegexNodes.add(node);
 							let targetNote: string;
 							if (node.operator !== ':' || typeInfo.type === 'checkbox') {
-								targetNote = `Property \`${node.key}\` (\`${typeInfo.type}\`) — ❌ unsupported with operator \`${node.operator}\` on \`${typeInfo.type}\``;
+								targetNote = `Property ${keyCode} (\`${typeInfo.type}\`) — ❌ unsupported with operator \`${node.operator}\` on \`${typeInfo.type}\``;
 							} else if (
 								typeInfo.type === 'number' ||
 								typeInfo.type === 'date' ||
 								typeInfo.type === 'datetime'
 							) {
-								targetNote = `Property \`${node.key}\` (\`${typeInfo.type}\`) — tested against raw authored string \`entry.raw\``;
+								targetNote = `Property ${keyCode} (\`${typeInfo.type}\`) — tested against raw authored string \`entry.raw\``;
 							} else {
-								targetNote = `Property \`${node.key}\` (\`${typeInfo.type}\`) — tested against normalized string \`entry.value\``;
+								targetNote = `Property ${keyCode} (\`${typeInfo.type}\`) — tested against normalized string \`entry.value\``;
 							}
 							regexEntries.push({
 								literal: formatLeafMatcher(expr.matcher),
@@ -391,13 +547,9 @@ export function explainQuery(
 	} else {
 		lines.push('');
 		lines.push('### Plain-English Logic Breakdown', '');
-		lines.push(
-			'> Operator precedence: negation (`-` / `NOT`) binds tightest, followed by conjunction (`AND`, including implicit whitespace `AND`), and finally disjunction (`OR`). Parentheses `(...)` override default precedence.',
-			'',
-		);
 
 		const bulletLines: string[] = [];
-		const renderAstBullets = (node: SearchAST, indent: string, isRoot: boolean): void => {
+		const renderAstBullets = (node: SearchAST, indent: string): void => {
 			switch (node.type) {
 				case 'MATCH_ALL':
 					bulletLines.push(
@@ -405,30 +557,26 @@ export function explainQuery(
 					);
 					return;
 				case 'LOGICAL': {
-					const groupNote = node.parenthesized
-						? ' (explicitly parenthesized group)'
-						: isRoot
-							? ' (top-level)'
-							: '';
+					const groupNote = node.parenthesized ? ', grouped in parentheses' : '';
 					if (node.operator === 'AND') {
 						bulletLines.push(
-							`${indent}- **Match ALL of the following (\`AND\`${groupNote})**: A note matches only if every condition below is satisfied (adjacent terms without \`OR\` are combined with implicit \`AND\`):`,
+							`${indent}- **All of the following conditions must match (\`AND\`${groupNote})**:`,
 						);
 					} else {
 						bulletLines.push(
-							`${indent}- **Match ANY of the following (\`OR\`${groupNote})**: A note matches if at least one branch below is satisfied:`,
+							`${indent}- **At least one of the following conditions must match (\`OR\`${groupNote})**:`,
 						);
 					}
 					for (const child of node.children) {
-						renderAstBullets(child, `${indent}  `, false);
+						renderAstBullets(child, `${indent}  `);
 					}
 					return;
 				}
 				case 'NOT':
 					bulletLines.push(
-						`${indent}- **Exclude (\`${node.syntax}\`)**: Matches a note only when the child condition below does **not** match:`,
+						`${indent}- **Exclude notes where (\`${node.syntax}\`)**: The note must **not** match:`,
 					);
-					renderAstBullets(node.child, `${indent}  `, false);
+					renderAstBullets(node.child, `${indent}  `);
 					return;
 				case 'TEXT_MATCH': {
 					const authored = formatInlineCode(node.rawText);
@@ -436,12 +584,11 @@ export function explainQuery(
 						const valid = !invalidRegexNodes.has(node);
 						const prefix = valid ? '' : '❌ **Invalid Regex** — ';
 						bulletLines.push(
-							`${indent}- ${prefix}**Bare Regular Expression** ${formatRegexLink(node.matcher)}: Tests against the note's \`file.basename\`, \`file.path\`, \`aliases\`, and \`tags\` (note body content is not indexed).`,
+							`${indent}- ${prefix}**Bare regular expression** ${formatRegexLink(node.matcher)}: Matches if the note's filename (\`file.basename\`), path (\`file.path\`), aliases, or tags match this pattern *(note body content is not searched)*.`,
 						);
 					} else {
-						const quoteKind = node.matcher.quoted ? 'quoted phrase' : 'unquoted term';
 						bulletLines.push(
-							`${indent}- **Bare Text Match** ${authored} (${quoteKind}, value ${formatInlineCode(node.matcher.value)}): Case-insensitive substring search across \`file.basename\`, \`file.path\`, \`aliases\`, and \`tags\` (note body content is not indexed).`,
+							`${indent}- **Bare text search** ${authored}: Matches if the note's filename (\`file.basename\`), path (\`file.path\`), aliases, or tags contain ${formatInlineCode(node.matcher.value)} (case-insensitive; *note body content is not searched*).`,
 						);
 					}
 					return;
@@ -451,39 +598,40 @@ export function explainQuery(
 					if (unknownScopeNodes.has(node)) {
 						const suggestion = suggestScopeHint(node.rawScope, effectiveConfig);
 						bulletLines.push(
-							`${indent}- ❌ **Unknown Scope Filter** ${authored}: Scope \`${node.rawScope}:\` is not registered.${suggestion ? ` ${suggestion}` : ''}`,
+							`${indent}- ❌ **Unknown Scope Filter** ${authored}: Scope ${formatInlineCode(`${node.rawScope}:`)} is not a recognized search scope.${suggestion ? ` ${suggestion}` : ''}`,
 						);
 						return;
 					}
 					const sem = describeScopeSemantics(node.scope);
-					const aliasNote =
+					const aliasParen =
 						node.rawScope === '#'
-							? `tag shorthand \`#\`, lowered to canonical scope \`tag\``
+							? ''
 							: node.rawScope.trim().toLowerCase() !== node.scope.toLowerCase()
-								? `scope alias \`${node.rawScope}:\`, resolved to canonical scope \`${node.scope}\``
-								: `canonical scope \`${node.scope}\``;
+								? ` (${formatInlineCode(`${node.rawScope}:`)} is an alias for ${formatInlineCode(`${node.scope}:`)})`
+								: '';
 					const invalidPrefix = invalidRegexNodes.has(node) ? '❌ ' : '';
 
 					if (node.expr.type === 'VALUE_LEAF') {
 						const m = node.expr.matcher;
 						const leafDesc =
 							m.kind === 'regex'
-								? `regular expression ${formatRegexLink(m)}`
-								: `${m.quoted ? 'quoted' : 'unquoted'} value ${formatInlineCode(m.value)} (${sem.matchRuleDescription})`;
+								? `matches regular expression ${formatRegexLink(m)}`
+								: sem.formatPlainStringMatch(m.value);
 						bulletLines.push(
-							`${indent}- ${invalidPrefix}**Scoped Filter** ${authored} (${aliasNote}): Extracts ${sem.targetsDescription} and matches if at least one extracted value matches ${leafDesc}.`,
+							`${indent}- ${invalidPrefix}**${sem.friendlyTitle}** ${authored}${aliasParen}: The note has at least one ${sem.singularTarget} that ${leafDesc}.`,
 						);
 					} else {
 						bulletLines.push(
-							`${indent}- ${invalidPrefix}**Compound Scoped Filter** ${authored} (${aliasNote}): Extracts ${sem.targetsDescription} and requires **a single extracted target value** on the note to satisfy the inner value expression:`,
+							`${indent}- ${invalidPrefix}**${sem.friendlyTitle}** ${authored}${aliasParen}: The note has **at least one ${sem.singularTarget}** where that single ${sem.singularTarget} matches:`,
 						);
 						renderValueExprBullets(
 							node.expr,
 							`${indent}  `,
+							sem.singularTarget,
 							(m) =>
 								m.kind === 'regex'
-									? `Regular expression ${formatRegexLink(m)}`
-									: `${m.quoted ? 'Quoted' : 'Unquoted'} string ${formatInlineCode(m.value)} (${sem.matchRuleDescription})`,
+									? `matches regular expression ${formatRegexLink(m)}`
+									: sem.formatPlainStringMatch(m.value),
 							bulletLines,
 						);
 					}
@@ -491,27 +639,25 @@ export function explainQuery(
 				}
 				case 'PROPERTY_FILTER': {
 					const authored = formatInlineCode(formatAuthoredFilter(node));
+					const keyCode = formatInlineCode(node.key);
 					const typeInfo = resolvePropertyTypeWithOrigin(
 						node.key,
 						effectiveConfig.propertyTypes,
 					);
 					const isInvalid = invalidPropertyNodes.has(node) || invalidRegexNodes.has(node);
 					const prefix = isInvalid ? '❌ ' : '';
+					const virtualDesc = describeVirtualFileKey(node.key);
+					const friendlyType = formatFriendlyTypeNote(typeInfo);
 
 					if (node.operator === 'EXISTS') {
 						bulletLines.push(
-							`${indent}- ${prefix}**Property Existence Filter** ${authored}: Property \`${node.key}\` (resolved type \`${typeInfo.type}\`, ${typeInfo.originLabel}) must exist on the note with at least one non-null, type-valid value.`,
+							`${indent}- ${prefix}**Property exists** ${authored}: The note has a ${keyCode} property (${friendlyType}) with a non-empty, valid value.`,
 						);
 						return;
 					}
 
-					const neqNote =
-						node.operator === '!='
-							? ` *(Note: \`[${node.key} != ...]\` requires \`${node.key}\` to exist on the note; use \`-[${node.key} = ...]\` to also match notes missing \`${node.key}\`.)*`
-							: '';
-
 					if (node.valueExpr && node.valueExpr.type === 'VALUE_LEAF') {
-						const leafCoercion = describePropertyLeafCoercion(
+						const { plainEnglish } = describePropertyLeaf(
 							node.valueExpr.matcher,
 							typeInfo.type,
 							node.operator,
@@ -519,25 +665,43 @@ export function explainQuery(
 							effectiveRefTimeMs,
 							validRefTime,
 						);
-						bulletLines.push(
-							`${indent}- ${prefix}**Property Filter** ${authored} (property \`${node.key}\`, type \`${typeInfo.type}\` [${typeInfo.originLabel}], operator \`${node.operator}\`): Matches when the note has at least one \`${node.key}\` entry satisfying ${leafCoercion}.${neqNote}`,
-						);
+						if (virtualDesc !== null) {
+							bulletLines.push(
+								`${indent}- ${prefix}**File metadata filter** ${authored}: ${capitalizeFirst(virtualDesc)} ${plainEnglish}.`,
+							);
+						} else {
+							bulletLines.push(
+								`${indent}- ${prefix}**Property filter** ${authored}: The note has a ${keyCode} property (${friendlyType}) whose value ${plainEnglish}.`,
+							);
+						}
+						if (node.operator === '!=' && virtualDesc === null) {
+							const neqSnippet = formatInlineCode(`[${node.key} != ...]`);
+							const negEqSnippet = formatInlineCode(`-[${node.key} = ...]`);
+							bulletLines.push(
+								`${indent}  - *Tip: ${neqSnippet} only matches notes that have a ${keyCode} property. To also include notes without ${keyCode}, use ${negEqSnippet}.*`,
+							);
+						}
 					} else if (node.valueExpr) {
+						const subjectDesc =
+							virtualDesc !== null
+								? `${capitalizeFirst(virtualDesc)} satisfies:`
+								: `The note has **at least one ${keyCode} property value** (${friendlyType}) where that single value satisfies:`;
 						bulletLines.push(
-							`${indent}- ${prefix}**Compound Property Filter** ${authored} (property \`${node.key}\`, type \`${typeInfo.type}\` [${typeInfo.originLabel}], operator \`:\`): Matches when **a single property entry** on \`${node.key}\` satisfies the inner value expression:`,
+							`${indent}- ${prefix}**Property filter** ${authored}: ${subjectDesc}`,
 						);
 						renderValueExprBullets(
 							node.valueExpr,
 							`${indent}  `,
+							`${keyCode} value`,
 							(m) =>
-								describePropertyLeafCoercion(
+								describePropertyLeaf(
 									m,
 									typeInfo.type,
 									node.operator,
 									effectiveConfig.timeZone,
 									effectiveRefTimeMs,
 									validRefTime,
-								),
+								).plainEnglish,
 							bulletLines,
 						);
 					}
@@ -546,7 +710,7 @@ export function explainQuery(
 			}
 		};
 
-		renderAstBullets(resolvedAst, '', true);
+		renderAstBullets(resolvedAst, '');
 		lines.push(...bulletLines, '');
 
 		lines.push('### Logic Flowchart', '');
@@ -616,8 +780,8 @@ export function explainQuery(
 					: node.rawScope === '#'
 						? `scope \`tag\` (from \`#\`)`
 						: node.rawScope.trim().toLowerCase() !== node.scope.toLowerCase()
-							? `scope \`${escapeMarkdownTableCell(node.scope)}\` (alias \`${escapeMarkdownTableCell(node.rawScope)}:\`)`
-							: `scope \`${escapeMarkdownTableCell(node.scope)}\``;
+							? `scope ${escapeMarkdownTableCell(formatInlineCode(node.scope))} (alias ${escapeMarkdownTableCell(formatInlineCode(`${node.rawScope}:`))})`
+							: `scope ${escapeMarkdownTableCell(formatInlineCode(node.scope))}`;
 				const sem = describeScopeSemantics(node.scope);
 				const originCell = isUnknown
 					? 'Unregistered scope'
@@ -648,14 +812,16 @@ export function explainQuery(
 				if (node.operator === 'EXISTS') {
 					details = 'Operator `EXISTS`: requires non-null, valid typed property entry';
 				} else if (node.valueExpr && node.valueExpr.type === 'VALUE_LEAF') {
-					details = `Operator \`${node.operator}\`: ${describePropertyLeafCoercion(
-						node.valueExpr.matcher,
-						typeInfo.type,
-						node.operator,
-						effectiveConfig.timeZone,
-						effectiveRefTimeMs,
-						validRefTime,
-					)}`;
+					details = `Operator \`${node.operator}\`: ${
+						describePropertyLeaf(
+							node.valueExpr.matcher,
+							typeInfo.type,
+							node.operator,
+							effectiveConfig.timeZone,
+							effectiveRefTimeMs,
+							validRefTime,
+						).reference
+					}`;
 				} else {
 					const prefix =
 						invalidPropertyNodes.has(node) || invalidRegexNodes.has(node) ? '❌ ' : '';
