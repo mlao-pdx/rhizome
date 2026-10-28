@@ -449,25 +449,24 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 		expect(quotedRes.diagnostics.map((d) => d.code)).toEqual(['HINT_BARE_TEXT_NO_BODY']);
 	});
 
-	it('emits WARN_DANGEROUS_SPACED_HYPHEN only when bare "-" precedes another sibling in AND', () => {
+	it('treats bare "-" as an ordinary literal text term (HINT_BARE_TEXT_NO_BODY) and rejects spaced "! term" with SYNTAX_ERROR', () => {
 		const leadingRes = compileQuery('- term', config, PINNED_REF_MS);
 		expect(leadingRes.executable).toBe(true);
 		expect(leadingRes.diagnostics.map((d) => d.code)).toEqual([
-			'WARN_DANGEROUS_SPACED_HYPHEN',
+			'HINT_BARE_TEXT_NO_BODY',
 			'HINT_BARE_TEXT_NO_BODY',
 		]);
-		expect(leadingRes.diagnostics[0]).toMatchObject({
-			code: 'WARN_DANGEROUS_SPACED_HYPHEN',
-			severity: 'warning',
-			issue: 'A space after "-" prevents negation.',
-			hint: 'Use "-term" or "NOT term".',
-		});
 
 		const trailingRes = compileQuery('term -', config, PINNED_REF_MS);
 		expect(trailingRes.executable).toBe(true);
-		expect(trailingRes.diagnostics.some((d) => d.code === 'WARN_DANGEROUS_SPACED_HYPHEN')).toBe(
-			false,
-		);
+		expect(trailingRes.diagnostics.map((d) => d.code)).toEqual([
+			'HINT_BARE_TEXT_NO_BODY',
+			'HINT_BARE_TEXT_NO_BODY',
+		]);
+
+		const spacedBang = compileQuery('! term', config, PINNED_REF_MS);
+		expect(spacedBang.executable).toBe(false);
+		expect(spacedBang.diagnostics.map((d) => d.code)).toEqual(['SYNTAX_ERROR']);
 	});
 
 	it('emits WARN_SINGLE_VALUE_CONTRADICTION on contradicting single-valued fields in AND', () => {
@@ -512,7 +511,7 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 			code: 'HINT_PROP_NEQ_EXISTENCE',
 			severity: 'hint',
 			issue: '"[status != done]" requires "status" to exist.',
-			hint: 'To exclude notes (including notes missing "status"), use "-[status = done]".',
+			hint: 'To exclude notes (including notes missing "status"), use "![status = done]".',
 		});
 		expect(res.diagnostics[0]?.span).not.toBeNull();
 	});
@@ -649,7 +648,7 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 		});
 		expect(scopedSingle.diagnostics[0]?.span).not.toBeNull();
 
-		const scopedCompound = compileQuery('tag:(/work\nOR -/urgent)', config, PINNED_REF_MS);
+		const scopedCompound = compileQuery('tag:(/work\nOR !/urgent)', config, PINNED_REF_MS);
 		expect(scopedCompound.executable).toBe(true);
 		expect(scopedCompound.diagnostics).toHaveLength(2);
 		expect(scopedCompound.diagnostics.map((d) => d.issue)).toEqual([

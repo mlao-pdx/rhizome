@@ -154,6 +154,8 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 		'AND',
 		'OR',
 		'NOT',
+		'!',
+		'!term',
 		'-',
 		'(',
 		')',
@@ -332,7 +334,6 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 							(diagnostic) =>
 								diagnostic.code === 'HINT_BARE_TEXT_NO_BODY' ||
 								diagnostic.code === 'WARN_LOWERCASE_BOOLEAN' ||
-								diagnostic.code === 'WARN_DANGEROUS_SPACED_HYPHEN' ||
 								(diagnostic.code === 'HINT_UNCLOSED_REGEX' &&
 									diagnostic.span !== null &&
 									textNodeSpans.has(

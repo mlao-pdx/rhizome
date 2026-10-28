@@ -3,10 +3,10 @@ import { endOfInputSpan, lowerQueryCst, type ParseQueryResult, tokenToSpan } fro
 import {
 	ALL_TOKENS,
 	And,
+	BangNot,
 	Colon,
 	CompOp,
 	DateTimeLiteral,
-	HyphenNot,
 	Identifier,
 	LBracket,
 	LParen,
@@ -36,7 +36,7 @@ export class MaxDepthExceededError extends Error {
 }
 
 /**
- * Disambiguated LL(k) Chevrotain `CstParser` implementing the 19-rule filter syntax grammar.
+ * Disambiguated LL(k) Chevrotain `CstParser` implementing the 16-rule filter syntax grammar.
  */
 export class SearchParser extends CstParser {
 	private currentDepth = 0;
@@ -95,7 +95,7 @@ export class SearchParser extends CstParser {
 				ALT: () => {
 					const opTok = this.OR2([
 						{ ALT: () => this.CONSUME(Not) },
-						{ ALT: () => this.CONSUME(HyphenNot) },
+						{ ALT: () => this.CONSUME(BangNot) },
 					]);
 					this.withDepth(opTok, () => {
 						this.SUBRULE(this.notExpression, { LABEL: 'operand' });
@@ -136,13 +136,13 @@ export class SearchParser extends CstParser {
 				{
 					ALT: () => {
 						this.CONSUME(Colon);
-						this.SUBRULE(this.scopeOrPropRhs);
+						this.SUBRULE(this.valueNotExpr);
 					},
 				},
 				{
 					ALT: () => {
 						this.CONSUME(CompOp);
-						this.SUBRULE(this.rhsLeafValue);
+						this.SUBRULE(this.valueLeaf);
 					},
 				},
 			]);
@@ -153,21 +153,7 @@ export class SearchParser extends CstParser {
 	public readonly scopedOperator = this.RULE('scopedOperator', () => {
 		this.SUBRULE(this.scopeName);
 		this.CONSUME(Colon);
-		this.SUBRULE(this.scopeOrPropRhs);
-	});
-
-	public readonly scopeOrPropRhs = this.RULE('scopeOrPropRhs', () => {
-		this.OR([
-			{
-				ALT: () => {
-					this.CONSUME(LParen);
-					this.SUBRULE(this.valueOrExpr);
-					this.CONSUME(RParen);
-				},
-			},
-			{ ALT: () => this.CONSUME(WikiLinkValue) },
-			{ ALT: () => this.SUBRULE(this.rhsLeafValue) },
-		]);
+		this.SUBRULE(this.valueNotExpr);
 	});
 
 	public readonly valueOrExpr = this.RULE('valueOrExpr', () => {
@@ -194,7 +180,7 @@ export class SearchParser extends CstParser {
 				ALT: () => {
 					const opTok = this.OR2([
 						{ ALT: () => this.CONSUME(Not) },
-						{ ALT: () => this.CONSUME(HyphenNot) },
+						{ ALT: () => this.CONSUME(BangNot) },
 					]);
 					this.withDepth(opTok, () => {
 						this.SUBRULE(this.valueNotExpr, { LABEL: 'operand' });
@@ -211,7 +197,7 @@ export class SearchParser extends CstParser {
 				},
 			},
 			{ ALT: () => this.CONSUME(WikiLinkValue) },
-			{ ALT: () => this.SUBRULE(this.unsignedValueLeaf) },
+			{ ALT: () => this.SUBRULE(this.valueLeaf) },
 		]);
 	});
 
@@ -239,7 +225,7 @@ export class SearchParser extends CstParser {
 		]);
 	});
 
-	public readonly unsignedValueLeaf = this.RULE('unsignedValueLeaf', () => {
+	public readonly valueLeaf = this.RULE('valueLeaf', () => {
 		this.OR([
 			{ ALT: () => this.CONSUME(QuotedString) },
 			{ ALT: () => this.CONSUME(RegexLiteral) },
@@ -247,23 +233,6 @@ export class SearchParser extends CstParser {
 			{ ALT: () => this.CONSUME(TagLiteral) },
 			{ ALT: () => this.CONSUME(Identifier) },
 		]);
-	});
-
-	public readonly rhsLeafValue = this.RULE('rhsLeafValue', () => {
-		this.OR([
-			{ ALT: () => this.CONSUME(QuotedString) },
-			{ ALT: () => this.CONSUME(RegexLiteral) },
-			{ ALT: () => this.CONSUME(DateTimeLiteral) },
-			{ ALT: () => this.CONSUME(TagLiteral) },
-			{ ALT: () => this.SUBRULE(this.signedIdentifier) },
-		]);
-	});
-
-	public readonly signedIdentifier = this.RULE('signedIdentifier', () => {
-		this.OPTION(() => {
-			this.CONSUME(HyphenNot);
-		});
-		this.CONSUME(Identifier);
 	});
 }
 

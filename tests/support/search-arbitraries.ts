@@ -103,15 +103,7 @@ export function printableColonValueExprArb(
 		return buildCustomValueExprArb(boolLeafArb, 1);
 	}
 	if (propType === 'number') {
-		const unsignedNumLeafArb: fc.Arbitrary<LeafMatcher> = fc.oneof(
-			unsignedNumberLiteralArb.map((value) => ({
-				kind: 'string' as const,
-				value,
-				quoted: false,
-			})),
-			structuralRegexMatcherArb,
-		);
-		const topNumLeafArb: fc.Arbitrary<LeafMatcher> = fc.oneof(
+		const numLeafArb: fc.Arbitrary<LeafMatcher> = fc.oneof(
 			signedNumberLiteralArb.map((value) => ({
 				kind: 'string' as const,
 				value,
@@ -119,10 +111,7 @@ export function printableColonValueExprArb(
 			})),
 			structuralRegexMatcherArb,
 		);
-		return fc.oneof(
-			topNumLeafArb.map((matcher): ValueExprAST => ({ type: 'VALUE_LEAF', matcher })),
-			buildCustomValueExprArb(unsignedNumLeafArb, 1),
-		);
+		return buildCustomValueExprArb(numLeafArb, 1);
 	}
 	if (propType === 'date' || propType === 'datetime') {
 		const tempLeafArb: fc.Arbitrary<LeafMatcher> = fc.oneof(
@@ -259,7 +248,7 @@ export function printableExecutableAstArb(
 		if (depth <= 0) return atomAstArb;
 		const subArb = buildAstRec(depth - 1);
 		const notArb: fc.Arbitrary<SearchAST> = fc
-			.tuple(fc.constantFrom('NOT' as const, '-' as const), subArb)
+			.tuple(fc.constantFrom('NOT' as const, '!' as const), subArb)
 			.map(([syntax, child]) => ({ type: 'NOT' as const, syntax, child }));
 		const logicalArb: fc.Arbitrary<SearchAST> = fc
 			.tuple(

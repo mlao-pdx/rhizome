@@ -157,7 +157,7 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 			makeDoc(config, 'raw1.md', { frontmatter: fm1 }),
 			makeDoc(config, 'raw2.md', { frontmatter: fm2 }),
 		];
-		for (const q of '[num: /1\\.5e2/];[day: 2026-10];[day: @today];[day: (@today OR @yesterday)];[day: /^2026-10/];[flag: true];[multi: (alpha AND -two)];[multi: (/^alpha/ AND -/two$/)];[tags: #work/urgent];[tags: work/urgent];[tags = #project];[tags = project]'.split(
+		for (const q of '[num: /1\\.5e2/];[day: 2026-10];[day: @today];[day: (@today OR @yesterday)];[day: /^2026-10/];[flag: true];[multi: (alpha AND !two)];[multi: (/^alpha/ AND !/two$/)];[tags: #work/urgent];[tags: work/urgent];[tags = #project];[tags = project]'.split(
 			';',
 		)) {
 			assertEval(docs, q, config, ['raw1.md']);
@@ -177,12 +177,12 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 	it('keeps empty scopes false under inner NOT while outer NOT negates the empty scope result', () => {
 		const config = makeConfig();
 		const docs = [makeDoc(config, 'empty.md')];
-		for (const q of 'headings:(NOT intro);links:(-target);embeds:(-diagram);blocks:(-blk);aliases:(-aka);tag:(-work)'.split(
+		for (const q of 'headings:(NOT intro);links:(!target);embeds:(!diagram);blocks:(!blk);aliases:(!aka);tag:(!work)'.split(
 			';',
 		)) {
 			assertEval(docs, q, config, []);
 		}
-		assertEval(docs, '-headings:intro', config, ['empty.md']);
+		assertEval(docs, '!headings:intro', config, ['empty.md']);
 	});
 
 	it('resolves all virtual file.* keys exclusively from doc.file despite conflicting shadow properties, while retired keys act as ordinary user properties', () => {

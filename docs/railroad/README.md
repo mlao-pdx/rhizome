@@ -5,17 +5,17 @@
 
 ## Overview
 
-Rhizome parses filter queries with a single-pass Chevrotain lexer and a disambiguated LL(k) `CstParser` (`SearchParser`) comprising **19 grammar productions** and **16 lexical tokens** (plus skipped whitespace).
+Rhizome parses filter queries with a single-pass Chevrotain lexer and a disambiguated LL(k) `CstParser` (`SearchParser`) comprising **16 grammar productions** and **16 lexical tokens** (plus skipped whitespace).
 
 ### Visual Legend
 
 - **Rounded pills** (blue) represent **lexical terminals** consumed directly from the token stream (labelled with their human-readable token `label`, e.g. `'['`, `'OR'`, `'quoted string'`, `'comparison operator'`).
 - **Rectangular boxes** (purple) represent **non-terminal subrules** referencing another production in this document.
-- **Syntactic Resource Limits**: Maximum query length is **`4096` UTF-16 code units**; maximum syntactic nesting depth across unary negation (`NOT` / `-`) and parenthesized groups (`(...)`) is **`32` levels**.
+- **Syntactic Resource Limits**: Maximum query length is **`4096` UTF-16 code units**; maximum syntactic nesting depth across unary negation (`NOT` / `!`) and parenthesized groups (`(...)`) is **`32` levels**.
 
 ## 1. Top-Level Query & Document Boolean Expressions
 
-These productions define top-level query entry, operator precedence (`OR` < `AND` < `NOT`/`-`), implicit conjunction, and atomic document filters.
+These productions define top-level query entry, operator precedence (`OR` < `AND` < `NOT`/`!`), implicit conjunction, and atomic document filters.
 
 ### `query`
 
@@ -49,10 +49,10 @@ AndExpression ::= NotExpression ( "AND"? NotExpression )*
 
 ### `notExpression`
 
-Document-level unary negation (`NOT` or prefix `-`) or a `Primary` filter atom. Each negation increments syntactic nesting depth by `+1`.
+Document-level unary negation (`NOT` or prefix `!`) or a `Primary` filter atom. Each negation increments syntactic nesting depth by `+1`.
 
 ```ebnf
-NotExpression ::= ( "NOT" | HyphenNot ) NotExpression | Primary
+NotExpression ::= ( "NOT" | BangNot ) NotExpression | Primary
 ```
 
 ![notExpression](./assets/notExpression.svg)
@@ -79,14 +79,14 @@ Parenthesized ::= "(" OrExpression ")"
 
 ## 2. Property Filters & Scoped Operators
 
-Bracketed property filters (`[key]`, `[key: value]`, `[key op value]`) and `scope:value` operators share a common right-hand side production (`scopeOrPropRhs`).
+Bracketed property filters (`[key]`, `[key: value]`, `[key op value]`) and `scope:value` operators delegate colon right-hand sides to `valueNotExpr` and comparison right-hand sides to `valueLeaf`.
 
 ### `propertyFilter`
 
 Bracketed frontmatter or virtual file property filter (`[key]` existence check, `[key: value]` colon match, or `[key >= value]` comparison).
 
 ```ebnf
-PropertyFilter ::= "[" PropertyKey ( ":" ScopeOrPropRhs | CompOp RhsLeafValue )? "]"
+PropertyFilter ::= "[" PropertyKey ( ":" ValueNotExpr | CompOp ValueLeaf )? "]"
 ```
 
 ![propertyFilter](./assets/propertyFilter.svg)
@@ -96,24 +96,14 @@ PropertyFilter ::= "[" PropertyKey ( ":" ScopeOrPropRhs | CompOp RhsLeafValue )?
 Scoped filter operator (`tag:`, `file:`, `path:`, `content:`, `headings:`, `links:`, or registered custom scopes).
 
 ```ebnf
-ScopedOperator ::= ScopeName ":" ScopeOrPropRhs
+ScopedOperator ::= ScopeName ":" ValueNotExpr
 ```
 
 ![scopedOperator](./assets/scopedOperator.svg)
 
-### `scopeOrPropRhs`
+## 3. Value-Level Boolean Expressions
 
-Right-hand side of a `scope:` or `[key: ...]` filter: a parenthesized value-level boolean expression, a `[[wikilink]]`, or a single leaf value.
-
-```ebnf
-ScopeOrPropRhs ::= "(" ValueOrExpr ")" | WikiLinkValue | RhsLeafValue
-```
-
-![scopeOrPropRhs](./assets/scopeOrPropRhs.svg)
-
-## 3. Parenthesized Value-Level Boolean Expressions
-
-Inside `scope:(...)` or `[key:(...)]`, boolean operators combine value matchers within that scope or property without repeating the prefix.
+On `:` right-hand sides and inside `scope:(...)` or `[key:(...)]`, boolean operators combine or negate value matchers within that scope or property without repeating the prefix.
 
 ### `valueOrExpr`
 
@@ -137,17 +127,17 @@ ValueAndExpr ::= ValueNotExpr ( "AND"? ValueNotExpr )*
 
 ### `valueNotExpr`
 
-Value-level negation, nested parenthesized value group, `[[wikilink]]`, or unsigned leaf value. Both unary negation and `(` increment syntactic nesting depth by `+1`.
+Value-level negation (`NOT` or prefix `!`), nested parenthesized value group, `[[wikilink]]`, or leaf value. Both unary negation and `(` increment syntactic nesting depth by `+1`.
 
 ```ebnf
-ValueNotExpr ::= ( "NOT" | HyphenNot ) ValueNotExpr | "(" ValueOrExpr ")" | WikiLinkValue | UnsignedValueLeaf
+ValueNotExpr ::= ( "NOT" | BangNot ) ValueNotExpr | "(" ValueOrExpr ")" | WikiLinkValue | ValueLeaf
 ```
 
 ![valueNotExpr](./assets/valueNotExpr.svg)
 
 ## 4. Keys, Scopes & Leaf Values
 
-Terminal-level productions disambiguating property keys, scope identifiers, `#tag` shorthands, bare full-text terms, parenthesized unsigned leaves, and unparenthesized signed RHS leaves.
+Terminal-level productions disambiguating property keys, scope identifiers, `#tag` shorthands, bare full-text terms, and value leaves.
 
 ### `propertyKey`
 
@@ -189,35 +179,15 @@ BareLeafValue ::= QuotedString | RegexLiteral | DateTimeLiteral | Identifier
 
 ![bareLeafValue](./assets/bareLeafValue.svg)
 
-### `unsignedValueLeaf`
+### `valueLeaf`
 
-Leaf value inside parenthesized value expressions (`ValueNotExpr`), where a leading `-` is always parsed as unary value negation (`VALUE_NOT`).
-
-```ebnf
-UnsignedValueLeaf ::= QuotedString | RegexLiteral | DateTimeLiteral | TagLiteral | Identifier
-```
-
-![unsignedValueLeaf](./assets/unsignedValueLeaf.svg)
-
-### `rhsLeafValue`
-
-Unparenthesized right-hand leaf value after `:` or a comparison operator (`=`, `!=`, `<`, `<=`, `>`, `>=`), permitting signed numeric/identifier literals via `SignedIdentifier`.
+Leaf value on the right-hand side of `:`, comparison operators (`=`, `!=`, `<`, `<=`, `>`, `>=`), or inside value-level boolean expressions (`ValueNotExpr`), including negative numbers (`-10.5`) and hyphen-prefixed identifiers (`-draft`).
 
 ```ebnf
-RhsLeafValue ::= QuotedString | RegexLiteral | DateTimeLiteral | TagLiteral | SignedIdentifier
+ValueLeaf ::= QuotedString | RegexLiteral | DateTimeLiteral | TagLiteral | Identifier
 ```
 
-![rhsLeafValue](./assets/rhsLeafValue.svg)
-
-### `signedIdentifier`
-
-Optional leading `-` immediately adjacent to an `Identifier` (`hyphen.endOffset + 1 === id.startOffset`), allowing unparenthesized negative numbers (`[score >= -10.5]`) and hyphen-prefixed filenames (`file:-draft`).
-
-```ebnf
-SignedIdentifier ::= HyphenNot? Identifier
-```
-
-![signedIdentifier](./assets/signedIdentifier.svg)
+![valueLeaf](./assets/valueLeaf.svg)
 
 ## 5. Lexical Tokens Reference
 
@@ -234,7 +204,7 @@ Tokens are evaluated by `SearchLexer` in priority order (`ALL_TOKENS`). Every no
 | 7        | `Or`              | `'OR'`                       | `/OR(?![^\s()[\]])/`                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | 8        | `And`             | `'AND'`                      | `/AND(?![^\s()[\]])/`                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | 9        | `Not`             | `'NOT'`                      | `/NOT(?![^\s()[\]])/`                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| 10       | `HyphenNot`       | `'-'`                        | `/-(?=\S)/`                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 10       | `BangNot`         | `'!'`                        | `/!(?![=\s])/`                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | 11       | `DateTimeLiteral` | `'date literal'`             | `/(?:(?:\d{4}-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z\|[+-]\d{2}:?\d{2})?)\|(?:[+-]\d+d))?)?\|@[a-zA-Z0-9_+-]+)(?:\.\.(?:\d{4}(?:-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z\|[+-]\d{2}:?\d{2})?)\|(?:[+-]\d+d))?)?)?\|@[a-zA-Z0-9_+-]+))?\|\d{4}\.\.(?:\d{4}(?:-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z\|[+-]\d{2}:?\d{2})?)\|(?:[+-]\d+d))?)?)?\|@[a-zA-Z0-9_+-]+))(?![^\s()[\]])/` |
 | 12       | `Colon`           | `':'`                        | `/:/`                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | 13       | `CompOp`          | `'comparison operator'`      | `/!=\|>=\|<=\|>\|<\|=/`                                                                                                                                                                                                                                                                                                                                                                                                                  |

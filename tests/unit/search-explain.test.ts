@@ -156,7 +156,7 @@ describe('explainQuery', () => {
 	it('progressively shrinks query slices, distinguishes implicit vs explicit AND, uses italic emphasis, and emits numbered footnotes', () => {
 		const cfg = makeConfig();
 		const query =
-			'folder:projects AND #work/auth tag:(#urgent -#archived) [priority >= 2] [status != "done"] -( [done = true] OR "draft" )';
+			'folder:projects AND #work/auth tag:(#urgent !#archived) [priority >= 2] [status != "done"] !( [done = true] OR "draft" )';
 		const md = explainQuery(query, cfg, REF_TIME_MS);
 
 		expect(md).toContain(`- **Query**: \`${query}\``);
@@ -172,14 +172,14 @@ describe('explainQuery', () => {
 			'- `#work/auth`\n    At least one `tag`[^4] is `#work/auth` or a nested tag under `#work/auth/...` (case-insensitive).',
 		);
 		// Compound ValueExprAST with progressive shrinking and implicit AND (reusing [^4] for tag)
-		expect(md).toContain('- `tag:(#urgent -#archived)`\n    At least one `tag`[^4] satisfies:');
+		expect(md).toContain('- `tag:(#urgent !#archived)`\n    At least one `tag`[^4] satisfies:');
 		expect(md).toContain(
-			'  - `(#urgent -#archived)`\n      *All* of the following on that same tag (implicit `AND`):',
+			'  - `(#urgent !#archived)`\n      *All* of the following on that same tag (implicit `AND`):',
 		);
 		expect(md).toContain(
 			'    - `#urgent`\n        Is `#urgent` or a nested tag under `#urgent/...` (case-insensitive).',
 		);
-		expect(md).toContain('    - `-#archived`\n        Does *not* match (`-` / `NOT`):');
+		expect(md).toContain('    - `!#archived`\n        Does *not* match (`!` / `NOT`):');
 		expect(md).toContain(
 			'      - `#archived`\n          Is `#archived` or a nested tag under `#archived/...` (case-insensitive).',
 		);
@@ -192,7 +192,7 @@ describe('explainQuery', () => {
 		expect(md).not.toContain('(`!=`,');
 		// Note-level NOT and OR shrinking
 		expect(md).toContain(
-			'- `-( [done = true] OR "draft" )`\n    Excludes notes matching (`-` / `NOT`):',
+			'- `!( [done = true] OR "draft" )`\n    Excludes notes matching (`!` / `NOT`):',
 		);
 		expect(md).toContain(
 			'  - `( [done = true] OR "draft" )`\n      Matches notes where *any* of the following hold (`OR`):',

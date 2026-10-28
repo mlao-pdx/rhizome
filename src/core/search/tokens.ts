@@ -22,7 +22,7 @@ export const Or = createToken({ name: 'Or', pattern: /OR(?![^\s()[\]])/, label: 
 export const And = createToken({ name: 'And', pattern: /AND(?![^\s()[\]])/, label: 'AND' });
 export const Not = createToken({ name: 'Not', pattern: /NOT(?![^\s()[\]])/, label: 'NOT' });
 
-export const HyphenNot = createToken({ name: 'HyphenNot', pattern: /-(?=\S)/, label: '-' });
+export const BangNot = createToken({ name: 'BangNot', pattern: /!(?![=\s])/, label: '!' });
 
 /**
  * Matches:
@@ -78,7 +78,7 @@ export const ALL_TOKENS: TokenType[] = [
 	Or,
 	And,
 	Not,
-	HyphenNot,
+	BangNot,
 	DateTimeLiteral,
 	Colon,
 	CompOp,

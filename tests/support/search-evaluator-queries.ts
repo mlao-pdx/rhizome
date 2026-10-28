@@ -103,7 +103,7 @@ export const temporalLiteralArb = fc.constantFrom(
 	'@thisyear..@today',
 );
 const numberColonLeafArb = fc.oneof(
-	fc.integer({ min: 0, max: 300 }).map((tenths) => String(tenths / 10)),
+	fc.integer({ min: -300, max: 300 }).map((tenths) => String(tenths / 10)),
 	regexArb,
 );
 const numberColonExprArb = nestedQuery(numberColonLeafArb, 1);

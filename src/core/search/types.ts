@@ -203,7 +203,7 @@ export interface LogicalNode {
 
 export interface NotNode {
 	readonly type: 'NOT';
-	readonly syntax: 'NOT' | '-';
+	readonly syntax: 'NOT' | '!';
 	readonly child: SearchAST;
 	readonly span?: SourceSpan;
 }
@@ -222,7 +222,7 @@ export type ValueExprAST =
 	  }
 	| {
 			readonly type: 'VALUE_NOT';
-			readonly syntax: 'NOT' | '-';
+			readonly syntax: 'NOT' | '!';
 			readonly child: ValueExprAST;
 			readonly span?: SourceSpan;
 	  }
@@ -264,7 +264,6 @@ export type DiagnosticCode =
 	| 'ERROR_INVALID_OPERATOR_FOR_TYPE'
 	| 'WARN_UNQUOTED_MULTIWORD_SCOPE'
 	| 'WARN_LOWERCASE_BOOLEAN'
-	| 'WARN_DANGEROUS_SPACED_HYPHEN'
 	| 'WARN_SINGLE_VALUE_CONTRADICTION'
 	| 'HINT_PROP_NEQ_EXISTENCE'
 	| 'HINT_PROPERTY_MATCHES_SCOPE'

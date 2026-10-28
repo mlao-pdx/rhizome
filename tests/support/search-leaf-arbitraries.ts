@@ -72,7 +72,7 @@ export function buildCustomValueExprArb(
 	if (maxDepth <= 0) return leafArb;
 	const subArb = buildCustomValueExprArb(leafMatcherArb, maxDepth - 1);
 	const notArb: fc.Arbitrary<ValueExprAST> = fc
-		.tuple(fc.constantFrom('NOT' as const, '-' as const), subArb)
+		.tuple(fc.constantFrom('NOT' as const, '!' as const), subArb)
 		.map(([syntax, child]) => ({ type: 'VALUE_NOT' as const, syntax, child }));
 	const logicalArb: fc.Arbitrary<ValueExprAST> = fc
 		.tuple(

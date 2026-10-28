@@ -200,6 +200,9 @@ describe('Phase 4 parser, AST normalizer, literal decoder & fuzz invariants', ()
 			'AND',
 			'OR',
 			'NOT',
+			'!',
+			'!draft',
+			'! 5',
 			'-',
 			'-draft',
 			'- 5',
@@ -210,7 +213,8 @@ describe('Phase 4 parser, AST normalizer, literal decoder & fuzz invariants', ()
 			'links:[[|Alias]]',
 			'["" = 1]',
 			'[score >= -10.5]',
-			'[score = - 5]',
+			'[file.modified: !@thisweek]',
+			'[score = ! 5]',
 			'/regex/im',
 			'/bad/flags',
 			'"quoted"',
@@ -228,7 +232,7 @@ describe('Phase 4 parser, AST normalizer, literal decoder & fuzz invariants', ()
 			fc
 				.integer({ min: 1, max: 40 })
 				.map((depth) => `${'('.repeat(depth)}a${')'.repeat(depth)}`),
-			fc.integer({ min: 1, max: 40 }).map((depth) => `${'-'.repeat(depth)}a`),
+			fc.integer({ min: 1, max: 40 }).map((depth) => `${'!'.repeat(depth)}a`),
 			fc.integer({ min: 4090, max: 4105 }).map((len) => 'x'.repeat(len)),
 		);
 		await assertProperty(

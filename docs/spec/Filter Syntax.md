@@ -245,7 +245,7 @@ export interface LogicalNode {
 
 export interface NotNode {
   readonly type: 'NOT';
-  readonly syntax: 'NOT' | '-';
+  readonly syntax: 'NOT' | '!';
   readonly child: SearchAST;
   readonly span?: SourceSpan;
 }
@@ -256,7 +256,7 @@ export type LeafMatcher =
 
 export type ValueExprAST =
   | { readonly type: 'VALUE_LOGICAL'; readonly operator: 'AND' | 'OR'; readonly children: readonly ValueExprAST[] }
-  | { readonly type: 'VALUE_NOT'; readonly syntax: 'NOT' | '-'; readonly child: ValueExprAST }
+  | { readonly type: 'VALUE_NOT'; readonly syntax: 'NOT' | '!'; readonly child: ValueExprAST }
   | { readonly type: 'VALUE_LEAF'; readonly matcher: LeafMatcher };
 
 export interface ScopedFilterNode {
@@ -295,7 +295,6 @@ export type DiagnosticCode =
   | 'ERROR_INVALID_OPERATOR_FOR_TYPE'
   | 'WARN_UNQUOTED_MULTIWORD_SCOPE'
   | 'WARN_LOWERCASE_BOOLEAN'
-  | 'WARN_DANGEROUS_SPACED_HYPHEN'
   | 'WARN_SINGLE_VALUE_CONTRADICTION'
   | 'HINT_PROP_NEQ_EXISTENCE'
   | 'HINT_AMBIGUOUS_PRECEDENCE'
@@ -481,7 +480,7 @@ The 9 virtual property keys are `VIRTUAL_FILE_KEYS_LIST` (`file.mtime`, `file.ct
 ### 3.1 Syntactic Resource Limits
 
 - **Maximum Query Length**: `4096` UTF-16 code units (checked before lexing; exceeding emits `SYNTAX_ERROR`).
-- **Maximum Syntactic Nesting Depth**: `32` levels. Depth is incremented by `+1` only when consuming a unary negation operator (`NOT` or `HyphenNot` in `NotExpression` or `ValueNotExpr`) or opening a parenthesized group (`LParen` in `Parenthesized` or `ValueNotExpr`), enforced before descending into the operand or inner expression. Exceeding `32` aborts parsing and emits `SYNTAX_ERROR`.
+- **Maximum Syntactic Nesting Depth**: `32` levels. Depth is incremented by `+1` only when consuming a unary negation operator (`NOT` or `BangNot` in `NotExpression` or `ValueNotExpr`) or opening a parenthesized group (`LParen` in `Parenthesized` or `ValueNotExpr`), enforced before descending into the operand or inner expression. Exceeding `32` aborts parsing and emits `SYNTAX_ERROR`.
 
 ### 3.2 Normative Anchor-Free Chevrotain Token Definitions
 
@@ -510,7 +509,7 @@ export const Or = createToken({ name: 'Or', pattern: /OR(?![^\s()\[\]])/, label:
 export const And = createToken({ name: 'And', pattern: /AND(?![^\s()\[\]])/, label: 'AND' });
 export const Not = createToken({ name: 'Not', pattern: /NOT(?![^\s()\[\]])/, label: 'NOT' });
 
-export const HyphenNot = createToken({ name: 'HyphenNot', pattern: /-(?=\S)/, label: '-' });
+export const BangNot = createToken({ name: 'BangNot', pattern: /!(?![=\s])/, label: '!' });
 
 // Matches:
 // - ISO dates/datetimes (with optional ±Nd day offset on YYYY-MM-DD)
@@ -564,7 +563,7 @@ export const ALL_TOKENS = [
   Or,
   And,
   Not,
-  HyphenNot,
+  BangNot,
   DateTimeLiteral,
   Colon,
   CompOp,
@@ -589,7 +588,7 @@ OrExpression      ::= AndExpression ( "OR" AndExpression )*
 /* Conjunction applies to adjacent NotExpressions without an explicit 'AND' keyword */
 AndExpression     ::= NotExpression ( "AND"? NotExpression )*
 
-NotExpression     ::= ( "NOT" | HyphenNot ) NotExpression
+NotExpression     ::= ( "NOT" | BangNot ) NotExpression
                     | Primary
 
 Primary           ::= Parenthesized
@@ -600,20 +599,16 @@ Primary           ::= Parenthesized
 
 Parenthesized     ::= "(" OrExpression ")"
 
-PropertyFilter    ::= "[" PropertyKey ( ":" ScopeOrPropRhs | CompOp RhsLeafValue )? "]"
+PropertyFilter    ::= "[" PropertyKey ( ":" ValueNotExpr | CompOp ValueLeaf )? "]"
 
-ScopedOperator    ::= ScopeName ":" ScopeOrPropRhs
-
-ScopeOrPropRhs    ::= "(" ValueOrExpr ")"
-                    | WikiLinkValue
-                    | RhsLeafValue
+ScopedOperator    ::= ScopeName ":" ValueNotExpr
 
 ValueOrExpr       ::= ValueAndExpr ( "OR" ValueAndExpr )*
 ValueAndExpr      ::= ValueNotExpr ( "AND"? ValueNotExpr )*
-ValueNotExpr      ::= ( "NOT" | HyphenNot ) ValueNotExpr
+ValueNotExpr      ::= ( "NOT" | BangNot ) ValueNotExpr
                     | "(" ValueOrExpr ")"
                     | WikiLinkValue
-                    | UnsignedValueLeaf
+                    | ValueLeaf
 
 PropertyKey       ::= QuotedString | Identifier
 ScopeName         ::= Identifier
@@ -624,20 +619,11 @@ BareLeafValue     ::= QuotedString
                     | DateTimeLiteral
                     | Identifier
 
-UnsignedValueLeaf ::= QuotedString
+ValueLeaf         ::= QuotedString
                     | RegexLiteral
                     | DateTimeLiteral
                     | TagLiteral
                     | Identifier
-
-RhsLeafValue      ::= QuotedString
-                    | RegexLiteral
-                    | DateTimeLiteral
-                    | TagLiteral
-                    | SignedIdentifier
-
-/* HyphenNot and Identifier must be adjacent in source offsets: hyphen.endOffset + 1 === id.startOffset */
-SignedIdentifier  ::= HyphenNot? Identifier
 ```
 
 ### 3.4 Normative Literal Decoding & AST Lowering Rules
@@ -649,9 +635,8 @@ SignedIdentifier  ::= HyphenNot? Identifier
      - `\"` $\to$ `"`, `\'` $\to$ `'`, `\\` $\to$ `\`, `\n` $\to$ `\n` (LF), `\r` $\to$ `\r` (CR), `\t` $\to$ `\t` (TAB).
      - Any other character `c`: emit both `\` and `c` literally (`\` + `c`), advancing by 2.
    - Returns the decoded `string`. When lowered as a value leaf, wrap in `LeafMatcher: { kind: 'string', value: decodeQuotedString(token.image), quoted: true }`.
-3. **Unquoted Leaf Construction (`Identifier`, `DateTimeLiteral`, `TagLiteral`, `SignedIdentifier`)**:
+3. **Unquoted Leaf Construction (`Identifier`, `DateTimeLiteral`, `TagLiteral`)**:
    - For `Identifier`, `DateTimeLiteral`, or `TagLiteral`: `value` is `token.image`, `quoted: false`.
-   - For `SignedIdentifier`: if `HyphenNot` is present, verify `hyphenToken.endOffset + 1 === idToken.startOffset` (if whitespace separated them, emit `SYNTAX_ERROR`); combine into `value: "-" + idToken.image`, `quoted: false`.
    - Wrap in `LeafMatcher: { kind: 'string', value, quoted: false }`.
 4. **`RegexLiteral` Extraction (`decodeRegexLiteral(rawTokenText): { pattern: string; flags: string }`)**:
    Find the last `/` in `rawTokenText`: `pattern = rawTokenText.slice(1, lastSlashIdx)`, `flags = rawTokenText.slice(lastSlashIdx + 1)`. Wrap in `LeafMatcher: { kind: 'regex', pattern, flags }`.
@@ -749,12 +734,11 @@ SignedIdentifier  ::= HyphenNot? Identifier
 | `ERROR_TYPE_MISMATCH`             | `error`   | Non-regex leaf in `[key op val]` fails validation for `key`‘s resolved `ObsidianPropertyType` (excluding `REVERSED_RANGE`, which emits `SYNTAX_ERROR`).                                                                                                                                     | `"${val}" is not a valid ${propType} for property "${key}".`                                                                                                      |
 | `WARN_UNQUOTED_MULTIWORD_SCOPE`   | `warning` | Checked during CST-to-AST construction before flattening: an adjacent pair `(left, right)` joined without an explicit `AND` token where `left` is a `ScopedFilterNode` with an unquoted string leaf and `right` is a bare `TextMatchNode` on the same `startLine`.                          | `"${next}" is searched as a separate term, not inside "${scope}:".` Hint: `Use ${scope}:"${val} ${next}"`                                                         |
 | `WARN_LOWERCASE_BOOLEAN`          | `warning` | Bare unquoted `TextMatchNode` has `rawText` in `{"and", "or", "not"}` (case-insensitive, excluding exact uppercase).                                                                                                                                                                        | `Lowercase "${rawText}" is searched as literal text.` Hint: `Use uppercase "${rawText.toUpperCase()}".`                                                           |
-| `WARN_DANGEROUS_SPACED_HYPHEN`    | `warning` | Bare unquoted `TextMatchNode` has `rawText === "-"` immediately preceding another sibling in an `AndExpression`.                                                                                                                                                                            | `A space after "-" prevents negation.` Hint: `Use "-term" or "NOT term".`                                                                                         |
 | `WARN_SINGLE_VALUE_CONTRADICTION` | `warning` | An `AND` node contains two direct equality predicates on the **same canonical single-valued field** (`ext:` / `[file.ext = ...]`, `[file.name = ...]`, `[file.basename = ...]`, `[file.path = ...]`, `[file.parent = ...]`) with different normalized target values.                        | `A single file cannot match both "${a}" and "${b}" on the same single-valued field.` Hint: `Did you mean "OR"?`                                                   |
-| `HINT_PROP_NEQ_EXISTENCE`         | `hint`    | Every `PropertyFilterNode` with `operator === '!='`.                                                                                                                                                                                                                                        | `"[${key} != ...]" requires "${key}" to exist.` Hint: `To exclude notes (including notes missing "${key}"), use "-[${key} = ...]".`                               |
+| `HINT_PROP_NEQ_EXISTENCE`         | `hint`    | Every `PropertyFilterNode` with `operator === '!='`.                                                                                                                                                                                                                                        | `"[${key} != ...]" requires "${key}" to exist.` Hint: `To exclude notes (including notes missing "${key}"), use "![${key} = ...]".`                               |
 | `HINT_AMBIGUOUS_PRECEDENCE`       | `hint`    | An `OR` `LogicalNode` has a child `AND` `LogicalNode` with `parenthesized !== true`.                                                                                                                                                                                                        | `Evaluated as "(A AND B) OR C".` Hint: `Add parentheses to make precedence explicit.`                                                                             |
 | `HINT_WIKILINK_BRACKETS_IN_SCOPE` | `hint`    | Every `WikiLinkValue` token lowered into a `VALUE_LEAF`.                                                                                                                                                                                                                                    | `Wikilink brackets "[[...]]" are not needed.` Hint: `Stripped "[[...]]" automatically.`                                                                           |
-| `HINT_BARE_TEXT_NO_BODY`          | `hint`    | Every document-level `TextMatchNode` (unless already flagged by `WARN_LOWERCASE_BOOLEAN`, `WARN_DANGEROUS_SPACED_HYPHEN`, or `HINT_UNCLOSED_REGEX`).                                                                                                                                        | `Bare terms only search filenames, paths, aliases, and tags (note body is not indexed).`                                                                          |
+| `HINT_BARE_TEXT_NO_BODY`          | `hint`    | Every document-level `TextMatchNode` (unless already flagged by `WARN_LOWERCASE_BOOLEAN` or `HINT_UNCLOSED_REGEX`).                                                                                                                                                                         | `Bare terms only search filenames, paths, aliases, and tags (note body is not indexed).`                                                                          |
 | `HINT_UNCLOSED_REGEX`             | `hint`    | Every unquoted string `LeafMatcher` starting with `'/'` (`value !== '//'`) in a regex-capable leaf position (`TextMatchNode`, `ScopedFilterNode`, or valid non-`checkbox` `PropertyFilterNode` with `operator === ':'`).                                                                    | `Unquoted "${rawValue}" starts with "/" and is searched as literal text.` Hint: `Add a closing "/" for a regular expression, or wrap in quotes for literal text.` |
 
 ---
@@ -2358,7 +2342,7 @@ export function normalizeAST(ast: SearchAST): SearchAST {
      1. **Logical Arity**: `LogicalNode.children.length >= 2` and `VALUE_LOGICAL.children.length >= 2`; `MatchAllNode` only at root.
      2. **Operator/RHS Shape**: `operator === 'EXISTS'` has `valueExpr === undefined`; `operator === ':'` allows `VALUE_LOGICAL`, `VALUE_NOT`, or `VALUE_LEAF`; `=`, `!=`, `<`, `>`, `<=`, `>=` require a single non-regex `VALUE_LEAF`.
      3. **Scope Membership**: `ScopedFilterNode.scope` is a registered canonical scope name in `resolvedConfig`.
-     4. **Context-Specific String Printability (for Scopes, Bare Text & Property `:` Leaves)**: Unquoted string leaves (`quoted: false`) at bare document level or inside parenthesized `ValueOrExpr` match `/^[a-zA-Z_][a-zA-Z0-9_-]{0,15}$/` (excluding `"AND"`, `"OR"`, `"NOT"`); direct unparenthesized RHS leaves (`RhsLeafValue`) also allow signed identifiers (`-[a-zA-Z_][a-zA-Z0-9_-]{0,15}`). Quoted string leaves (`quoted: true`) are printed with `"` and escaped via `\"`, `\\`, `\n`, `\r`, `\t` (preserving `quoted` identically across print + parse).
+     4. **Context-Specific String Printability (for Scopes, Bare Text & Property `:` Leaves)**: Unquoted string leaves (`quoted: false`) at bare document level or inside parenthesized `ValueOrExpr` match `/^[a-zA-Z_][a-zA-Z0-9_-]{0,15}$/` (excluding `"AND"`, `"OR"`, `"NOT"`); direct unparenthesized RHS leaves (`ValueLeaf`) also allow hyphen-prefixed identifiers (`-[a-zA-Z_][a-zA-Z0-9_-]{0,15}`). Quoted string leaves (`quoted: true`) are printed with `"` and escaped via `\"`, `\\`, `\n`, `\r`, `\t` (preserving `quoted` identically across print + parse).
      5. **Type-Valid Comparison Leaves (Overrides Rule 4 for Property `=`, `!=`, `<`, `>`, `<=`, `>=`)**: Resolved via `resolveQueryPropertyType(key, resolvedConfig.propertyTypes)`: `'number'` uses unquoted `/^-?\d{1,6}(?:\.\d{1,3})?$/`; `'checkbox'` uses unquoted `"true"`/`"false"`; `'date'`/`'datetime'` uses temporal literals that pass `parseTemporalExpr(..., { allowYearOnly: true, allowRelative: true, timeZone: resolvedConfig.timeZone, referenceTimeMs: refMs }).ok === true`; text-like types use Rule 4.
      6. **Structural Printable Regex Leaves**: Generated structurally (not via random punctuation strings) from non-empty concatenations/alternations of alphanumeric literals, escaped metacharacters (`\.`, `\/`, `\-`), small character classes (`[a-z]`, `[0-9]`), and optional `^`/`$` anchors (excluding repetition quantifiers from the random generator so differential runs always terminate instantaneously), with unique flags from `"imsu"`, verified via `validateRegexLiteral(pattern, flags) !== null`.
      7. **Length & Depth Bounds**: Filtered so `printAST(ast).length <= 4096` and syntactic recursion depth (counting unary negations and parenthesized groups) is $\le 32$.
@@ -2382,8 +2366,8 @@ export function normalizeAST(ast: SearchAST): SearchAST {
 Unless otherwise noted, tests use `initEngineConfig({ timeZone: 'America/New_York', propertyTypes: { score: 'number', priority: 'number', meeting: 'datetime', due: 'date', modified: 'date', sprint: 'date', status: 'text' } })` and pinned `referenceTimeMs = Date.parse('2026-10-22T15:30:00.000Z')` (Thursday, Oct 22, 2026, 11:30 AM EDT):
 
 1. **`tag:#work/urgent` & Bare `#work`** $\rightarrow$ Both compile with zero errors (`#work` has `rawScope: '#'`, `scope: 'tag'`); both match a note with `#work/urgent`.
-2. **`[score >= -10.5]`** $\rightarrow$ Parses `-10.5` via `RhsLeafValue`; matches `score: -5`, rejects `score: -20`.
-3. **`-draft` vs `file:-draft` vs `file:(-draft)`** $\rightarrow$ `-draft` negates document-level `TEXT_MATCH("draft")`; `file:-draft` matches substring `"-draft"` in filename; `file:(-draft)` requires at least one filename string (`name` or `basename`) not containing `"draft"`.
+2. **`[score >= -10.5]`** $\rightarrow$ Parses `-10.5` via `ValueLeaf`; matches `score: -5`, rejects `score: -20`.
+3. **`!draft` vs `file:-draft` vs `file:!draft` / `file:(!draft)`** $\rightarrow$ `!draft` negates document-level `TEXT_MATCH("draft")`; `file:-draft` matches substring `"-draft"` in filename; `file:!draft` and `file:(!draft)` require at least one filename string (`name` or `basename`) not containing `"draft"`.
 4. **`path:"/projects/active"` vs `path:/projects/active` vs `path:Projects/Active/Archive`** $\rightarrow$ `path:"/projects/active"` and `path:Projects/Active/Archive` compile and match as string paths; unquoted `path:/projects/active` tokenizes `/projects/active` as `RegexLiteral` with invalid flags `active` and is rejected with `SYNTAX_ERROR` (`executable: false`).
 5. **`[meeting = 2026-10-22T14:00:00+02:00]`** $\rightarrow$ Tokenizes via anchor-free `DateTimeLiteral`; matches `2026-10-22T12:00:00.000Z`.
 6. **Invalid & Skipped Dates (Including Relative Offset Landing on Skipped Date)**:
@@ -2391,7 +2375,7 @@ Unless otherwise noted, tests use `initEngineConfig({ timeZone: 'America/New_Yor
    - With `timeZone: 'Pacific/Apia'` and `referenceTimeMs = Date.parse('2011-12-29T12:00:00.000Z')`: both `[due = 2011-12-30]` and `NOT [due = @today+1d]` (which lands on skipped Dec 30, 2011) are rejected at compile time with `ERROR_TYPE_MISMATCH` (`executable: false`, never silently inverted by `NOT`).
 7. **IANA DST Fall-Back Day (`America/New_York`, `[modified = 2026-11-01]`)** $\rightarrow$ Interval spans 25 hours (`2026-11-01T04:00:00.000Z` to `2026-11-02T05:00:00.000Z`).
 8. **`headings:(Intro AND Summary)`** $\rightarrow$ Rejects doc with two separate headings `["Intro", "Summary"]`; matches doc with a single heading `"Intro and Summary"`.
-9. **`[status != done]`** $\rightarrow$ Emits `HINT_PROP_NEQ_EXISTENCE` with `hint: 'To exclude notes (including notes missing "status"), use "-[status = done]".'`
+9. **`[status != done]`** $\rightarrow$ Emits `HINT_PROP_NEQ_EXISTENCE` with `hint: 'To exclude notes (including notes missing "status"), use "![status = done]".'`
 10. **Compile-Time Error Gating & Precedence (`NOT [priority > high]`, `[priority = /10/]`, and `[priority = /foo(/]`)** $\rightarrow$ First emits `ERROR_TYPE_MISMATCH`; second emits only `ERROR_INVALID_OPERATOR_FOR_TYPE`; third emits only `SYNTAX_ERROR`. All three set `ast: null, prepared: null, executable: false`.
 11. **Self-Link Cache Normalization & Wikilink Alias Stripping**:
     - `cache.links = [{ link: '#Overview' }]` in `Notes/A.md` $\rightarrow$ Normalizes `rawTarget` and `resolvedPath` to `"Notes/A.md"`, `subpath` to `"#Overview"`.

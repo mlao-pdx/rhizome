@@ -101,8 +101,8 @@
 <path d="M98 61h0"></path>
 <path d="M126 61h0"></path>
 <rect x="98" y="50" width="28" height="22" rx="10" ry="10"></rect>
-<text x="112" y="65" topRuleName="notExpression" dslRuleName="consume" tokenName="HyphenNot" label="-">-</text>
-<title>-(?=\S)</title>
+<text x="112" y="65" topRuleName="notExpression" dslRuleName="consume" tokenName="BangNot" label="!">!</text>
+<title>!(?![=\s])</title>
 </g>
 <path d="M126 61h10"></path>
 </g>

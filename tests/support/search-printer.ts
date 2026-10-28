@@ -27,7 +27,7 @@ function printValueExpr(expr: ValueExprAST, parentOp?: 'AND' | 'OR' | 'NOT'): st
 				expr.child.type === 'VALUE_LOGICAL'
 					? `(${printValueExpr(expr.child)})`
 					: printValueExpr(expr.child, 'NOT');
-			return expr.syntax === '-' ? `-${child}` : `NOT ${child}`;
+			return expr.syntax === '!' ? `!${child}` : `NOT ${child}`;
 		}
 		case 'VALUE_LOGICAL': {
 			const joined = expr.children
@@ -61,7 +61,7 @@ function printSearchAST(ast: SearchAST, parentOp?: 'AND' | 'OR' | 'NOT'): string
 				ast.child.type === 'LOGICAL'
 					? `(${printSearchAST(ast.child)})`
 					: printSearchAST(ast.child, 'NOT');
-			return ast.syntax === '-' ? `-${child}` : `NOT ${child}`;
+			return ast.syntax === '!' ? `!${child}` : `NOT ${child}`;
 		}
 		case 'SCOPED_FILTER': {
 			if (
@@ -151,9 +151,14 @@ export function computeSyntacticDepth(ast: SearchAST, parentOp?: 'AND' | 'OR' | 
 			);
 		}
 		case 'SCOPED_FILTER':
-			return computeSyntacticDepthValueExpr(ast.expr);
+			return (
+				(ast.expr.type !== 'VALUE_LEAF' ? 1 : 0) + computeSyntacticDepthValueExpr(ast.expr)
+			);
 		case 'PROPERTY_FILTER':
-			return ast.valueExpr ? computeSyntacticDepthValueExpr(ast.valueExpr) : 0;
+			return ast.valueExpr
+				? (ast.operator === ':' && ast.valueExpr.type !== 'VALUE_LEAF' ? 1 : 0) +
+						computeSyntacticDepthValueExpr(ast.valueExpr)
+				: 0;
 		case 'LOGICAL': {
 			const needsParens = Boolean(
 				ast.parenthesized || (parentOp && parentOp !== ast.operator),

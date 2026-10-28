@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" role="img" class="railroad-diagram" width="713" height="102" viewBox="0 0 713 102" aria-label="propertyFilter railroad diagram">
+<svg xmlns="http://www.w3.org/2000/svg" role="img" class="railroad-diagram" width="689" height="102" viewBox="0 0 689 102" aria-label="propertyFilter railroad diagram">
 <style>
   :root {
     --rr-bg: #f8fafc;
@@ -64,7 +64,7 @@
     fill: var(--rr-comment-text);
   }
 </style>
-<rect class="railroad-card" x="1" y="1" width="711" height="100" rx="8" ry="8"></rect>
+<rect class="railroad-card" x="1" y="1" width="687" height="100" rx="8" ry="8"></rect>
 <g transform="translate(.5 .5)">
 <path d="M 20 31 v 20 m 10 -20 v 20 m -10 -10 h 20.5"></path>
 <path d="M40 41h10"></path>
@@ -86,43 +86,43 @@
 <path d="M206 41h10"></path>
 <g>
 <path d="M216 41h0"></path>
-<path d="M624 41h0"></path>
+<path d="M600 41h0"></path>
 <path d="M216 41a10 10 0 0 0 10 -10v0a10 10 0 0 1 10 -10"></path>
 <g>
-<path d="M236 21h368"></path>
+<path d="M236 21h344"></path>
 </g>
-<path d="M604 21a10 10 0 0 1 10 10v0a10 10 0 0 0 10 10"></path>
+<path d="M580 21a10 10 0 0 1 10 10v0a10 10 0 0 0 10 10"></path>
 <path d="M216 41h20"></path>
 <g>
 <path d="M236 41h0"></path>
-<path d="M604 41h0"></path>
+<path d="M580 41h0"></path>
 <path d="M236 41h20"></path>
 <g>
-<path d="M256 41h64"></path>
-<path d="M520 41h64"></path>
-<path d="M320 41h10"></path>
+<path d="M256 41h60"></path>
+<path d="M500 41h60"></path>
+<path d="M316 41h10"></path>
 <g class="terminal">
-<path d="M330 41h0"></path>
-<path d="M358 41h0"></path>
-<rect x="330" y="30" width="28" height="22" rx="10" ry="10"></rect>
-<text x="344" y="45" topRuleName="propertyFilter" dslRuleName="consume" tokenName="Colon" label=":">:</text>
+<path d="M326 41h0"></path>
+<path d="M354 41h0"></path>
+<rect x="326" y="30" width="28" height="22" rx="10" ry="10"></rect>
+<text x="340" y="45" topRuleName="propertyFilter" dslRuleName="consume" tokenName="Colon" label=":">:</text>
 <title>:</title>
 </g>
-<path d="M358 41h10"></path>
-<path d="M368 41h10"></path>
+<path d="M354 41h10"></path>
+<path d="M364 41h10"></path>
 <g class="non-terminal">
-<path d="M378 41h0"></path>
-<path d="M510 41h0"></path>
-<rect x="378" y="30" width="132" height="22"></rect>
-<text x="444" y="45" topRuleName="propertyFilter" ruleName="scopeOrPropRhs">scopeOrPropRhs</text>
+<path d="M374 41h0"></path>
+<path d="M490 41h0"></path>
+<rect x="374" y="30" width="116" height="22"></rect>
+<text x="432" y="45" topRuleName="propertyFilter" ruleName="valueNotExpr">valueNotExpr</text>
 </g>
-<path d="M510 41h10"></path>
+<path d="M490 41h10"></path>
 </g>
-<path d="M584 41h20"></path>
+<path d="M560 41h20"></path>
 <path d="M236 41a10 10 0 0 1 10 10v10a10 10 0 0 0 10 10"></path>
 <g>
 <path d="M256 71h0"></path>
-<path d="M584 71h0"></path>
+<path d="M560 71h0"></path>
 <path d="M256 71h10"></path>
 <g class="terminal">
 <path d="M266 71h0"></path>
@@ -135,25 +135,25 @@
 <path d="M448 71h10"></path>
 <g class="non-terminal">
 <path d="M458 71h0"></path>
-<path d="M574 71h0"></path>
-<rect x="458" y="60" width="116" height="22"></rect>
-<text x="516" y="75" topRuleName="propertyFilter" ruleName="rhsLeafValue">rhsLeafValue</text>
+<path d="M550 71h0"></path>
+<rect x="458" y="60" width="92" height="22"></rect>
+<text x="504" y="75" topRuleName="propertyFilter" ruleName="valueLeaf">valueLeaf</text>
 </g>
-<path d="M574 71h10"></path>
+<path d="M550 71h10"></path>
 </g>
-<path d="M584 71a10 10 0 0 0 10 -10v-10a10 10 0 0 1 10 -10"></path>
+<path d="M560 71a10 10 0 0 0 10 -10v-10a10 10 0 0 1 10 -10"></path>
 </g>
-<path d="M604 41h20"></path>
+<path d="M580 41h20"></path>
 </g>
-<path d="M624 41h10"></path>
+<path d="M600 41h10"></path>
 <g class="terminal">
-<path d="M634 41h0"></path>
-<path d="M662 41h0"></path>
-<rect x="634" y="30" width="28" height="22" rx="10" ry="10"></rect>
-<text x="648" y="45" topRuleName="propertyFilter" dslRuleName="consume" tokenName="RBracket" label="]">]</text>
+<path d="M610 41h0"></path>
+<path d="M638 41h0"></path>
+<rect x="610" y="30" width="28" height="22" rx="10" ry="10"></rect>
+<text x="624" y="45" topRuleName="propertyFilter" dslRuleName="consume" tokenName="RBracket" label="]">]</text>
 <title>\]</title>
 </g>
-<path d="M662 41h10"></path>
-<path d="M 672 41 h 20 m -10 -10 v 20 m 10 -20 v 20"></path>
+<path d="M638 41h10"></path>
+<path d="M 648 41 h 20 m -10 -10 v 20 m 10 -20 v 20"></path>
 </g>
 </svg>

@@ -87,7 +87,7 @@ describe('printable executable AST generator', () => {
 			if (limit === 'depth') {
 				oversized = safe;
 				for (let depth = 0; depth < MAX_SYNTACTIC_DEPTH; depth++) {
-					oversized = { type: 'NOT', syntax: '-', child: oversized };
+					oversized = { type: 'NOT', syntax: '!', child: oversized };
 				}
 			}
 			expect(compileQuery(printAST(oversized), config, REFERENCE_TIME_MS).executable).toBe(

@@ -706,7 +706,7 @@ describe('runVaultQuery', () => {
 				app,
 				{
 					cleanQuery: '#project',
-					warnQuery: 'alpha - beta',
+					warnQuery: 'alpha and beta',
 					brokenQuery: '[priority = "nan"]',
 				},
 				{ timeZone: 'UTC' },
@@ -726,10 +726,10 @@ describe('runVaultQuery', () => {
 				level: 'warn',
 				message: 'Query compilation diagnostics for «warnQuery»',
 				meta: {
-					query: '«alpha - beta»',
+					query: '«alpha and beta»',
 					executable: true,
 					errorCodes: [],
-					warningCodes: ['WARN_DANGEROUS_SPACED_HYPHEN'],
+					warningCodes: ['WARN_LOWERCASE_BOOLEAN'],
 					hintCodes: ['HINT_BARE_TEXT_NO_BODY'],
 				},
 			});

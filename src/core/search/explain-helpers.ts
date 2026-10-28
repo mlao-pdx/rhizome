@@ -422,7 +422,7 @@ export function extractAstSlice(input: string, node: SearchAST): string {
 			return formatAuthoredFilter(node);
 		case 'NOT': {
 			const childSlice = extractAstSlice(input, node.child);
-			return node.syntax === '-' ? `-${childSlice}` : `NOT ${childSlice}`;
+			return node.syntax === '!' ? `!${childSlice}` : `NOT ${childSlice}`;
 		}
 		case 'LOGICAL': {
 			const joiner = node.operator === 'OR' ? ' OR ' : node.implicit ? ' ' : ' AND ';

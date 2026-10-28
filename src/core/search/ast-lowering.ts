@@ -187,44 +187,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		};
 	}
 
-	function lowerRhsLeafValue(node: CstNode): LoweredValueExpr {
-		const signed = asNodes(node.children.signedIdentifier)[0];
-		if (signed) {
-			const hyphen = asTokens(signed.children.HyphenNot)[0];
-			const id = asTokens(signed.children.Identifier)[0]!;
-			const idSpan = tokenToSpan(id);
-			if (hyphen) {
-				const hyphenSpan = tokenToSpan(hyphen);
-				const span = mergeSpans(hyphenSpan, idSpan);
-				if (hyphen.endOffset === undefined || hyphen.endOffset + 1 !== id.startOffset) {
-					diagnostics.push({
-						code: 'SYNTAX_ERROR',
-						severity: 'error',
-						issue: 'Whitespace is not allowed between "-" and identifier in signed value.',
-						hint: `Use "-${id.image}"`,
-						span,
-					});
-				}
-				return {
-					expr: {
-						type: 'VALUE_LEAF',
-						matcher: { kind: 'string', value: `-${id.image}`, quoted: false },
-						span,
-					},
-					span,
-					parenthesized: false,
-				};
-			}
-			return {
-				expr: {
-					type: 'VALUE_LEAF',
-					matcher: { kind: 'string', value: id.image, quoted: false },
-					span: idSpan,
-				},
-				span: idSpan,
-				parenthesized: false,
-			};
-		}
+	function lowerValueLeaf(node: CstNode): LoweredValueExpr {
 		const leaf = lowerLeafTokens(node.children);
 		return {
 			expr: { type: 'VALUE_LEAF', matcher: leaf.matcher, span: leaf.span },
@@ -276,15 +239,15 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 	function lowerValueNotExpr(node: CstNode): LoweredValueExpr {
 		const ch = node.children;
 		const notTok = asTokens(ch.Not)[0];
-		const hyphenTok = asTokens(ch.HyphenNot)[0];
-		if (notTok || hyphenTok) {
-			const opTok = (notTok ?? hyphenTok)!;
+		const bangTok = asTokens(ch.BangNot)[0];
+		if (notTok || bangTok) {
+			const opTok = (notTok ?? bangTok)!;
 			const child = lowerValueNotExpr(asNodes(ch.operand)[0]!);
 			const span = mergeSpans(tokenToSpan(opTok), child.span);
 			return {
 				expr: {
 					type: 'VALUE_NOT',
-					syntax: notTok ? 'NOT' : '-',
+					syntax: notTok ? 'NOT' : '!',
 					child: child.expr,
 					span,
 				},
@@ -306,32 +269,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		const wikiTok = asTokens(ch.WikiLinkValue)[0];
 		if (wikiTok) return lowerWikiLinkToken(wikiTok);
 
-		const unsigned = asNodes(ch.unsignedValueLeaf)[0]!;
-		const leaf = lowerLeafTokens(unsigned.children);
-		return {
-			expr: { type: 'VALUE_LEAF', matcher: leaf.matcher, span: leaf.span },
-			span: leaf.span,
-			parenthesized: false,
-		};
-	}
-
-	function lowerScopeOrPropRhs(node: CstNode): LoweredValueExpr {
-		const ch = node.children;
-		const lparen = asTokens(ch.LParen)[0];
-		if (lparen) {
-			const rparen = asTokens(ch.RParen)[0]!;
-			const inner = lowerValueOrExpr(asNodes(ch.valueOrExpr)[0]!);
-			const span = mergeSpans(tokenToSpan(lparen), tokenToSpan(rparen));
-			return {
-				expr: { ...inner.expr, span },
-				span,
-				parenthesized: true,
-			};
-		}
-		const wikiTok = asTokens(ch.WikiLinkValue)[0];
-		if (wikiTok) return lowerWikiLinkToken(wikiTok);
-
-		return lowerRhsLeafValue(asNodes(ch.rhsLeafValue)[0]!);
+		return lowerValueLeaf(asNodes(ch.valueLeaf)[0]!);
 	}
 
 	function lowerPrimary(node: CstNode): SearchAST {
@@ -375,7 +313,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 			const compOp = asTokens(prop.children.CompOp)[0];
 			let propNode: PropertyFilterNode;
 			if (colon) {
-				const rhs = lowerScopeOrPropRhs(asNodes(prop.children.scopeOrPropRhs)[0]!);
+				const rhs = lowerValueNotExpr(asNodes(prop.children.valueNotExpr)[0]!);
 				propNode = {
 					type: 'PROPERTY_FILTER',
 					key,
@@ -385,7 +323,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 					span,
 				};
 			} else if (compOp) {
-				const rhs = lowerRhsLeafValue(asNodes(prop.children.rhsLeafValue)[0]!);
+				const rhs = lowerValueLeaf(asNodes(prop.children.valueLeaf)[0]!);
 				propNode = {
 					type: 'PROPERTY_FILTER',
 					key,
@@ -420,7 +358,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 			const trimmedScope = rawScope.trim();
 			const scope =
 				BUILT_IN_SCOPE_MAP.get(trimmedScope.toLowerCase())?.canonicalName ?? trimmedScope;
-			const rhs = lowerScopeOrPropRhs(asNodes(scoped.children.scopeOrPropRhs)[0]!);
+			const rhs = lowerValueNotExpr(asNodes(scoped.children.valueNotExpr)[0]!);
 			return {
 				type: 'SCOPED_FILTER',
 				scope,
@@ -460,15 +398,15 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 	function lowerNotExpression(node: CstNode): SearchAST {
 		const ch = node.children;
 		const notTok = asTokens(ch.Not)[0];
-		const hyphenTok = asTokens(ch.HyphenNot)[0];
-		if (notTok || hyphenTok) {
-			const opTok = (notTok ?? hyphenTok)!;
+		const bangTok = asTokens(ch.BangNot)[0];
+		if (notTok || bangTok) {
+			const opTok = (notTok ?? bangTok)!;
 			const child = lowerNotExpression(asNodes(ch.operand)[0]!);
 			const opSpan = tokenToSpan(opTok);
 			const span = 'span' in child && child.span ? mergeSpans(opSpan, child.span) : opSpan;
 			return {
 				type: 'NOT',
-				syntax: notTok ? 'NOT' : '-',
+				syntax: notTok ? 'NOT' : '!',
 				child,
 				span,
 			};

@@ -123,9 +123,10 @@ describe('search conformance matrix', () => {
 		const aliasDraft = makeDoc('Notes/published.md', { frontmatter: { aliases: ['draft'] } });
 		const extensionDraft = makeDoc('Notes/final.draft');
 		const docs = [draft, signed, aliasDraft, extensionDraft, clean];
-		assertReports('-draft', docs, [clean]);
+		assertReports('!draft', docs, [clean]);
 		assertReports('file:-draft', docs, [signed]);
-		assertReports('file:(-draft)', docs, [aliasDraft, extensionDraft, clean]);
+		assertReports('file:!draft', docs, [aliasDraft, extensionDraft, clean]);
+		assertReports('file:(!draft)', docs, [aliasDraft, extensionDraft, clean]);
 	});
 
 	it('4: distinguishes quoted and slashless paths from accidental regex syntax', () => {
@@ -193,10 +194,10 @@ describe('search conformance matrix', () => {
 		expect(compiled.diagnostics).toMatchObject([
 			{
 				code: 'HINT_PROP_NEQ_EXISTENCE',
-				hint: 'To exclude notes (including notes missing "status"), use "-[status = done]".',
+				hint: 'To exclude notes (including notes missing "status"), use "![status = done]".',
 			},
 		]);
-		assertReports('-[status = done]', docs, [missing, active]);
+		assertReports('![status = done]', docs, [missing, active]);
 	});
 
 	it('10: respects syntax, operator, and type error precedence', () => {

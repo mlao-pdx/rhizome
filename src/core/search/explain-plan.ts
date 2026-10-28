@@ -521,7 +521,7 @@ export function explainQuery(
 					const exactDiagSuffix = consumeDiagLinksForSpan(expr.span);
 					bulletLines.push(`${indent}- ${sliceCode}`);
 					bulletLines.push(
-						`${indent}  Does *not* match (\`-\` / \`NOT\`):${exactDiagSuffix}`,
+						`${indent}  Does *not* match (\`!\` / \`NOT\`):${exactDiagSuffix}`,
 					);
 					renderValueExprBullets(expr.child, `${indent}  `, targetNoun, leafFormatter);
 					return;
@@ -590,7 +590,7 @@ export function explainQuery(
 					const headerIdx = bulletLines.length;
 					bulletLines.push(`${indent}- ${sliceCode}`);
 					bulletLines.push(
-						`${indent}  Excludes notes matching (\`-\` / \`NOT\`):${exactDiagSuffix}`,
+						`${indent}  Excludes notes matching (\`!\` / \`NOT\`):${exactDiagSuffix}`,
 					);
 					renderAstBullets(node.child, `${indent}  `);
 					const remainingDiagSuffix = consumeUnattachedContainedDiags(node.span);

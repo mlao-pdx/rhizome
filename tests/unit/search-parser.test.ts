@@ -58,7 +58,7 @@ describe('Invariant 1a: Lexer & SearchParser self-analysis smoke test', () => {
 			Or: 'OR',
 			And: 'AND',
 			Not: 'NOT',
-			HyphenNot: '-',
+			BangNot: '!',
 			DateTimeLiteral: 'date literal',
 			Colon: ':',
 			CompOp: 'comparison operator',
@@ -114,7 +114,7 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 		expect(normalizeAST(bareTagScopeRes.ast!)).toEqual(normalizeAST(shortRes.ast!));
 	});
 
-	it('Conformance Test 2: lowers signed numeric RHS [score >= -10.5] via SignedIdentifier', () => {
+	it('Conformance Test 2: lowers signed numeric RHS [score >= -10.5], [score: !-10.5], and [score: (-10.5 OR -20)] via ValueLeaf', () => {
 		const res = parseQuery('[score >= -10.5]');
 		expect(res.diagnostics).toEqual([]);
 		expect(res.ast).toMatchObject({
@@ -127,14 +127,66 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 				matcher: { kind: 'string', value: '-10.5', quoted: false },
 			},
 		});
+
+		const negNumRes = parseQuery('[score: !-10.5]');
+		expect(negNumRes.diagnostics).toEqual([]);
+		expect(negNumRes.ast).toMatchObject({
+			type: 'PROPERTY_FILTER',
+			key: 'score',
+			operator: ':',
+			valueExpr: {
+				type: 'VALUE_NOT',
+				syntax: '!',
+				child: {
+					type: 'VALUE_LEAF',
+					matcher: { kind: 'string', value: '-10.5', quoted: false },
+				},
+			},
+		});
+
+		const groupNumRes = parseQuery('[score: (-10.5 OR -20)]');
+		expect(groupNumRes.diagnostics).toEqual([]);
+		expect(groupNumRes.ast).toMatchObject({
+			type: 'PROPERTY_FILTER',
+			key: 'score',
+			operator: ':',
+			valueExpr: {
+				type: 'VALUE_LOGICAL',
+				operator: 'OR',
+				children: [
+					{
+						type: 'VALUE_LEAF',
+						matcher: { kind: 'string', value: '-10.5', quoted: false },
+					},
+					{
+						type: 'VALUE_LEAF',
+						matcher: { kind: 'string', value: '-20', quoted: false },
+					},
+				],
+			},
+		});
+
+		for (const q of ['[file.modified: !@thisweek]', '[file.modified: !@thisweek..@today]']) {
+			const tempNeg = parseQuery(q);
+			expect(tempNeg.diagnostics).toEqual([]);
+			expect(tempNeg.ast).toMatchObject({
+				type: 'PROPERTY_FILTER',
+				key: 'file.modified',
+				operator: ':',
+				valueExpr: {
+					type: 'VALUE_NOT',
+					syntax: '!',
+				},
+			});
+		}
 	});
 
-	it('Conformance Test 3: disambiguates -draft vs file:-draft vs file:(-draft)', () => {
-		const docNeg = parseQuery('-draft');
+	it('Conformance Test 3: disambiguates !draft vs file:-draft vs file:!draft / file:(!draft)', () => {
+		const docNeg = parseQuery('!draft');
 		expect(docNeg.diagnostics).toEqual([]);
 		expect(docNeg.ast).toMatchObject({
 			type: 'NOT',
-			syntax: '-',
+			syntax: '!',
 			child: {
 				type: 'TEXT_MATCH',
 				rawText: 'draft',
@@ -154,21 +206,23 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 			},
 		});
 
-		const valueNeg = parseQuery('file:(-draft)');
-		expect(valueNeg.diagnostics).toEqual([]);
-		expect(valueNeg.ast).toMatchObject({
-			type: 'SCOPED_FILTER',
-			scope: 'file',
-			rawScope: 'file',
-			expr: {
-				type: 'VALUE_NOT',
-				syntax: '-',
-				child: {
-					type: 'VALUE_LEAF',
-					matcher: { kind: 'string', value: 'draft', quoted: false },
+		for (const q of ['file:!draft', 'file:(!draft)']) {
+			const valueNeg = parseQuery(q);
+			expect(valueNeg.diagnostics).toEqual([]);
+			expect(valueNeg.ast).toMatchObject({
+				type: 'SCOPED_FILTER',
+				scope: 'file',
+				rawScope: 'file',
+				expr: {
+					type: 'VALUE_NOT',
+					syntax: '!',
+					child: {
+						type: 'VALUE_LEAF',
+						matcher: { kind: 'string', value: 'draft', quoted: false },
+					},
 				},
-			},
-		});
+			});
+		}
 	});
 
 	it('Conformance Test 4: disambiguates path:"/projects/active" vs path:/projects/active vs path:Projects/Active/Archive', () => {
@@ -377,8 +431,8 @@ describe('Resource Limits & Syntax Error Boundaries', () => {
 
 	it('enforces MAX_SYNTACTIC_DEPTH = 32 across unary negation, parentheses, and value-level expressions', () => {
 		// Document-level unary negation at depth 32 succeeds; 33 fails
-		expect(parseQuery(`${'-'.repeat(MAX_SYNTACTIC_DEPTH)}a`).ast).not.toBeNull();
-		const neg33 = parseQuery(`${'-'.repeat(MAX_SYNTACTIC_DEPTH + 1)}a`);
+		expect(parseQuery(`${'!'.repeat(MAX_SYNTACTIC_DEPTH)}a`).ast).not.toBeNull();
+		const neg33 = parseQuery(`${'!'.repeat(MAX_SYNTACTIC_DEPTH + 1)}a`);
 		expect(neg33.ast).toBeNull();
 		expect(neg33.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
 
@@ -390,21 +444,21 @@ describe('Resource Limits & Syntax Error Boundaries', () => {
 		expect(paren33Res.ast).toBeNull();
 		expect(paren33Res.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
 
-		// Value-level negation and parentheses inside scope:(...)
-		const val32 = `tag:(${'-'.repeat(16)}${'('.repeat(16)}work${')'.repeat(16)})`;
+		// Value-level negation and parentheses inside scope:(...) (outer `(` counts as +1 depth)
+		const val32 = `tag:(${'!'.repeat(16)}${'('.repeat(15)}work${')'.repeat(15)})`;
 		expect(parseQuery(val32).ast).not.toBeNull();
-		const val33 = `tag:(${'-'.repeat(17)}${'('.repeat(16)}work${')'.repeat(16)})`;
+		const val33 = `tag:(${'!'.repeat(16)}${'('.repeat(16)}work${')'.repeat(16)})`;
 		expect(parseQuery(val33).ast).toBeNull();
 
 		// >32 sequential non-nested groups succeed because depth is decremented on exit
-		const sequential40 = Array.from({ length: 40 }, (_, i) => `(-term${i})`).join(' ');
+		const sequential40 = Array.from({ length: 40 }, (_, i) => `(!term${i})`).join(' ');
 		const seqRes = parseQuery(sequential40);
 		expect(seqRes.diagnostics).toEqual([]);
 		expect(seqRes.ast).not.toBeNull();
 	});
 
-	it('rejects spaced hyphen in comparison RHS [score = - 5] and lone hyphen [score = -] with SYNTAX_ERROR', () => {
-		for (const bad of ['[score = - 5]', '[score = -]', '(', 'NOT', 'unclosed "quote']) {
+	it('rejects spaced bang ! 5, [score = ! 5], and lone bang [score = !] with SYNTAX_ERROR', () => {
+		for (const bad of ['! 5', '[score = ! 5]', '[score = !]', '(', 'NOT', 'unclosed "quote']) {
 			const res = parseQuery(bad);
 			expect(res.ast).toBeNull();
 			expect(res.diagnostics.length).toBeGreaterThan(0);
@@ -541,7 +595,7 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 	});
 
 	it('deeply freezes all AST nodes, children arrays, matchers, and spans via deepFreezeAST', () => {
-		const res = parseQuery('headings:(Intro OR /sum.*/i) AND -[status = "active"] AND note');
+		const res = parseQuery('headings:(Intro OR /sum.*/i) AND ![status = "active"] AND note');
 		expect(res.ast).not.toBeNull();
 		const frozen = deepFreezeAST(res.ast!);
 
@@ -568,7 +622,7 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 	});
 
 	it('normalizes ASTs idempotently and flattens nested logical operators in normalizeAST', () => {
-		const q1 = parseQuery('((a AND b) AND c) AND -d AND #work AND ["Status" = 1]');
+		const q1 = parseQuery('((a AND b) AND c) AND !d AND #work AND ["Status" = 1]');
 		const q2 = parseQuery('a AND (b AND c) AND NOT d AND tag:work AND [status = 1]');
 		expect(q1.ast).not.toBeNull();
 		expect(q2.ast).not.toBeNull();
@@ -579,14 +633,14 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 		expect(normalizeAST(norm1)).toEqual(norm1);
 
 		// Value-level logical flattening and single-child unwrapping
-		const v1 = parseQuery('headings:((a AND b) AND -c)');
+		const v1 = parseQuery('headings:((a AND b) AND !c)');
 		const v2 = parseQuery('header:(a AND b AND NOT c)');
 		expect(normalizeAST(v1.ast!)).toEqual(normalizeAST(v2.ast!));
 	});
 
 	it('collects only non-virtual property keys across the entire AST in collectReferencedPropertyKeys', () => {
 		const virtualFilters = VIRTUAL_FILE_KEYS_LIST.map((k) => `[${k}]`).join(' AND ');
-		const query = `${virtualFilters} AND [Status = "done"] AND -["Due Date" < 2026-01-01] OR [priority]`;
+		const query = `${virtualFilters} AND [Status = "done"] AND !["Due Date" < 2026-01-01] OR [priority]`;
 		const res = parseQuery(query);
 		expect(res.ast).not.toBeNull();
 

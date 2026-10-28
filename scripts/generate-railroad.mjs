@@ -189,9 +189,9 @@ const RULE_METADATA = {
 			'Document-level conjunction. Adjacent expressions without an explicit `AND` keyword are implicitly conjoined.',
 	},
 	notExpression: {
-		ebnf: 'NotExpression ::= ( "NOT" | HyphenNot ) NotExpression | Primary',
+		ebnf: 'NotExpression ::= ( "NOT" | BangNot ) NotExpression | Primary',
 		description:
-			'Document-level unary negation (`NOT` or prefix `-`) or a `Primary` filter atom. Each negation increments syntactic nesting depth by `+1`.',
+			'Document-level unary negation (`NOT` or prefix `!`) or a `Primary` filter atom. Each negation increments syntactic nesting depth by `+1`.',
 	},
 	primary: {
 		ebnf: 'Primary ::= Parenthesized | PropertyFilter | ScopedOperator | TagShorthand | BareLeafValue',
@@ -204,19 +204,14 @@ const RULE_METADATA = {
 			'Groups a document-level boolean expression inside `(...)`. Increments syntactic nesting depth by `+1`.',
 	},
 	propertyFilter: {
-		ebnf: 'PropertyFilter ::= "[" PropertyKey ( ":" ScopeOrPropRhs | CompOp RhsLeafValue )? "]"',
+		ebnf: 'PropertyFilter ::= "[" PropertyKey ( ":" ValueNotExpr | CompOp ValueLeaf )? "]"',
 		description:
 			'Bracketed frontmatter or virtual file property filter (`[key]` existence check, `[key: value]` colon match, or `[key >= value]` comparison).',
 	},
 	scopedOperator: {
-		ebnf: 'ScopedOperator ::= ScopeName ":" ScopeOrPropRhs',
+		ebnf: 'ScopedOperator ::= ScopeName ":" ValueNotExpr',
 		description:
 			'Scoped filter operator (`tag:`, `file:`, `path:`, `content:`, `headings:`, `links:`, or registered custom scopes).',
-	},
-	scopeOrPropRhs: {
-		ebnf: 'ScopeOrPropRhs ::= "(" ValueOrExpr ")" | WikiLinkValue | RhsLeafValue',
-		description:
-			'Right-hand side of a `scope:` or `[key: ...]` filter: a parenthesized value-level boolean expression, a `[[wikilink]]`, or a single leaf value.',
 	},
 	valueOrExpr: {
 		ebnf: 'ValueOrExpr ::= ValueAndExpr ( "OR" ValueAndExpr )*',
@@ -229,9 +224,9 @@ const RULE_METADATA = {
 			'Value-level conjunction inside `scope:(...)` or `[key:(...)]`. Supports both explicit `AND` and implicit juxtaposition.',
 	},
 	valueNotExpr: {
-		ebnf: 'ValueNotExpr ::= ( "NOT" | HyphenNot ) ValueNotExpr | "(" ValueOrExpr ")" | WikiLinkValue | UnsignedValueLeaf',
+		ebnf: 'ValueNotExpr ::= ( "NOT" | BangNot ) ValueNotExpr | "(" ValueOrExpr ")" | WikiLinkValue | ValueLeaf',
 		description:
-			'Value-level negation, nested parenthesized value group, `[[wikilink]]`, or unsigned leaf value. Both unary negation and `(` increment syntactic nesting depth by `+1`.',
+			'Value-level negation (`NOT` or prefix `!`), nested parenthesized value group, `[[wikilink]]`, or leaf value. Both unary negation and `(` increment syntactic nesting depth by `+1`.',
 	},
 	propertyKey: {
 		ebnf: 'PropertyKey ::= QuotedString | Identifier',
@@ -253,27 +248,17 @@ const RULE_METADATA = {
 		description:
 			'Unscoped full-text search term matched against note title/filename, aliases, and body text.',
 	},
-	unsignedValueLeaf: {
-		ebnf: 'UnsignedValueLeaf ::= QuotedString | RegexLiteral | DateTimeLiteral | TagLiteral | Identifier',
+	valueLeaf: {
+		ebnf: 'ValueLeaf ::= QuotedString | RegexLiteral | DateTimeLiteral | TagLiteral | Identifier',
 		description:
-			'Leaf value inside parenthesized value expressions (`ValueNotExpr`), where a leading `-` is always parsed as unary value negation (`VALUE_NOT`).',
-	},
-	rhsLeafValue: {
-		ebnf: 'RhsLeafValue ::= QuotedString | RegexLiteral | DateTimeLiteral | TagLiteral | SignedIdentifier',
-		description:
-			'Unparenthesized right-hand leaf value after `:` or a comparison operator (`=`, `!=`, `<`, `<=`, `>`, `>=`), permitting signed numeric/identifier literals via `SignedIdentifier`.',
-	},
-	signedIdentifier: {
-		ebnf: 'SignedIdentifier ::= HyphenNot? Identifier',
-		description:
-			'Optional leading `-` immediately adjacent to an `Identifier` (`hyphen.endOffset + 1 === id.startOffset`), allowing unparenthesized negative numbers (`[score >= -10.5]`) and hyphen-prefixed filenames (`file:-draft`).',
+			'Leaf value on the right-hand side of `:`, comparison operators (`=`, `!=`, `<`, `<=`, `>`, `>=`), or inside value-level boolean expressions (`ValueNotExpr`), including negative numbers (`-10.5`) and hyphen-prefixed identifiers (`-draft`).',
 	},
 };
 
 const SECTIONS = [
 	{
 		title: '1. Top-Level Query & Document Boolean Expressions',
-		intro: 'These productions define top-level query entry, operator precedence (`OR` < `AND` < `NOT`/`-`), implicit conjunction, and atomic document filters.',
+		intro: 'These productions define top-level query entry, operator precedence (`OR` < `AND` < `NOT`/`!`), implicit conjunction, and atomic document filters.',
 		rules: [
 			'query',
 			'orExpression',
@@ -285,26 +270,18 @@ const SECTIONS = [
 	},
 	{
 		title: '2. Property Filters & Scoped Operators',
-		intro: 'Bracketed property filters (`[key]`, `[key: value]`, `[key op value]`) and `scope:value` operators share a common right-hand side production (`scopeOrPropRhs`).',
-		rules: ['propertyFilter', 'scopedOperator', 'scopeOrPropRhs'],
+		intro: 'Bracketed property filters (`[key]`, `[key: value]`, `[key op value]`) and `scope:value` operators delegate colon right-hand sides to `valueNotExpr` and comparison right-hand sides to `valueLeaf`.',
+		rules: ['propertyFilter', 'scopedOperator'],
 	},
 	{
-		title: '3. Parenthesized Value-Level Boolean Expressions',
-		intro: 'Inside `scope:(...)` or `[key:(...)]`, boolean operators combine value matchers within that scope or property without repeating the prefix.',
+		title: '3. Value-Level Boolean Expressions',
+		intro: 'On `:` right-hand sides and inside `scope:(...)` or `[key:(...)]`, boolean operators combine or negate value matchers within that scope or property without repeating the prefix.',
 		rules: ['valueOrExpr', 'valueAndExpr', 'valueNotExpr'],
 	},
 	{
 		title: '4. Keys, Scopes & Leaf Values',
-		intro: 'Terminal-level productions disambiguating property keys, scope identifiers, `#tag` shorthands, bare full-text terms, parenthesized unsigned leaves, and unparenthesized signed RHS leaves.',
-		rules: [
-			'propertyKey',
-			'scopeName',
-			'tagShorthand',
-			'bareLeafValue',
-			'unsignedValueLeaf',
-			'rhsLeafValue',
-			'signedIdentifier',
-		],
+		intro: 'Terminal-level productions disambiguating property keys, scope identifiers, `#tag` shorthands, bare full-text terms, and value leaves.',
+		rules: ['propertyKey', 'scopeName', 'tagShorthand', 'bareLeafValue', 'valueLeaf'],
 	},
 ];
 
@@ -378,7 +355,7 @@ export async function generateRailroadDocs() {
 		'- **Rectangular boxes** (purple) represent **non-terminal subrules** referencing another production in this document.',
 		'- **Syntactic Resource Limits**: Maximum query length is **`' +
 			MAX_QUERY_LENGTH +
-			'` UTF-16 code units**; maximum syntactic nesting depth across unary negation (`NOT` / `-`) and parenthesized groups (`(...)`) is **`' +
+			'` UTF-16 code units**; maximum syntactic nesting depth across unary negation (`NOT` / `!`) and parenthesized groups (`(...)`) is **`' +
 			MAX_SYNTACTIC_DEPTH +
 			'` levels**.',
 		'',

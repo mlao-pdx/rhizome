@@ -187,7 +187,7 @@ export function formatValueExprInner(expr: ValueExprAST, parentOp?: 'AND' | 'OR'
 				expr.child.type === 'VALUE_LOGICAL'
 					? `(${formatValueExprInner(expr.child)})`
 					: formatValueExprInner(expr.child, 'NOT');
-			return expr.syntax === '-' ? `-${child}` : `NOT ${child}`;
+			return expr.syntax === '!' ? `!${child}` : `NOT ${child}`;
 		}
 		case 'VALUE_LOGICAL': {
 			const joined = expr.children
@@ -245,7 +245,7 @@ export function lintQueryAST(
 							code: 'HINT_PROP_NEQ_EXISTENCE',
 							severity: 'hint',
 							issue: `"[${node.key} != ${rhsDisplay}]" requires "${node.key}" to exist.`,
-							hint: `To exclude notes (including notes missing "${node.key}"), use "-[${node.key} = ${rhsDisplay}]".`,
+							hint: `To exclude notes (including notes missing "${node.key}"), use "![${node.key} = ${rhsDisplay}]".`,
 							span: node.span ?? null,
 						});
 					} else if (node.operator === ':' && node.valueExpr !== undefined) {
@@ -321,25 +321,6 @@ export function lintQueryAST(
 
 			case 'LOGICAL': {
 				if (node.operator === 'AND') {
-					for (let i = 0; i < node.children.length - 1; i++) {
-						const child = node.children[i]!;
-						if (
-							child.type === 'TEXT_MATCH' &&
-							child.matcher.kind === 'string' &&
-							!child.matcher.quoted &&
-							child.rawText === '-'
-						) {
-							flaggedTextNodes.add(child);
-							diagnostics.push({
-								code: 'WARN_DANGEROUS_SPACED_HYPHEN',
-								severity: 'warning',
-								issue: 'A space after "-" prevents negation.',
-								hint: 'Use "-term" or "NOT term".',
-								span: child.span ?? null,
-							});
-						}
-					}
-
 					const seenByField = new Map<
 						SingleValuedField,
 						{ normalized: string; raw: string }
