@@ -28,7 +28,7 @@ function createTestConfig() {
 describe('explainQuery property invariants', () => {
 	const config = createTestConfig();
 
-	it('always produces all 3 Diátaxis sections and balanced code fences for any printable executable AST', () =>
+	it('always produces all required sections, spaced footnote definitions, and balanced code fences for any printable executable AST', () =>
 		assertProperty(
 			'core/search/explain-plan__printable-executable-ast-sections-and-fences',
 			fc.property(printableExecutableAstArb(config, PINNED_REF_MS), (ast) => {
@@ -36,11 +36,12 @@ describe('explainQuery property invariants', () => {
 				const md = explainQuery(query, config, PINNED_REF_MS);
 
 				expect(md).toContain('# Query Explain Plan');
-				expect(md).toContain('## Explanation — How This Query Matches Notes');
-				expect(md).toContain('## Reference — Execution Context & Resolution');
-				expect(md).toContain('## Troubleshooting & Diagnostics');
-				expect(md).toContain('**Status**: **Executable**');
-				expect(md).toContain('```mermaid\nflowchart TD');
+				expect(md).toContain('## Logic Breakdown');
+				expect(md).toContain('## Diagnostics');
+				expect(md).toContain('## Concept Reference');
+				expect(md).toContain('**Status**: *Executable* with 0 errors');
+				expect(md).toContain('```mermaid\ngantt');
+				expect(md).not.toContain('flowchart TD');
 
 				const fenceCount = (md.match(/^```/gm) ?? []).length;
 				expect(fenceCount % 2).toBe(0);
@@ -71,9 +72,10 @@ describe('explainQuery property invariants', () => {
 						refMs,
 					);
 					expect(typeof md).toBe('string');
-					expect(md).toContain('## Explanation — How This Query Matches Notes');
-					expect(md).toContain('## Reference — Execution Context & Resolution');
-					expect(md).toContain('## Troubleshooting & Diagnostics');
+					expect(md).toContain('# Query Explain Plan');
+					expect(md).toContain('## Logic Breakdown');
+					expect(md).toContain('## Diagnostics');
+					expect(md).toContain('## Concept Reference');
 				},
 			),
 		));

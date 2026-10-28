@@ -195,6 +195,7 @@ export interface MatchAllNode {
 export interface LogicalNode {
 	readonly type: 'LOGICAL';
 	readonly operator: 'AND' | 'OR';
+	readonly implicit?: boolean;
 	readonly parenthesized?: boolean;
 	readonly children: readonly SearchAST[];
 	readonly span?: SourceSpan;
@@ -215,10 +216,17 @@ export type ValueExprAST =
 	| {
 			readonly type: 'VALUE_LOGICAL';
 			readonly operator: 'AND' | 'OR';
+			readonly implicit?: boolean;
 			readonly children: readonly ValueExprAST[];
+			readonly span?: SourceSpan;
 	  }
-	| { readonly type: 'VALUE_NOT'; readonly syntax: 'NOT' | '-'; readonly child: ValueExprAST }
-	| { readonly type: 'VALUE_LEAF'; readonly matcher: LeafMatcher };
+	| {
+			readonly type: 'VALUE_NOT';
+			readonly syntax: 'NOT' | '-';
+			readonly child: ValueExprAST;
+			readonly span?: SourceSpan;
+	  }
+	| { readonly type: 'VALUE_LEAF'; readonly matcher: LeafMatcher; readonly span?: SourceSpan };
 
 export interface ScopedFilterNode {
 	readonly type: 'SCOPED_FILTER';

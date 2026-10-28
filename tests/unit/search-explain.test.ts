@@ -107,60 +107,124 @@ describe('explain-helpers', () => {
 		);
 	});
 
-	it('renders 1-based line and caret underline snippets for SourceSpan', () => {
+	it('renders 1-based line snippets enclosing the pertinent span with ‼️...‼️ markers', () => {
 		const snippet = formatSourceCaretSnippet('#work [priority = "bad"]', {
 			startOffset: 6,
 			endOffset: 24,
 			startLine: 1,
 			startColumn: 7,
 		});
-		expect(snippet).toBe('1 | #work [priority = "bad"]\n          ^^^^^^^^^^^^^^^^^^');
+		expect(snippet).toBe('1 | #work ‼️[priority = "bad"]‼️');
 	});
 });
 
 describe('explainQuery', () => {
-	it('renders all 3 Diátaxis sections and MATCH_ALL flowchart for an empty query', () => {
+	it('renders Header Context, Logic Breakdown, Diagnostics, and Concept Reference for an empty query', () => {
 		const cfg = makeConfig({ propertyTypes: {} });
 		const md = explainQuery('   ', cfg, REF_TIME_MS);
 
 		expect(md).toContain('# Query Explain Plan');
-		expect(md).toContain('## Explanation — How This Query Matches Notes');
-		expect(md).toContain('**Status**: **Executable** — 0 errors, 0 warnings, 0 hints.');
-		expect(md).toContain('Match All Notes (`MATCH_ALL`)');
-		expect(md).toContain('```mermaid\nflowchart TD');
-		expect(md).toContain('Match every note in vault');
-		expect(md).toContain('## Reference — Execution Context & Resolution');
-		expect(md).toContain('_No scoped or property filters in this query._');
-		expect(md).toContain('_None configured');
-		expect(md).toContain('## Troubleshooting & Diagnostics');
+		expect(md).toContain('- **Query**: _(empty query)_');
+		expect(md).toContain('- **Status**: *Executable* with 0 errors, 0 warnings, 0 hints.');
+		expect(md).toContain('  - `@now`: `2026-10-22T11:30:00-04:00` (`1792683000000` ms UTC)');
+		expect(md).toContain(
+			'  - `@today`: `[2026-10-22T00:00:00-04:00, 2026-10-23T00:00:00-04:00)`[^1]',
+		);
+		expect(md).toContain('  - **Timezone**: `America/New_York`[^2]');
+		expect(md).toContain('## Logic Breakdown');
+		expect(md).toContain(
+			'- _(empty query)_\n  Matches every Markdown note in the vault (`MATCH_ALL`).',
+		);
+		expect(md).toContain('## Diagnostics');
 		expect(md).toContain('> [!tip] No issues found');
+		expect(md).toContain('## Concept Reference');
+		expect(md).toContain('[^1]: **Half-Open Temporal Intervals');
+		expect(md).toContain('```mermaid\ngantt\n    title Half-Open Interval Comparisons');
+		expect(md).toContain('[^2]: **Timezone Resolution**');
+		expect(md).not.toContain('flowchart TD');
+		expect(md).not.toContain('## Reference — Execution Context & Resolution');
+
+		const customHeadingMd = explainQuery(
+			'#work',
+			cfg,
+			REF_TIME_MS,
+			'Active Projects — Explain Plan',
+		);
+		expect(customHeadingMd.startsWith('# Active Projects — Explain Plan\n')).toBe(true);
 	});
 
-	it('explains boolean precedence, scope aliases, compound ValueExprAST, and property operators', () => {
+	it('progressively shrinks query slices, distinguishes implicit vs explicit AND, uses italic emphasis, and emits numbered footnotes', () => {
 		const cfg = makeConfig();
 		const query =
-			'folder:projects #work/auth tag:(#urgent OR -#archived) [priority >= 2] [status != "done"] -( [done = true] OR "draft" )';
+			'folder:projects AND #work/auth tag:(#urgent -#archived) [priority >= 2] [status != "done"] -( [done = true] OR "draft" )';
 		const md = explainQuery(query, cfg, REF_TIME_MS);
 
-		expect(md).toContain('**Status**: **Executable**');
-		// Scope alias resolution
-		expect(md).toContain('(`folder:` is an alias for `path:`)');
-		expect(md).toContain('**Tag filter** `#work/auth`');
-		// Compound ValueExprAST explanation
-		expect(md).toContain('The note has **at least one tag** where that single tag matches:');
-		expect(md).toContain('**Either / any (`OR`)**');
-		expect(md).toContain('**Not (`-`)**: Does **not** match:');
-		// Plain-English != phrasing & existence tip
-		expect(md).toContain('whose value does not equal `"done"` (case-insensitive)');
+		expect(md).toContain(`- **Query**: \`${query}\``);
+		expect(md).toContain('- **Status**: *Executable* with 0 errors, 0 warnings, 2 hints.');
+		expect(md).toContain(`- \`${query}\``);
+		expect(md).toContain('Matches notes where *all* of the following hold (`AND`):');
+		// Scope alias + numbered footnote
 		expect(md).toContain(
-			'*Tip: `[status != ...]` only matches notes that have a `status` property. To also include notes without `status`, use `-[status = ...]`.*',
+			'- `folder:projects`\n    At least one `path`[^3] (alias for `path:`) contains `projects` (case-insensitive).',
 		);
-		expect(md).toContain('case-insensitive inequality (`!=`, does not equal `"done"`)');
-		// Hint callout for != existence
-		expect(md).toContain('HINT: `HINT_PROP_NEQ_EXISTENCE`');
+		// Tag shorthand + numbered footnote
+		expect(md).toContain(
+			'- `#work/auth`\n    At least one `tag`[^4] is `#work/auth` or a nested tag under `#work/auth/...` (case-insensitive).',
+		);
+		// Compound ValueExprAST with progressive shrinking and implicit AND (reusing [^4] for tag)
+		expect(md).toContain('- `tag:(#urgent -#archived)`\n    At least one `tag`[^4] satisfies:');
+		expect(md).toContain(
+			'  - `(#urgent -#archived)`\n      *All* of the following on that same tag (implicit `AND`):',
+		);
+		expect(md).toContain(
+			'    - `#urgent`\n        Is `#urgent` or a nested tag under `#urgent/...` (case-insensitive).',
+		);
+		expect(md).toContain('    - `-#archived`\n        Does *not* match (`-` / `NOT`):');
+		expect(md).toContain(
+			'      - `#archived`\n          Is `#archived` or a nested tag under `#archived/...` (case-insensitive).',
+		);
+		// Property operators without repeating operator symbols (`>=`, `!=`)
+		expect(md).toContain('- `[priority >= 2]`\n    `priority`[^5] is at least `2`.');
+		expect(md).toContain(
+			'- `[status != "done"]`\n    `status`[^6] does not equal `"done"` (case-insensitive). · [^7]',
+		);
+		expect(md).not.toContain('(`>= 2`)');
+		expect(md).not.toContain('(`!=`,');
+		// Note-level NOT and OR shrinking
+		expect(md).toContain(
+			'- `-( [done = true] OR "draft" )`\n    Excludes notes matching (`-` / `NOT`):',
+		);
+		expect(md).toContain(
+			'  - `( [done = true] OR "draft" )`\n      Matches notes where *any* of the following hold (`OR`):',
+		);
+		expect(md).toContain('    - `[done = true]`\n        `done`[^8] is `true`.');
+		expect(md).toContain(
+			'    - `"draft"`\n        Note metadata ([^9]) contains `draft` (case-insensitive). · [^10]',
+		);
+
+		// Diagnostics section immediately follows Logic Breakdown
+		const logicIdx = md.indexOf('## Logic Breakdown');
+		const diagIdx = md.indexOf('## Diagnostics');
+		const refIdx = md.indexOf('## Concept Reference');
+		expect(logicIdx).toBeGreaterThan(-1);
+		expect(diagIdx).toBeGreaterThan(logicIdx);
+		expect(refIdx).toBeGreaterThan(diagIdx);
+
+		expect(md).toContain('> [!info] Hint 1: `HINT_PROP_NEQ_EXISTENCE`');
+		expect(md).toContain('‼️[status != "done"]‼️');
+		expect(md).toContain('> [!info] Hint 2: `HINT_BARE_TEXT_NO_BODY`');
+		expect(md).toContain('‼️"draft"‼️');
+
+		// Concept Reference separates each numbered footnote definition with an empty line (\n\n)
+		const refSection = md.slice(refIdx);
+		for (let i = 1; i <= 10; i++) {
+			expect(refSection).toMatch(new RegExp(`^\\[\\^${i}\\]: `, 'm'));
+		}
+		expect(refSection).toContain('title Half-Open Interval Comparisons');
+		expect(refSection).toContain('Note starts before and ends after');
 	});
 
-	it('resolves temporal windows in the configured timezone for relative and ISO range expressions', () => {
+	it('resolves temporal windows in the configured timezone and links numbered footnotes', () => {
 		const cfg = makeConfig({ timeZone: 'Asia/Tokyo' });
 		const md = explainQuery(
 			'[due = @today] [updated >= 2026-01-01..2026-06-30] [file.modified < @thisweek]',
@@ -168,18 +232,18 @@ describe('explainQuery', () => {
 			REF_TIME_MS,
 		);
 
-		expect(md).toContain('**Status**: **Executable**');
-		expect(md).toContain('Asia/Tokyo');
-		expect(md).toContain('`day` window');
-		expect(md).toContain('`range` window');
-		expect(md).toContain('`week` window');
-		expect(md).toContain('virtual (file.*)');
-		expect(md).toContain('D.start >= Q.start && D.end <= Q.end');
-		expect(md).toContain('D.start >= Q.start');
-		expect(md).toContain('D.end <= Q.start');
+		expect(md).toContain('- **Status**: *Executable* with 0 errors, 0 warnings, 0 hints.');
+		expect(md).toContain('  - **Timezone**: `Asia/Tokyo`[^2]');
+		expect(md).toContain('Matches notes where *all* of the following hold (implicit `AND`):');
+		expect(md).toContain('`due`[^3] falls within');
+		expect(md).toContain('`updated`[^4] is on or after');
+		expect(md).toContain('`file.modified`[^5] is before');
+		expect(md).toContain('[^3]: **Configured `date` Property**');
+		expect(md).toContain('[^4]: **Configured `datetime` Property**');
+		expect(md).toContain('[^5]: **Predetermined Property (`file.modified`)**');
 	});
 
-	it('renders the Regular Expressions reference table with regex101 links and raw-string notes', () => {
+	it('renders regex values as direct links to regex101 with flavor=javascript, regex, and flags preselected', () => {
 		const cfg = makeConfig();
 		const md = explainQuery(
 			'/^roadmap/i path:/^projects\\// [priority:/^10$/] [status:/todo|doing/i]',
@@ -187,18 +251,21 @@ describe('explainQuery', () => {
 			REF_TIME_MS,
 		);
 
-		expect(md).toContain('### Regular Expressions');
-		expect(md).toContain('https://regex101.com/?flavor=javascript&regex=');
-		expect(md).toContain('regular expression match; rhs: `/^projects\\//`');
+		const roadmapUrl = buildRegex101Url('^roadmap', 'i');
+		const projectsUrl = buildRegex101Url('^projects\\/', '');
+		const prioUrl = buildRegex101Url('^10$', '');
+		const statusUrl = buildRegex101Url('todo|doing', 'i');
+
+		expect(md).toContain(`[\`/^roadmap/i\`](${roadmapUrl})[^4]`);
+		expect(md).toContain(`[\`/^projects\\//\`](${projectsUrl})[^4]`);
 		expect(md).toContain(
-			'Property `priority` (`number`) — tested against raw authored string `entry.raw`',
+			`\`priority\`[^7] has raw text matching [\`/^10$/\`](${prioUrl})[^4].`,
 		);
-		expect(md).toContain(
-			'Property `status` (`text`) — tested against normalized string `entry.value`',
-		);
+		expect(md).toContain(`\`status\`[^8] matches [\`/todo|doing/i\`](${statusUrl})[^4].`);
+		expect(md).toContain('[^4]: **Regular Expression Evaluation**');
 	});
 
-	it('preserves the best-effort AST explanation, Mermaid chart, and Reference tables on semantic errors', () => {
+	it('preserves the best-effort Logic Breakdown and attaches numbered diagnostic links on semantic errors', () => {
 		const cfg = makeConfig();
 		const md = explainQuery(
 			'bogus:value [priority = "nan"] [done > true] [unconfigured_prop = "ok"]',
@@ -206,31 +273,35 @@ describe('explainQuery', () => {
 			REF_TIME_MS,
 		);
 
-		expect(md).toContain('**Status**: **Not Executable** (3 errors)');
-		// AST & Mermaid still rendered
-		expect(md).toContain('### Plain-English Logic Breakdown');
-		expect(md).toContain('### Logic Flowchart');
-		expect(md).toContain('```mermaid');
-		expect(md).toContain('❌ **Unknown Scope Filter** `bogus:value`');
+		expect(md).toContain('- **Status**: *Not Executable* with 3 errors, 0 warnings, 0 hints.');
+		expect(md).toContain('## Logic Breakdown');
+		expect(md).toContain('- `bogus:value`\n    ❌ Unknown search scope `bogus:`. · [^3]');
 		expect(md).toContain(
-			'❌ `true` — ordering operator `>` cannot be used on `checkbox` properties',
+			'- `[priority = "nan"]`\n    ❌ `priority`[^4] ❌ `"nan"` (expected an unquoted number such as `42` or `-3.5`). · [^5]',
 		);
-		expect(md).toContain('`unconfigured_prop`');
-		expect(md).toContain("default fallback ('text')");
-		// Diagnostics section
-		expect(md).toContain('> [!danger] ERROR: `ERROR_UNKNOWN_SCOPE`');
-		expect(md).toContain('> [!danger] ERROR: `ERROR_TYPE_MISMATCH`');
-		expect(md).toContain('> [!danger] ERROR: `ERROR_INVALID_OPERATOR_FOR_TYPE`');
+		expect(md).toContain(
+			'- `[done > true]`\n    ❌ `done`[^6] ❌ `true` (ordering comparison is not supported on `checkbox` properties). · [^7]',
+		);
+		expect(md).toContain(
+			'- `[unconfigured_prop = "ok"]`\n    `unconfigured_prop`[^8] equals `"ok"` (case-insensitive).',
+		);
+		expect(md).toContain('[^8]: **Untyped Property (Default `text`)**');
+		expect(md).toContain('> [!danger] Error 1: `ERROR_UNKNOWN_SCOPE`');
+		expect(md).toContain('‼️bogus:value‼️');
+		expect(md).toContain('> [!danger] Error 2: `ERROR_TYPE_MISMATCH`');
+		expect(md).toContain('‼️[priority = "nan"]‼️');
+		expect(md).toContain('> [!danger] Error 3: `ERROR_INVALID_OPERATOR_FOR_TYPE`');
+		expect(md).toContain('‼️[done > true]‼️');
 	});
 
 	it('handles syntax errors, invalid EngineConfig, and invalid referenceTimeMs gracefully', () => {
 		const badSyntaxMd = explainQuery('tag:(#a OR', makeConfig(), REF_TIME_MS);
-		expect(badSyntaxMd).toContain('**Status**: **Not Executable**');
+		expect(badSyntaxMd).toContain('- **Query**: `tag:(#a OR`');
+		expect(badSyntaxMd).toContain('- **Status**: *Not Executable* with 1 error');
 		expect(badSyntaxMd).toContain(
 			'This query could not be parsed into an execution tree because of a syntax or query-length error.',
 		);
-		expect(badSyntaxMd).not.toContain('```mermaid');
-		expect(badSyntaxMd).toContain('> [!danger] ERROR: `SYNTAX_ERROR`');
+		expect(badSyntaxMd).toContain('> [!danger] Error 1: `SYNTAX_ERROR`');
 
 		const badConfigMd = explainQuery(
 			'#work [priority: (1 OR 2)] [due = @today]',
@@ -240,19 +311,17 @@ describe('explainQuery', () => {
 			},
 			Number.NaN,
 		);
-		expect(badConfigMd).toContain('**Status**: **Not Executable**');
-		expect(badConfigMd).toContain('> [!danger] ERROR: `ERROR_INVALID_CONFIG`');
+		expect(badConfigMd).toContain('- **Status**: *Not Executable* with 3 errors');
+		expect(badConfigMd).toContain('> [!danger] Error 1: `ERROR_INVALID_CONFIG`');
 		expect(badConfigMd).toContain('Mars/Phobos');
-		expect(badConfigMd).toContain('Invalid reference timestamp');
+		expect(badConfigMd).toContain('Invalid `referenceTimeMs`');
 		expect(badConfigMd).toContain(
 			'resolved against fallback epoch `0` because `referenceTimeMs` is invalid',
 		);
-		// Best-effort AST still rendered with fallback UTC config
-		expect(badConfigMd).toContain('### Plain-English Logic Breakdown');
-		expect(badConfigMd).toContain('```mermaid');
+		expect(badConfigMd).toContain('## Logic Breakdown');
 	});
 
-	it('escapes pipes, quotes, backticks, and angle brackets in Mermaid labels and Markdown tables while keeping parentheses and brackets readable', () => {
+	it('safely fences backticks and special characters in inline code and regex links', () => {
 		const cfg = makeConfig();
 		const md = explainQuery(
 			'file:"a|b<c>`d`[e]" tag:"x`y" blocks:"^id`1" ["prop`key" != "val"] [status: (/foo|bar/ OR "x|y")]',
@@ -260,15 +329,11 @@ describe('explainQuery', () => {
 			REF_TIME_MS,
 		);
 
-		expect(md).toContain('&quot;');
-		expect(md).toContain('&lt;');
-		expect(md).toContain('&gt;');
-		expect(md).toContain('&#96;');
-		expect(md).toContain('\\|');
 		expect(md).toContain('``#x`y``');
 		expect(md).toContain('``^id`1``');
 		expect(md).toContain('``prop`key``');
-		expect(md).not.toContain('&#40;');
-		expect(md).not.toContain('&#91;');
+		expect(md).toContain(
+			'[`/foo|bar/`](https://regex101.com/?flavor=javascript&regex=foo%7Cbar&flags=)',
+		);
 	});
 });

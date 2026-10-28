@@ -1,20 +1,27 @@
+import { Temporal } from '@js-temporal/polyfill';
 import { initEngineConfig } from './config';
+import {
+	FootnoteRegistry,
+	refBareScopeFootnote,
+	refDiagnosticFootnote,
+	refIntervalFootnote,
+	refPropertyFootnote,
+	refRegexFootnote,
+	refScopeFootnote,
+	refTimezoneFootnote,
+} from './explain-concepts';
 import {
 	buildRegex101Url,
 	describeScopeSemantics,
-	describeVirtualFileKey,
-	escapeMarkdownTableCell,
-	formatAuthoredFilter,
+	extractAstSlice,
+	extractValueExprSlice,
 	formatDateIntervalWindow,
 	formatEpochTimestamp,
 	formatInlineCode,
 	formatLeafMatcher,
-	formatScopeRhsDisplay,
 	formatSourceCaretSnippet,
 	resolvePropertyTypeWithOrigin,
-	type ResolvedPropertyTypeInfo,
 } from './explain-helpers';
-import { renderExplainMermaid } from './explain-mermaid';
 import { lintQueryAST } from './linter';
 import { validateRegexLiteral } from './literals';
 import { parseAndLowerQuery } from './parser';
@@ -33,16 +40,10 @@ import {
 	type ScopedFilterNode,
 	type SearchAST,
 	type SearchDiagnostic,
+	type SourceSpan,
 	type ValueExprAST,
 } from './types';
 import { suggestScopeHint, validateQueryAST } from './validator';
-
-interface RegexReferenceEntry {
-	readonly literal: string;
-	readonly contextDesc: string;
-	readonly valid: boolean;
-	readonly url: string;
-}
 
 function isResolvedEngineConfig(
 	cfg: ResolvedEngineConfig | EngineConfig,
@@ -74,10 +75,23 @@ function buildFallbackResolvedConfig(raw: EngineConfig): ResolvedEngineConfig {
 	return minimal.config;
 }
 
-function formatRegexLink(matcher: Extract<LeafMatcher, { kind: 'regex' }>): string {
+function formatLocalIsoWithOffset(epochMs: number, timeZone: string): string {
+	try {
+		const zdt = Temporal.Instant.fromEpochMilliseconds(epochMs).toZonedDateTimeISO(timeZone);
+		return zdt.toString({ timeZoneName: 'never' });
+	} catch {
+		return formatEpochTimestamp(epochMs, timeZone).utcIso;
+	}
+}
+
+function formatDirectRegexLink(
+	matcher: Extract<LeafMatcher, { kind: 'regex' }>,
+	footnotes: FootnoteRegistry,
+): string {
 	const literal = formatLeafMatcher(matcher);
 	const url = buildRegex101Url(matcher.pattern, matcher.flags);
-	return `${formatInlineCode(literal)} ([Explain on regex101 ↗](${url}))`;
+	const fn = refRegexFootnote(footnotes);
+	return `[${formatInlineCode(literal)}](${url})${fn}`;
 }
 
 function capitalizeFirst(text: string): string {
@@ -85,22 +99,8 @@ function capitalizeFirst(text: string): string {
 	return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
-function formatFriendlyTypeNote(typeInfo: ResolvedPropertyTypeInfo): string {
-	switch (typeInfo.origin) {
-		case 'virtual':
-			return `built-in file metadata, type \`${typeInfo.type}\``;
-		case 'built-in':
-			return `built-in Obsidian property, type \`${typeInfo.type}\``;
-		case 'configured':
-			return `configured as \`${typeInfo.type}\``;
-		case 'default':
-			return `unconfigured property, defaults to \`text\``;
-	}
-}
-
-interface PropertyLeafExplanation {
-	readonly plainEnglish: string;
-	readonly reference: string;
+function spanKey(span: SourceSpan): string {
+	return `${span.startOffset}:${span.endOffset}`;
 }
 
 function describePropertyLeaf(
@@ -108,28 +108,23 @@ function describePropertyLeaf(
 	propType: ObsidianPropertyType,
 	operator: PropertyOperator,
 	timeZone: string,
+	configuredTimeZone: string,
+	tzValid: boolean,
 	referenceTimeMs: number,
 	validRefTime: boolean,
-): PropertyLeafExplanation {
+	todayLocalWindow: string | undefined,
+	footnotes: FootnoteRegistry,
+): string {
 	if (matcher.kind === 'regex') {
 		const valid = validateRegexLiteral(matcher.pattern, matcher.flags) !== null;
-		const link = formatRegexLink(matcher);
+		const link = formatDirectRegexLink(matcher, footnotes);
 		if (operator !== ':' || propType === 'checkbox') {
-			return {
-				plainEnglish: `❌ ${link} — regular expressions cannot be used with operator \`${operator}\` on \`${propType}\` properties`,
-				reference: `❌ ${link} — regular expressions cannot be used with operator \`${operator}\` on \`${propType}\``,
-			};
+			return `❌ ${link} (regular expressions cannot be used with this operator on \`${propType}\` properties)`;
 		}
 		const isRawTarget = propType === 'number' || propType === 'date' || propType === 'datetime';
-		const targetDesc = isRawTarget
-			? `raw authored string (\`entry.raw\`) of \`${propType}\``
-			: `\`${propType}\` value`;
-		return {
-			plainEnglish: isRawTarget
-				? `${valid ? 'has raw text matching' : '❌ invalid regex'} ${link}`
-				: `${valid ? 'matches regular expression' : '❌ invalid regex'} ${link}`,
-			reference: `${valid ? '' : '❌ Invalid regex: '}${link} tested against ${targetDesc}`,
-		};
+		return isRawTarget
+			? `${valid ? 'has raw text matching' : '❌ invalid regex'} ${link}`
+			: `${valid ? 'matches' : '❌ invalid regex'} ${link}`;
 	}
 
 	const rawLit = formatInlineCode(formatLeafMatcher(matcher));
@@ -141,57 +136,37 @@ function describePropertyLeaf(
 				STRICT_NUMBER_RE.test(trimmed) &&
 				Number.isFinite(Number(trimmed));
 			if (!ok) {
-				return {
-					plainEnglish: `❌ ${rawLit} (expected an unquoted number such as \`42\` or \`-3.5\`)`,
-					reference: `❌ ${rawLit} (not a valid unquoted finite number)`,
-				};
+				return `❌ ${rawLit} (expected an unquoted number such as \`42\` or \`-3.5\`)`;
 			}
 			const num = Number(trimmed);
-			let plainEnglish: string;
 			switch (operator) {
 				case ':':
 				case '=':
-					plainEnglish = `equals \`${num}\``;
-					break;
+					return `equals \`${num}\``;
 				case '!=':
-					plainEnglish = `does not equal \`${num}\``;
-					break;
+					return `does not equal \`${num}\``;
 				case '<':
-					plainEnglish = `is less than \`${num}\``;
-					break;
+					return `is less than \`${num}\``;
 				case '<=':
-					plainEnglish = `is at most \`${num}\` (\`<= ${num}\`)`;
-					break;
+					return `is at most \`${num}\``;
 				case '>':
-					plainEnglish = `is greater than \`${num}\``;
-					break;
+					return `is greater than \`${num}\``;
 				case '>=':
-					plainEnglish = `is at least \`${num}\` (\`>= ${num}\`)`;
-					break;
+					return `is at least \`${num}\``;
 				default:
-					plainEnglish = `matches \`${num}\``;
-					break;
+					return `matches \`${num}\``;
 			}
-			return {
-				plainEnglish,
-				reference: `${rawLit} → numeric \`${num}\` (\`entry.value ${operator === ':' ? '=' : operator} ${num}\`)`,
-			};
 		}
 		case 'checkbox': {
 			if (operator === '<' || operator === '>' || operator === '<=' || operator === '>=') {
-				const msg = `❌ ${rawLit} — ordering operator \`${operator}\` cannot be used on \`checkbox\` properties`;
-				return { plainEnglish: msg, reference: msg };
+				return `❌ ${rawLit} (ordering comparison is not supported on \`checkbox\` properties)`;
 			}
 			const lower = matcher.value.trim().toLowerCase();
 			const ok = !matcher.quoted && (lower === 'true' || lower === 'false');
 			if (!ok) {
-				const msg = `❌ ${rawLit} (checkbox requires unquoted \`true\` or \`false\`)`;
-				return { plainEnglish: msg, reference: msg };
+				return `❌ ${rawLit} (checkbox requires unquoted \`true\` or \`false\`)`;
 			}
-			return {
-				plainEnglish: operator === '!=' ? `is not \`${lower}\`` : `is \`${lower}\``,
-				reference: `${rawLit} → boolean \`${lower}\` (\`entry.value ${operator === ':' ? '=' : operator} ${lower}\`)`,
-			};
+			return operator === '!=' ? `is not \`${lower}\`` : `is \`${lower}\``;
 		}
 		case 'date':
 		case 'datetime': {
@@ -202,148 +177,84 @@ function describePropertyLeaf(
 				referenceTimeMs,
 			});
 			if (!res.ok) {
-				const msg = `❌ ${rawLit} (invalid ${propType} expression: \`${res.reason}\`)`;
-				return { plainEnglish: msg, reference: msg };
+				return `❌ ${rawLit} (invalid ${propType} expression: \`${res.reason}\`)`;
 			}
 			const win = formatDateIntervalWindow(res.interval, operator, timeZone);
+			const startIso = formatLocalIsoWithOffset(res.interval.start, timeZone);
+			const endIso = formatLocalIsoWithOffset(res.interval.end, timeZone);
+			const intervalCode = formatInlineCode(`[${startIso}, ${endIso})`);
+			const intervalFn = refIntervalFootnote(footnotes, todayLocalWindow);
+			const tzFn = refTimezoneFootnote(footnotes, timeZone, configuredTimeZone, tzValid);
 			const fallbackNote =
 				!validRefTime && /(?:^|\.\.)\s*@/.test(matcher.value.trim())
 					? ' *(resolved against fallback epoch `0` because `referenceTimeMs` is invalid)*'
 					: '';
-			return {
-				plainEnglish: `${win.plainEnglish}${fallbackNote}`,
-				reference: `${rawLit} → \`${win.grain}\` window \`${win.localWindow}\` (UTC \`${win.utcWindow}\`; matches when \`${win.inequality}\`, i.e. ${win.description})${fallbackNote}`,
-			};
+			switch (operator) {
+				case ':':
+				case '=':
+					return `falls within ${intervalCode}${intervalFn} (in ${formatInlineCode(timeZone)}${tzFn})${fallbackNote}`;
+				case '!=':
+					return `is outside ${intervalCode}${intervalFn} (in ${formatInlineCode(timeZone)}${tzFn})${fallbackNote}`;
+				default:
+					return `${win.plainEnglish} (expanded window ${intervalCode}${intervalFn}${tzFn})${fallbackNote}`;
+			}
 		}
 		case 'tags': {
 			const normTag = normalizeTagBody(matcher.value);
 			const hashTagCode = formatInlineCode(`#${normTag}`);
 			const subTagCode = formatInlineCode(`#${normTag}/...`);
-			let plainEnglish: string;
-			let reference: string;
 			switch (operator) {
 				case ':':
-					plainEnglish = `is ${hashTagCode} (or a subtag like ${subTagCode}, case-insensitive)`;
-					reference = `${rawLit} → hierarchical tag match on ${hashTagCode} (matches ${hashTagCode} or ${subTagCode})`;
-					break;
+					return `is ${hashTagCode} or a nested tag under ${subTagCode} (case-insensitive)`;
 				case '=':
-					plainEnglish = `equals tag ${hashTagCode} (exact match, excluding subtags)`;
-					reference = `${rawLit} → exact normalized tag equality (${formatInlineCode(`tag = #${normTag}`)})`;
-					break;
+					return `equals exact tag ${hashTagCode} (case-insensitive)`;
 				case '!=':
-					plainEnglish = `does not equal tag ${hashTagCode}`;
-					reference = `${rawLit} → normalized tag inequality (${formatInlineCode(`tag != #${normTag}`)})`;
-					break;
+					return `does not equal exact tag ${hashTagCode} (case-insensitive)`;
 				case '<':
-					plainEnglish = `comes alphabetically before tag ${hashTagCode}`;
-					reference = `${rawLit} → alphabetical tag comparison (${formatInlineCode(`tag < #${normTag}`)})`;
-					break;
+					return `comes alphabetically before tag ${hashTagCode} (case-insensitive)`;
 				case '<=':
-					plainEnglish = `comes alphabetically at or before tag ${hashTagCode}`;
-					reference = `${rawLit} → alphabetical tag comparison (${formatInlineCode(`tag <= #${normTag}`)})`;
-					break;
+					return `comes alphabetically at or before tag ${hashTagCode} (case-insensitive)`;
 				case '>':
-					plainEnglish = `comes alphabetically after tag ${hashTagCode}`;
-					reference = `${rawLit} → alphabetical tag comparison (${formatInlineCode(`tag > #${normTag}`)})`;
-					break;
+					return `comes alphabetically after tag ${hashTagCode} (case-insensitive)`;
 				case '>=':
-					plainEnglish = `comes alphabetically at or after tag ${hashTagCode}`;
-					reference = `${rawLit} → alphabetical tag comparison (${formatInlineCode(`tag >= #${normTag}`)})`;
-					break;
+					return `comes alphabetically at or after tag ${hashTagCode} (case-insensitive)`;
 				default:
-					plainEnglish = `matches tag ${hashTagCode}`;
-					reference = `${rawLit} → tag comparison (${formatInlineCode(`tag ${operator} #${normTag}`)})`;
-					break;
+					return `matches tag ${hashTagCode} (case-insensitive)`;
 			}
-			return { plainEnglish, reference };
 		}
 		case 'text':
 		case 'multitext': {
-			let plainEnglish: string;
-			let reference: string;
 			switch (operator) {
 				case ':':
-					plainEnglish = `contains ${rawLit} (case-insensitive)`;
-					reference = `${rawLit} → case-insensitive substring match`;
-					break;
+					return `contains ${rawLit} (case-insensitive)`;
 				case '=':
-					plainEnglish = `equals ${rawLit} (case-insensitive)`;
-					reference = `${rawLit} → case-insensitive equality (\`=\`)`;
-					break;
+					return `equals ${rawLit} (case-insensitive)`;
 				case '!=':
-					plainEnglish = `does not equal ${rawLit} (case-insensitive)`;
-					reference = `${rawLit} → case-insensitive inequality (\`!=\`, does not equal ${rawLit})`;
-					break;
+					return `does not equal ${rawLit} (case-insensitive)`;
 				case '<':
-					plainEnglish = `comes alphabetically before ${rawLit} (case-insensitive)`;
-					reference = `${rawLit} → case-insensitive alphabetical comparison (\`<\`)`;
-					break;
+					return `comes alphabetically before ${rawLit} (case-insensitive)`;
 				case '<=':
-					plainEnglish = `comes alphabetically at or before ${rawLit} (case-insensitive)`;
-					reference = `${rawLit} → case-insensitive alphabetical comparison (\`<=\`)`;
-					break;
+					return `comes alphabetically at or before ${rawLit} (case-insensitive)`;
 				case '>':
-					plainEnglish = `comes alphabetically after ${rawLit} (case-insensitive)`;
-					reference = `${rawLit} → case-insensitive alphabetical comparison (\`>\`)`;
-					break;
+					return `comes alphabetically after ${rawLit} (case-insensitive)`;
 				case '>=':
-					plainEnglish = `comes alphabetically at or after ${rawLit} (case-insensitive)`;
-					reference = `${rawLit} → case-insensitive alphabetical comparison (\`>=\`)`;
-					break;
+					return `comes alphabetically at or after ${rawLit} (case-insensitive)`;
 				default:
-					plainEnglish = `matches ${rawLit}`;
-					reference = `${rawLit} → case-insensitive comparison (\`${operator}\`)`;
-					break;
+					return `matches ${rawLit}`;
 			}
-			return { plainEnglish, reference };
-		}
-	}
-}
-
-function renderValueExprBullets(
-	expr: ValueExprAST,
-	indent: string,
-	targetNoun: string,
-	leafFormatter: (matcher: LeafMatcher) => string,
-	out: string[],
-): void {
-	switch (expr.type) {
-		case 'VALUE_LEAF':
-			out.push(`${indent}- ${capitalizeFirst(leafFormatter(expr.matcher))}`);
-			return;
-		case 'VALUE_NOT':
-			if (expr.child.type === 'VALUE_LEAF') {
-				out.push(
-					`${indent}- **Not (\`${expr.syntax}\`)**: Does **not** match: ${leafFormatter(expr.child.matcher)}`,
-				);
-			} else {
-				out.push(
-					`${indent}- **Not (\`${expr.syntax}\`)**: Does **not** match the following:`,
-				);
-				renderValueExprBullets(expr.child, `${indent}  `, targetNoun, leafFormatter, out);
-			}
-			return;
-		case 'VALUE_LOGICAL': {
-			const opDesc =
-				expr.operator === 'AND'
-					? `**Both / all on that same ${targetNoun} (\`AND\`)**:`
-					: `**Either / any (\`OR\`)**:`;
-			out.push(`${indent}- ${opDesc}`);
-			for (const child of expr.children) {
-				renderValueExprBullets(child, `${indent}  `, targetNoun, leafFormatter, out);
-			}
-			return;
 		}
 	}
 }
 
 /**
- * Generates a 3-section Diátaxis Markdown explanation plan for a search query without scanning vault notes.
+ * Generates a progressive-shrinking Markdown explanation plan with inline footnotes and a
+ * `## Concept Reference` section for a search query without scanning vault notes.
  */
 export function explainQuery(
 	input: string,
 	configOrResolved: ResolvedEngineConfig | EngineConfig,
 	referenceTimeMs: number,
+	heading = 'Query Explain Plan',
 ): string {
 	const configDiagnostics: SearchDiagnostic[] = [];
 	let resolvedConfig: ResolvedEngineConfig | null = null;
@@ -369,6 +280,7 @@ export function explainQuery(
 		}
 	}
 
+	const tzValid = resolvedConfig !== null;
 	const validRefTime = isValidReferenceTimeMs(referenceTimeMs);
 	const refTimeDiagnostics: SearchDiagnostic[] = validRefTime
 		? []
@@ -404,52 +316,35 @@ export function explainQuery(
 		lintDiagnostics = lintQueryAST(resolvedAst, invalidPropertyNodes, effectiveConfig);
 	}
 
-	const regexEntries: RegexReferenceEntry[] = [];
-	const filterNodes: Array<ScopedFilterNode | PropertyFilterNode> = [];
-
-	function collectAstMetadata(node: SearchAST): void {
+	function collectAstFlags(node: SearchAST): void {
 		switch (node.type) {
 			case 'MATCH_ALL':
 				return;
 			case 'LOGICAL':
-				for (const child of node.children) collectAstMetadata(child);
+				for (const c of node.children) collectAstFlags(c);
 				return;
 			case 'NOT':
-				collectAstMetadata(node.child);
+				collectAstFlags(node.child);
 				return;
 			case 'TEXT_MATCH':
-				if (node.matcher.kind === 'regex') {
-					const valid =
-						validateRegexLiteral(node.matcher.pattern, node.matcher.flags) !== null;
-					if (!valid) invalidRegexNodes.add(node);
-					regexEntries.push({
-						literal: formatLeafMatcher(node.matcher),
-						contextDesc:
-							'Bare regex — tested against `file.basename`, `file.path`, `aliases`, and `tags` (note body is never searched)',
-						valid,
-						url: buildRegex101Url(node.matcher.pattern, node.matcher.flags),
-					});
+				if (
+					node.matcher.kind === 'regex' &&
+					validateRegexLiteral(node.matcher.pattern, node.matcher.flags) === null
+				) {
+					invalidRegexNodes.add(node);
 				}
 				return;
 			case 'SCOPED_FILTER': {
-				filterNodes.push(node);
 				if (node.rawScope !== '#' && !effectiveConfig.getScope(node.rawScope)) {
 					unknownScopeNodes.add(node);
 				}
-				const sem = describeScopeSemantics(node.scope);
 				const visitExpr = (expr: ValueExprAST): void => {
 					if (expr.type === 'VALUE_LEAF') {
-						if (expr.matcher.kind === 'regex') {
-							const valid =
-								validateRegexLiteral(expr.matcher.pattern, expr.matcher.flags) !==
-								null;
-							if (!valid) invalidRegexNodes.add(node);
-							regexEntries.push({
-								literal: formatLeafMatcher(expr.matcher),
-								contextDesc: `Scope \`${node.scope}\` — tested against ${sem.targetsDescription}`,
-								valid,
-								url: buildRegex101Url(expr.matcher.pattern, expr.matcher.flags),
-							});
+						if (
+							expr.matcher.kind === 'regex' &&
+							validateRegexLiteral(expr.matcher.pattern, expr.matcher.flags) === null
+						) {
+							invalidRegexNodes.add(node);
 						}
 					} else if (expr.type === 'VALUE_NOT') {
 						visitExpr(expr.child);
@@ -461,39 +356,14 @@ export function explainQuery(
 				return;
 			}
 			case 'PROPERTY_FILTER': {
-				filterNodes.push(node);
 				if (!node.valueExpr) return;
-				const typeInfo = resolvePropertyTypeWithOrigin(
-					node.key,
-					effectiveConfig.propertyTypes,
-				);
-				const keyCode = formatInlineCode(node.key);
 				const visitExpr = (expr: ValueExprAST): void => {
 					if (expr.type === 'VALUE_LEAF') {
-						if (expr.matcher.kind === 'regex') {
-							const valid =
-								validateRegexLiteral(expr.matcher.pattern, expr.matcher.flags) !==
-								null;
-							if (!valid) invalidRegexNodes.add(node);
-							let targetNote: string;
-							if (node.operator !== ':' || typeInfo.type === 'checkbox') {
-								targetNote = `Property ${keyCode} (\`${typeInfo.type}\`) — ❌ unsupported with operator \`${node.operator}\` on \`${typeInfo.type}\``;
-							} else if (
-								typeInfo.type === 'number' ||
-								typeInfo.type === 'date' ||
-								typeInfo.type === 'datetime'
-							) {
-								targetNote = `Property ${keyCode} (\`${typeInfo.type}\`) — tested against raw authored string \`entry.raw\``;
-							} else {
-								targetNote = `Property ${keyCode} (\`${typeInfo.type}\`) — tested against normalized string \`entry.value\``;
-							}
-							regexEntries.push({
-								literal: formatLeafMatcher(expr.matcher),
-								contextDesc: targetNote,
-								valid:
-									valid && node.operator === ':' && typeInfo.type !== 'checkbox',
-								url: buildRegex101Url(expr.matcher.pattern, expr.matcher.flags),
-							});
+						if (
+							expr.matcher.kind === 'regex' &&
+							validateRegexLiteral(expr.matcher.pattern, expr.matcher.flags) === null
+						) {
+							invalidRegexNodes.add(node);
 						}
 					} else if (expr.type === 'VALUE_NOT') {
 						visitExpr(expr.child);
@@ -508,7 +378,7 @@ export function explainQuery(
 	}
 
 	if (resolvedAst !== null) {
-		collectAstMetadata(resolvedAst);
+		collectAstFlags(resolvedAst);
 	}
 
 	const allDiagnostics: SearchDiagnostic[] = [
@@ -523,171 +393,332 @@ export function explainQuery(
 	const hintCount = allDiagnostics.filter((d) => d.severity === 'hint').length;
 	const executable = resolvedAst !== null && errorCount === 0;
 
-	const lines: string[] = ['# Query Explain Plan', ''];
+	const footnotes = new FootnoteRegistry();
+	const diagIndicesBySpan = new Map<string, number[]>();
+	allDiagnostics.forEach((diag, i) => {
+		if (diag.span) {
+			const key = spanKey(diag.span);
+			const list = diagIndicesBySpan.get(key) ?? [];
+			list.push(i + 1);
+			diagIndicesBySpan.set(key, list);
+		}
+	});
+	const attachedDiagNumbers = new Set<number>();
+
+	function consumeDiagLinksForSpan(span: SourceSpan | undefined): string {
+		if (!span) return '';
+		const nums = diagIndicesBySpan.get(spanKey(span));
+		if (!nums || nums.length === 0) return '';
+		const refs: string[] = [];
+		for (const num of nums) {
+			if (!attachedDiagNumbers.has(num)) {
+				attachedDiagNumbers.add(num);
+				const diag = allDiagnostics[num - 1]!;
+				refs.push(refDiagnosticFootnote(footnotes, num, diag));
+			}
+		}
+		return refs.length > 0 ? ` · ${refs.join(' ')}` : '';
+	}
+
+	function consumeUnattachedContainedDiags(span: SourceSpan | undefined): string {
+		if (!span) return '';
+		const refs: string[] = [];
+		allDiagnostics.forEach((diag, idx) => {
+			const num = idx + 1;
+			if (attachedDiagNumbers.has(num) || !diag.span) return;
+			if (
+				diag.span.startOffset >= span.startOffset &&
+				diag.span.endOffset <= span.endOffset
+			) {
+				attachedDiagNumbers.add(num);
+				refs.push(refDiagnosticFootnote(footnotes, num, diag));
+			}
+		});
+		return refs.length > 0 ? ` · ${refs.join(' ')}` : '';
+	}
+
+	// Compute @today window in effectiveConfig.timeZone at effectiveRefTimeMs
+	const todayParsed = parseTemporalExpr('@today', {
+		allowYearOnly: true,
+		allowRelative: true,
+		timeZone: effectiveConfig.timeZone,
+		referenceTimeMs: effectiveRefTimeMs,
+	});
+	const todayLocalWindow = todayParsed.ok
+		? `[${formatLocalIsoWithOffset(todayParsed.interval.start, effectiveConfig.timeZone)}, ${formatLocalIsoWithOffset(todayParsed.interval.end, effectiveConfig.timeZone)})`
+		: '[1970-01-01T00:00:00Z, 1970-01-02T00:00:00Z)';
+
+	const normalizedHeading =
+		heading
+			.replace(/[\r\n]+/g, ' ')
+			.trim()
+			.replace(/^#+\s*/, '') || 'Query Explain Plan';
+	const lines: string[] = [`# ${normalizedHeading}`, ''];
 
 	// =========================================================================
-	// SECTION 1: Explanation — How This Query Matches Notes
+	// Header Context
 	// =========================================================================
-	lines.push('## Explanation — How This Query Matches Notes', '');
 	const queryDisplay = input.trim().length === 0 ? '_(empty query)_' : formatInlineCode(input);
-	const statusBadge = executable
-		? '**Executable**'
-		: `**Not Executable** (${errorCount} error${errorCount === 1 ? '' : 's'})`;
+	const statusBadge = executable ? '*Executable*' : '*Not Executable*';
 	lines.push(`- **Query**: ${queryDisplay}`);
 	lines.push(
-		`- **Status**: ${statusBadge} — ${errorCount} error${errorCount === 1 ? '' : 's'}, ${warningCount} warning${warningCount === 1 ? '' : 's'}, ${hintCount} hint${hintCount === 1 ? '' : 's'}.`,
+		`- **Status**: ${statusBadge} with ${errorCount} error${errorCount === 1 ? '' : 's'}, ${warningCount} warning${warningCount === 1 ? '' : 's'}, ${hintCount} hint${hintCount === 1 ? '' : 's'}.`,
 	);
+	lines.push('- **Context**:');
+	if (validRefTime) {
+		const nowLocalIso = formatLocalIsoWithOffset(referenceTimeMs, effectiveConfig.timeZone);
+		lines.push(`  - \`@now\`: \`${nowLocalIso}\` (\`${referenceTimeMs}\` ms UTC)`);
+	} else {
+		lines.push(
+			`  - \`@now\`: ❌ Invalid \`referenceTimeMs\` (${formatInlineCode(String(referenceTimeMs))}; fell back to epoch \`0\` for best-effort analysis)`,
+		);
+	}
+	const todayIntervalFn = refIntervalFootnote(footnotes, todayLocalWindow);
+	lines.push(`  - \`@today\`: \`${todayLocalWindow}\`${todayIntervalFn}`);
+	const headerTzFn = refTimezoneFootnote(
+		footnotes,
+		effectiveConfig.timeZone,
+		displayTimeZone,
+		tzValid,
+	);
+	if (tzValid) {
+		lines.push(`  - **Timezone**: ${formatInlineCode(effectiveConfig.timeZone)}${headerTzFn}`);
+	} else {
+		lines.push(
+			`  - **Timezone**: ❌ Invalid timezone ${formatInlineCode(displayTimeZone)} (fell back to \`UTC\`${headerTzFn})`,
+		);
+	}
+	lines.push('');
 
+	// =========================================================================
+	// SECTION 1: Logic Breakdown
+	// =========================================================================
+	lines.push('## Logic Breakdown', '');
 	if (resolvedAst === null) {
 		lines.push(
-			'',
-			'This query could not be parsed into an execution tree because of a syntax or query-length error. See **Troubleshooting & Diagnostics** below for the exact location and fix.',
+			'This query could not be parsed into an execution tree because of a syntax or query-length error. See *Diagnostics* below for the exact location and fix.',
 			'',
 		);
 	} else {
-		lines.push('');
-		lines.push('### Plain-English Logic Breakdown', '');
-
 		const bulletLines: string[] = [];
-		const renderAstBullets = (node: SearchAST, indent: string): void => {
-			switch (node.type) {
-				case 'MATCH_ALL':
-					bulletLines.push(
-						`${indent}- **Match All Notes (\`MATCH_ALL\`)**: Because the query is empty or whitespace-only, every Markdown note in the vault matches.`,
-					);
+
+		const renderValueExprBullets = (
+			expr: ValueExprAST,
+			indent: string,
+			targetNoun: string,
+			leafFormatter: (matcher: LeafMatcher) => string,
+		): void => {
+			const sliceCode = formatInlineCode(extractValueExprSlice(input, expr));
+			switch (expr.type) {
+				case 'VALUE_LEAF': {
+					const desc = capitalizeFirst(leafFormatter(expr.matcher));
+					const exactDiagSuffix = consumeDiagLinksForSpan(expr.span);
+					bulletLines.push(`${indent}- ${sliceCode}`);
+					bulletLines.push(`${indent}  ${desc}.${exactDiagSuffix}`);
 					return;
-				case 'LOGICAL': {
-					const groupNote = node.parenthesized ? ', grouped in parentheses' : '';
-					if (node.operator === 'AND') {
-						bulletLines.push(
-							`${indent}- **All of the following conditions must match (\`AND\`${groupNote})**:`,
-						);
-					} else {
-						bulletLines.push(
-							`${indent}- **At least one of the following conditions must match (\`OR\`${groupNote})**:`,
-						);
+				}
+				case 'VALUE_NOT': {
+					const exactDiagSuffix = consumeDiagLinksForSpan(expr.span);
+					bulletLines.push(`${indent}- ${sliceCode}`);
+					bulletLines.push(
+						`${indent}  Does *not* match (\`-\` / \`NOT\`):${exactDiagSuffix}`,
+					);
+					renderValueExprBullets(expr.child, `${indent}  `, targetNoun, leafFormatter);
+					return;
+				}
+				case 'VALUE_LOGICAL': {
+					const combLabel =
+						expr.operator === 'OR'
+							? `*Any* of the following on that same ${targetNoun} (\`OR\`):`
+							: expr.implicit
+								? `*All* of the following on that same ${targetNoun} (implicit \`AND\`):`
+								: `*All* of the following on that same ${targetNoun} (\`AND\`):`;
+					const exactDiagSuffix = consumeDiagLinksForSpan(expr.span);
+					const headerIdx = bulletLines.length;
+					bulletLines.push(`${indent}- ${sliceCode}`);
+					bulletLines.push(`${indent}  ${combLabel}${exactDiagSuffix}`);
+					for (const child of expr.children) {
+						renderValueExprBullets(child, `${indent}  `, targetNoun, leafFormatter);
 					}
-					for (const child of node.children) {
-						renderAstBullets(child, `${indent}  `);
+					const remainingDiagSuffix = consumeUnattachedContainedDiags(expr.span);
+					if (remainingDiagSuffix) {
+						bulletLines[headerIdx + 1] =
+							`${bulletLines[headerIdx + 1]}${remainingDiagSuffix}`;
 					}
 					return;
 				}
-				case 'NOT':
+			}
+		};
+
+		const renderAstBullets = (node: SearchAST, indent: string): void => {
+			if (node.type === 'MATCH_ALL') {
+				const sliceDisplay =
+					input.trim().length === 0 ? '_(empty query)_' : formatInlineCode(input.trim());
+				bulletLines.push(`${indent}- ${sliceDisplay}`);
+				bulletLines.push(
+					`${indent}  Matches every Markdown note in the vault (\`MATCH_ALL\`).`,
+				);
+				return;
+			}
+
+			const sliceCode = formatInlineCode(extractAstSlice(input, node));
+
+			switch (node.type) {
+				case 'LOGICAL': {
+					const combLabel =
+						node.operator === 'OR'
+							? 'Matches notes where *any* of the following hold (`OR`):'
+							: node.implicit
+								? 'Matches notes where *all* of the following hold (implicit `AND`):'
+								: 'Matches notes where *all* of the following hold (`AND`):';
+					const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+					const headerIdx = bulletLines.length;
+					bulletLines.push(`${indent}- ${sliceCode}`);
+					bulletLines.push(`${indent}  ${combLabel}${exactDiagSuffix}`);
+					for (const child of node.children) {
+						renderAstBullets(child, `${indent}  `);
+					}
+					const remainingDiagSuffix = consumeUnattachedContainedDiags(node.span);
+					if (remainingDiagSuffix) {
+						bulletLines[headerIdx + 1] =
+							`${bulletLines[headerIdx + 1]}${remainingDiagSuffix}`;
+					}
+					return;
+				}
+				case 'NOT': {
+					const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+					const headerIdx = bulletLines.length;
+					bulletLines.push(`${indent}- ${sliceCode}`);
 					bulletLines.push(
-						`${indent}- **Exclude notes where (\`${node.syntax}\`)**: The note must **not** match:`,
+						`${indent}  Excludes notes matching (\`-\` / \`NOT\`):${exactDiagSuffix}`,
 					);
 					renderAstBullets(node.child, `${indent}  `);
+					const remainingDiagSuffix = consumeUnattachedContainedDiags(node.span);
+					if (remainingDiagSuffix) {
+						bulletLines[headerIdx + 1] =
+							`${bulletLines[headerIdx + 1]}${remainingDiagSuffix}`;
+					}
 					return;
+				}
 				case 'TEXT_MATCH': {
-					const authored = formatInlineCode(node.rawText);
+					const bareFn = refBareScopeFootnote(footnotes);
+					bulletLines.push(`${indent}- ${sliceCode}`);
 					if (node.matcher.kind === 'regex') {
 						const valid = !invalidRegexNodes.has(node);
-						const prefix = valid ? '' : '❌ **Invalid Regex** — ';
+						const prefix = valid ? '' : '❌ ';
+						const link = formatDirectRegexLink(node.matcher, footnotes);
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
 						bulletLines.push(
-							`${indent}- ${prefix}**Bare regular expression** ${formatRegexLink(node.matcher)}: Matches if the note's filename (\`file.basename\`), path (\`file.path\`), aliases, or tags match this pattern *(note body content is not searched)*.`,
+							`${indent}  ${prefix}Note metadata (${bareFn}) ${valid ? 'matches' : 'has invalid regex'} ${link}.${exactDiagSuffix}`,
 						);
 					} else {
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
 						bulletLines.push(
-							`${indent}- **Bare text search** ${authored}: Matches if the note's filename (\`file.basename\`), path (\`file.path\`), aliases, or tags contain ${formatInlineCode(node.matcher.value)} (case-insensitive; *note body content is not searched*).`,
+							`${indent}  Note metadata (${bareFn}) contains ${formatInlineCode(node.matcher.value)} (case-insensitive).${exactDiagSuffix}`,
 						);
 					}
 					return;
 				}
 				case 'SCOPED_FILTER': {
-					const authored = formatInlineCode(formatAuthoredFilter(node));
 					if (unknownScopeNodes.has(node)) {
 						const suggestion = suggestScopeHint(node.rawScope, effectiveConfig);
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}- ❌ **Unknown Scope Filter** ${authored}: Scope ${formatInlineCode(`${node.rawScope}:`)} is not a recognized search scope.${suggestion ? ` ${suggestion}` : ''}`,
+							`${indent}  ❌ Unknown search scope ${formatInlineCode(`${node.rawScope}:`)}.${suggestion ? ` ${suggestion}` : ''}${exactDiagSuffix}${remDiag}`,
 						);
 						return;
 					}
 					const sem = describeScopeSemantics(node.scope);
+					const scopeFn = refScopeFootnote(footnotes, node.scope);
 					const aliasParen =
-						node.rawScope === '#'
-							? ''
-							: node.rawScope.trim().toLowerCase() !== node.scope.toLowerCase()
-								? ` (${formatInlineCode(`${node.rawScope}:`)} is an alias for ${formatInlineCode(`${node.scope}:`)})`
-								: '';
+						node.rawScope !== '#' &&
+						node.rawScope.trim().toLowerCase() !== node.scope.toLowerCase()
+							? ` (alias for ${formatInlineCode(`${node.scope}:`)})`
+							: '';
+					const scopeTargetLabel = `${formatInlineCode(node.scope)}${scopeFn}${aliasParen}`;
 					const invalidPrefix = invalidRegexNodes.has(node) ? '❌ ' : '';
 
 					if (node.expr.type === 'VALUE_LEAF') {
 						const m = node.expr.matcher;
 						const leafDesc =
 							m.kind === 'regex'
-								? `matches regular expression ${formatRegexLink(m)}`
+								? `matches ${formatDirectRegexLink(m, footnotes)}`
 								: sem.formatPlainStringMatch(m.value);
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const leafDiag = consumeDiagLinksForSpan(node.expr.span);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}- ${invalidPrefix}**${sem.friendlyTitle}** ${authored}${aliasParen}: The note has at least one ${sem.singularTarget} that ${leafDesc}.`,
+							`${indent}  ${invalidPrefix}At least one ${scopeTargetLabel} ${leafDesc}.${exactDiagSuffix}${leafDiag}${remDiag}`,
 						);
 					} else {
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const headerIdx = bulletLines.length;
+						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}- ${invalidPrefix}**${sem.friendlyTitle}** ${authored}${aliasParen}: The note has **at least one ${sem.singularTarget}** where that single ${sem.singularTarget} matches:`,
+							`${indent}  ${invalidPrefix}At least one ${scopeTargetLabel} satisfies:${exactDiagSuffix}`,
 						);
-						renderValueExprBullets(
-							node.expr,
-							`${indent}  `,
-							sem.singularTarget,
-							(m) =>
-								m.kind === 'regex'
-									? `matches regular expression ${formatRegexLink(m)}`
-									: sem.formatPlainStringMatch(m.value),
-							bulletLines,
+						renderValueExprBullets(node.expr, `${indent}  `, sem.singularTarget, (m) =>
+							m.kind === 'regex'
+								? `matches ${formatDirectRegexLink(m, footnotes)}`
+								: sem.formatPlainStringMatch(m.value),
 						);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						if (remDiag) {
+							bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${remDiag}`;
+						}
 					}
 					return;
 				}
 				case 'PROPERTY_FILTER': {
-					const authored = formatInlineCode(formatAuthoredFilter(node));
 					const keyCode = formatInlineCode(node.key);
 					const typeInfo = resolvePropertyTypeWithOrigin(
 						node.key,
 						effectiveConfig.propertyTypes,
 					);
+					const propFn = refPropertyFootnote(footnotes, node.key, typeInfo);
+					const propTargetLabel = `${keyCode}${propFn}`;
 					const isInvalid = invalidPropertyNodes.has(node) || invalidRegexNodes.has(node);
 					const prefix = isInvalid ? '❌ ' : '';
-					const virtualDesc = describeVirtualFileKey(node.key);
-					const friendlyType = formatFriendlyTypeNote(typeInfo);
 
 					if (node.operator === 'EXISTS') {
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}- ${prefix}**Property exists** ${authored}: The note has a ${keyCode} property (${friendlyType}) with a non-empty, valid value.`,
+							`${indent}  ${prefix}${propTargetLabel} exists with a non-empty valid value.${exactDiagSuffix}${remDiag}`,
 						);
 						return;
 					}
 
 					if (node.valueExpr && node.valueExpr.type === 'VALUE_LEAF') {
-						const { plainEnglish } = describePropertyLeaf(
+						const leafDesc = describePropertyLeaf(
 							node.valueExpr.matcher,
 							typeInfo.type,
 							node.operator,
 							effectiveConfig.timeZone,
+							displayTimeZone,
+							tzValid,
 							effectiveRefTimeMs,
 							validRefTime,
+							todayLocalWindow,
+							footnotes,
 						);
-						if (virtualDesc !== null) {
-							bulletLines.push(
-								`${indent}- ${prefix}**File metadata filter** ${authored}: ${capitalizeFirst(virtualDesc)} ${plainEnglish}.`,
-							);
-						} else {
-							bulletLines.push(
-								`${indent}- ${prefix}**Property filter** ${authored}: The note has a ${keyCode} property (${friendlyType}) whose value ${plainEnglish}.`,
-							);
-						}
-						if (node.operator === '!=' && virtualDesc === null) {
-							const neqSnippet = formatInlineCode(`[${node.key} != ...]`);
-							const negEqSnippet = formatInlineCode(`-[${node.key} = ...]`);
-							bulletLines.push(
-								`${indent}  - *Tip: ${neqSnippet} only matches notes that have a ${keyCode} property. To also include notes without ${keyCode}, use ${negEqSnippet}.*`,
-							);
-						}
-					} else if (node.valueExpr) {
-						const subjectDesc =
-							virtualDesc !== null
-								? `${capitalizeFirst(virtualDesc)} satisfies:`
-								: `The note has **at least one ${keyCode} property value** (${friendlyType}) where that single value satisfies:`;
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const leafDiag = consumeDiagLinksForSpan(node.valueExpr.span);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}- ${prefix}**Property filter** ${authored}: ${subjectDesc}`,
+							`${indent}  ${prefix}${propTargetLabel} ${leafDesc}.${exactDiagSuffix}${leafDiag}${remDiag}`,
+						);
+					} else if (node.valueExpr) {
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const headerIdx = bulletLines.length;
+						bulletLines.push(`${indent}- ${sliceCode}`);
+						bulletLines.push(
+							`${indent}  ${prefix}At least one ${propTargetLabel} value satisfies:${exactDiagSuffix}`,
 						);
 						renderValueExprBullets(
 							node.valueExpr,
@@ -699,11 +730,18 @@ export function explainQuery(
 									typeInfo.type,
 									node.operator,
 									effectiveConfig.timeZone,
+									displayTimeZone,
+									tzValid,
 									effectiveRefTimeMs,
 									validRefTime,
-								).plainEnglish,
-							bulletLines,
+									todayLocalWindow,
+									footnotes,
+								),
 						);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						if (remDiag) {
+							bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${remDiag}`;
+						}
 					}
 					return;
 				}
@@ -712,184 +750,35 @@ export function explainQuery(
 
 		renderAstBullets(resolvedAst, '');
 		lines.push(...bulletLines, '');
-
-		lines.push('### Logic Flowchart', '');
-		lines.push(
-			renderExplainMermaid(resolvedAst, {
-				propertyTypes: effectiveConfig.propertyTypes,
-				invalidPropertyNodes,
-				unknownScopeNodes,
-				invalidRegexNodes,
-			}),
-			'',
-		);
 	}
 
 	// =========================================================================
-	// SECTION 2: Reference — Execution Context & Resolution
+	// SECTION 2: Diagnostics
 	// =========================================================================
-	lines.push('## Reference — Execution Context & Resolution', '');
-	lines.push('### Environment Context', '');
-	lines.push('| Setting | Value | Resolution Details |');
-	lines.push('| :--- | :--- | :--- |');
-
-	const tzValid = resolvedConfig !== null;
-	lines.push(
-		`| \`timeZone\` | ${escapeMarkdownTableCell(formatInlineCode(displayTimeZone))} | ${tzValid ? 'Valid IANA timezone used for date/datetime wall-clock conversion' : '❌ Invalid IANA timezone (fell back to `UTC` for best-effort analysis)'} |`,
-	);
-
-	if (validRefTime) {
-		const ts = formatEpochTimestamp(referenceTimeMs, effectiveConfig.timeZone);
-		lines.push(
-			`| \`referenceTimeMs\` | \`${referenceTimeMs}\` | UTC: \`${escapeMarkdownTableCell(ts.utcIso)}\` · Local: \`${escapeMarkdownTableCell(ts.localFormatted)}\` |`,
-		);
-	} else {
-		lines.push(
-			`| \`referenceTimeMs\` | ${escapeMarkdownTableCell(formatInlineCode(String(referenceTimeMs)))} | ❌ Invalid reference timestamp (must be safe integer within \`[-8.64e15, 8.64e15]\`) |`,
-		);
-	}
-
-	const fpCell =
-		resolvedConfig !== null
-			? escapeMarkdownTableCell(formatInlineCode(resolvedConfig.normalizationFingerprint))
-			: '_Unavailable (invalid configuration)_';
-	lines.push(
-		`| \`normalizationFingerprint\` | ${fpCell} | Deterministic fingerprint of \`timeZone\` + sorted \`propertyTypes\` |`,
-	);
-	lines.push(
-		`| \`executable\` | \`${String(executable)}\` | ${executable ? 'Query can be evaluated against the vault' : 'Query execution blocked by diagnostic error(s)'} |`,
-	);
-	lines.push('');
-
-	lines.push('### Queried Scopes & Properties', '');
-	if (filterNodes.length === 0) {
-		lines.push('_No scoped or property filters in this query._', '');
-	} else {
-		lines.push(
-			'| # | Authored Filter | Normalized Target | Resolved Type & Origin | Operator & Coerced Value / Temporal Window |',
-		);
-		lines.push('| :--- | :--- | :--- | :--- | :--- |');
-		filterNodes.forEach((node, idx) => {
-			const authoredCell = escapeMarkdownTableCell(
-				formatInlineCode(formatAuthoredFilter(node)),
-			);
-			if (node.type === 'SCOPED_FILTER') {
-				const isUnknown = unknownScopeNodes.has(node);
-				const targetCell = isUnknown
-					? `❌ Unknown scope ${escapeMarkdownTableCell(formatInlineCode(node.rawScope))}`
-					: node.rawScope === '#'
-						? `scope \`tag\` (from \`#\`)`
-						: node.rawScope.trim().toLowerCase() !== node.scope.toLowerCase()
-							? `scope ${escapeMarkdownTableCell(formatInlineCode(node.scope))} (alias ${escapeMarkdownTableCell(formatInlineCode(`${node.rawScope}:`))})`
-							: `scope ${escapeMarkdownTableCell(formatInlineCode(node.scope))}`;
-				const sem = describeScopeSemantics(node.scope);
-				const originCell = isUnknown
-					? 'Unregistered scope'
-					: escapeMarkdownTableCell(`scope (${sem.targetsDescription})`);
-				const rhsCode = formatInlineCode(formatScopeRhsDisplay(node.expr));
-				const ruleDesc =
-					node.expr.type === 'VALUE_LEAF' && node.expr.matcher.kind === 'regex'
-						? `${invalidRegexNodes.has(node) ? '❌ invalid ' : ''}regular expression match; rhs: ${rhsCode}`
-						: node.expr.type === 'VALUE_LEAF'
-							? `${sem.matchRuleDescription}; rhs: ${rhsCode}`
-							: `${invalidRegexNodes.has(node) ? '❌ ' : ''}compound value expression (evaluated per extracted target); rhs: ${rhsCode}`;
-				const detailsCell = isUnknown
-					? escapeMarkdownTableCell(
-							suggestScopeHint(node.rawScope, effectiveConfig) ?? 'Unknown scope',
-						)
-					: escapeMarkdownTableCell(ruleDesc);
-				lines.push(
-					`| ${idx + 1} | ${authoredCell} | ${targetCell} | ${originCell} | ${detailsCell} |`,
-				);
-			} else {
-				const typeInfo = resolvePropertyTypeWithOrigin(
-					node.key,
-					effectiveConfig.propertyTypes,
-				);
-				const targetCell = `property ${escapeMarkdownTableCell(formatInlineCode(node.key))}`;
-				const originCell = `\`${typeInfo.type}\` (${escapeMarkdownTableCell(typeInfo.originLabel)})`;
-				let details: string;
-				if (node.operator === 'EXISTS') {
-					details = 'Operator `EXISTS`: requires non-null, valid typed property entry';
-				} else if (node.valueExpr && node.valueExpr.type === 'VALUE_LEAF') {
-					details = `Operator \`${node.operator}\`: ${
-						describePropertyLeaf(
-							node.valueExpr.matcher,
-							typeInfo.type,
-							node.operator,
-							effectiveConfig.timeZone,
-							effectiveRefTimeMs,
-							validRefTime,
-						).reference
-					}`;
-				} else {
-					const prefix =
-						invalidPropertyNodes.has(node) || invalidRegexNodes.has(node) ? '❌ ' : '';
-					details = `${prefix}Operator \`:\` with compound value expression (evaluated per property entry)`;
-				}
-				lines.push(
-					`| ${idx + 1} | ${authoredCell} | ${targetCell} | ${originCell} | ${escapeMarkdownTableCell(details)} |`,
-				);
-			}
-		});
-		lines.push('');
-	}
-
-	lines.push('### Active Property Type Registry', '');
-	const sortedRegistryKeys = Object.keys(effectiveConfig.propertyTypes).sort();
-	if (sortedRegistryKeys.length === 0) {
-		lines.push(
-			'_None configured (all non-built-in user properties default to `text`; virtual `file.*` and built-in `tags`/`aliases` always use their fixed types)._',
-			'',
-		);
-	} else {
-		lines.push('| Property Key | Configured Type |');
-		lines.push('| :--- | :--- |');
-		for (const k of sortedRegistryKeys) {
-			const t = effectiveConfig.propertyTypes[k]!;
-			lines.push(
-				`| ${escapeMarkdownTableCell(formatInlineCode(k))} | \`${escapeMarkdownTableCell(t)}\` |`,
-			);
-		}
-		lines.push('');
-	}
-
-	if (regexEntries.length > 0) {
-		lines.push('### Regular Expressions', '');
-		lines.push('| # | Literal | Target & Evaluation Rules | Status | regex101 |');
-		lines.push('| :--- | :--- | :--- | :--- | :--- |');
-		regexEntries.forEach((entry, idx) => {
-			const litCell = escapeMarkdownTableCell(formatInlineCode(entry.literal));
-			const ctxCell = escapeMarkdownTableCell(entry.contextDesc);
-			const statusCell = entry.valid ? 'Valid' : '❌ Invalid';
-			const linkCell = `[Open in regex101 ↗](${entry.url})`;
-			lines.push(`| ${idx + 1} | ${litCell} | ${ctxCell} | ${statusCell} | ${linkCell} |`);
-		});
-		lines.push('');
-	}
-
-	// =========================================================================
-	// SECTION 3: Troubleshooting & Diagnostics
-	// =========================================================================
-	lines.push('## Troubleshooting & Diagnostics', '');
+	lines.push('## Diagnostics', '');
 	if (allDiagnostics.length === 0) {
 		lines.push('> [!tip] No issues found');
 		lines.push('> This query compiled cleanly with 0 errors, 0 warnings, and 0 lint hints.');
 	} else {
 		allDiagnostics.forEach((diag, idx) => {
 			if (idx > 0) lines.push('');
+			const num = idx + 1;
 			const calloutType =
 				diag.severity === 'error'
 					? '[!danger]'
 					: diag.severity === 'warning'
 						? '[!warning]'
 						: '[!info]';
+			const sevTitle =
+				diag.severity === 'error'
+					? 'Error'
+					: diag.severity === 'warning'
+						? 'Warning'
+						: 'Hint';
 			const locText = diag.span
 				? ` (line ${diag.span.startLine}, column ${diag.span.startColumn})`
 				: '';
-			lines.push(
-				`> ${calloutType} ${diag.severity.toUpperCase()}: \`${diag.code}\`${locText}`,
-			);
+			lines.push(`> ${calloutType} ${sevTitle} ${num}: \`${diag.code}\`${locText}`);
 			lines.push(`> ${diag.issue}`);
 			if (diag.span !== null) {
 				const snippet = formatSourceCaretSnippet(input, diag.span);
@@ -900,10 +789,17 @@ export function explainQuery(
 				lines.push('> ```');
 			}
 			if (diag.hint !== null) {
-				lines.push(`> **How to fix**: ${diag.hint}`);
+				lines.push(`> *Fix*: ${diag.hint}`);
 			}
 		});
 	}
+	lines.push('');
+
+	// =========================================================================
+	// SECTION 3: Concept Reference
+	// =========================================================================
+	lines.push('## Concept Reference', '');
+	lines.push(footnotes.renderDefinitions());
 
 	return lines.join('\n');
 }

@@ -846,9 +846,9 @@ describe('runVaultQuery', () => {
 			expect(markdownFilesCalled).toBe(false);
 			expect(fileCacheCalled).toBe(false);
 			expect(md).toContain('# Query Explain Plan');
-			expect(md).toContain('| `priority` | `number` |');
-			expect(md).toContain('| `due` | `date` |');
-			expect(md).toContain('| `custom_override` | `checkbox` |');
+			expect(md).toContain('`priority`[^4]');
+			expect(md).toContain('`due`[^5]');
+			expect(md).toContain('`custom_override`[^6]');
 			const explainLog = spy.calls.find((c) => c.message === 'Generated query explanation');
 			expect(explainLog?.level).toBe('debug');
 			expect(explainLog?.meta?.['query']).toBe(

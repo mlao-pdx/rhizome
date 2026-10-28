@@ -42,6 +42,8 @@ export interface VaultQueryOptions {
 	readonly propertyTypes?: PropertyTypeRegistry | undefined;
 	/** Optional reference timestamp in UTC epoch ms for `@` relative date anchors (defaults to `Date.now()`). */
 	readonly referenceTimeMs?: number | undefined;
+	/** Optional alternate level-1 Markdown heading for `explainQuery` / `explainVaultQuery` (defaults to `'Query Explain Plan'`). */
+	readonly heading?: string | undefined;
 }
 
 /**
@@ -491,8 +493,9 @@ export async function diagnoseVaultQuery(
 }
 
 /**
- * Generates a self-contained Diátaxis Markdown explanation plan for a search query
- * using the vault's `types.json` registry without scanning or normalizing any vault notes.
+ * Generates a progressive-shrinking Markdown explanation plan with inline footnotes and a
+ * `## Concept Reference` section for a search query using the vault's `types.json` registry
+ * without scanning or normalizing any vault notes.
  */
 export async function explainVaultQuery(
 	app: App,
@@ -506,7 +509,12 @@ export async function explainVaultQuery(
 	const vaultTypes = await loadVaultPropertyTypes(app, logger);
 	const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
 
-	const markdown = explainQuery(input, { timeZone, propertyTypes: mergedTypes }, referenceTimeMs);
+	const markdown = explainQuery(
+		input,
+		{ timeZone, propertyTypes: mergedTypes },
+		referenceTimeMs,
+		options?.heading,
+	);
 
 	logger?.log('debug', 'Generated query explanation', {
 		query: `«${input}»`,

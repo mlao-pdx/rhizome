@@ -302,6 +302,7 @@ export function validateQueryAST(
 					type: 'LOGICAL',
 					operator: node.operator,
 					children: nextChildren,
+					...(node.implicit !== undefined ? { implicit: node.implicit } : {}),
 					...(node.parenthesized !== undefined
 						? { parenthesized: node.parenthesized }
 						: {}),

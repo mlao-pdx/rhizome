@@ -17,8 +17,10 @@ import {
 	type PropertyOperator,
 	type PropertyTypeRegistry,
 	type ScopedFilterNode,
+	type SearchAST,
 	type SourceSpan,
 	type TextMatchNode,
+	type ValueExprAST,
 } from './types';
 
 export {
@@ -97,32 +99,6 @@ export function resolvePropertyTypeWithOrigin(
 		origin: 'default',
 		originLabel: "default fallback ('text')",
 	};
-}
-
-/**
- * Returns a natural-language label for virtual `file.*` property keys, or `null` for user properties.
- */
-export function describeVirtualFileKey(lowerKey: string): string | null {
-	switch (lowerKey) {
-		case 'file.modified':
-			return "the note's modified timestamp (`file.modified`)";
-		case 'file.created':
-			return "the note's created timestamp (`file.created`)";
-		case 'file.size':
-			return "the note's file size in bytes (`file.size`)";
-		case 'file.extension':
-			return "the note's file extension (`file.extension`)";
-		case 'file.name':
-			return "the note's filename with extension (`file.name`)";
-		case 'file.basename':
-			return "the note's filename without extension (`file.basename`)";
-		case 'file.path':
-			return "the note's vault-relative path (`file.path`)";
-		case 'file.parent':
-			return "the note's parent folder (`file.parent`)";
-		default:
-			return null;
-	}
 }
 
 /**
@@ -332,7 +308,7 @@ export function describeScopeSemantics(scope: string): ScopeSemanticsInfo {
 					'case-insensitive hierarchical tag match (`#a` matches `#a` and `#a/...`, with leading `#` stripped)',
 				formatPlainStringMatch: (val) => {
 					const norm = normalizeTagBody(val);
-					return `is ${formatInlineCode(`#${norm}`)} (or a subtag like ${formatInlineCode(`#${norm}/...`)}, case-insensitive)`;
+					return `is ${formatInlineCode(`#${norm}`)} or a nested tag under ${formatInlineCode(`#${norm}/...`)} (case-insensitive)`;
 				},
 			};
 		case 'aliases':
@@ -424,14 +400,57 @@ export function formatInlineCode(text: string): string {
 }
 
 /**
- * Escapes pipes and line breaks so arbitrary text can be placed safely inside a GFM table cell.
+ * Extracts the exact authored substring of `input` covered by `node.span`,
+ * falling back to reconstructed syntax when `span` is absent or out of bounds.
  */
-export function escapeMarkdownTableCell(text: string): string {
-	return text.replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\|/g, '\\|');
+export function extractAstSlice(input: string, node: SearchAST): string {
+	if (node.type === 'MATCH_ALL') {
+		return input.trim();
+	}
+	if (
+		node.span &&
+		node.span.startOffset >= 0 &&
+		node.span.endOffset >= node.span.startOffset &&
+		node.span.endOffset <= input.length
+	) {
+		return input.slice(node.span.startOffset, node.span.endOffset);
+	}
+	switch (node.type) {
+		case 'TEXT_MATCH':
+		case 'SCOPED_FILTER':
+		case 'PROPERTY_FILTER':
+			return formatAuthoredFilter(node);
+		case 'NOT': {
+			const childSlice = extractAstSlice(input, node.child);
+			return node.syntax === '-' ? `-${childSlice}` : `NOT ${childSlice}`;
+		}
+		case 'LOGICAL': {
+			const joiner = node.operator === 'OR' ? ' OR ' : node.implicit ? ' ' : ' AND ';
+			const inner = node.children.map((c) => extractAstSlice(input, c)).join(joiner);
+			return node.parenthesized ? `(${inner})` : inner;
+		}
+	}
 }
 
 /**
- * Formats a 1-based line and `^` caret underline snippet for a `SourceSpan` in `input`.
+ * Extracts the exact authored substring of `input` covered by `expr.span`,
+ * falling back to `formatValueExprInner(expr)` when `span` is absent or out of bounds.
+ */
+export function extractValueExprSlice(input: string, expr: ValueExprAST): string {
+	if (
+		expr.span &&
+		expr.span.startOffset >= 0 &&
+		expr.span.endOffset >= expr.span.startOffset &&
+		expr.span.endOffset <= input.length
+	) {
+		return input.slice(expr.span.startOffset, expr.span.endOffset);
+	}
+	return formatValueExprInner(expr);
+}
+
+/**
+ * Formats a 1-based line snippet for a `SourceSpan` in `input` by enclosing the pertinent span
+ * inline with `‼️...‼️` markers, avoiding multi-line caret alignment issues when wrapped.
  */
 export function formatSourceCaretSnippet(input: string, span: SourceSpan): string {
 	const lines = input.split(/\r\n|\r|\n/);
@@ -440,9 +459,10 @@ export function formatSourceCaretSnippet(input: string, span: SourceSpan): strin
 	const displayLine = rawLine.replace(/\t/g, ' ');
 	const linePrefix = `${span.startLine} | `;
 	const colZeroBased = Math.max(0, Math.min(displayLine.length, span.startColumn - 1));
-	const rawSpanLen = Math.max(1, span.endOffset - span.startOffset);
-	const maxCaretLen = Math.max(1, displayLine.length - colZeroBased);
-	const caretLen = Math.max(1, Math.min(rawSpanLen, maxCaretLen));
-	const caretLine = `${' '.repeat(linePrefix.length + colZeroBased)}${'^'.repeat(caretLen)}`;
-	return `${linePrefix}${displayLine}\n${caretLine}`;
+	const rawSpanLen = Math.max(0, span.endOffset - span.startOffset);
+	const highlightLen = Math.min(rawSpanLen, Math.max(0, displayLine.length - colZeroBased));
+	const before = displayLine.slice(0, colZeroBased);
+	const highlighted = displayLine.slice(colZeroBased, colZeroBased + highlightLen);
+	const after = displayLine.slice(colZeroBased + highlightLen);
+	return `${linePrefix}${before}‼️${highlighted}‼️${after}`;
 }

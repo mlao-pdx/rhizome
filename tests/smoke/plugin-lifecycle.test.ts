@@ -151,8 +151,8 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 			referenceTimeMs: 1700000000000,
 		});
 		expect(explainMd).toContain('# Query Explain Plan');
-		expect(explainMd).toContain('## Explanation — How This Query Matches Notes');
-		expect(explainMd).toContain('## Reference — Execution Context & Resolution');
-		expect(explainMd).toContain('## Troubleshooting & Diagnostics');
+		expect(explainMd).toContain('## Logic Breakdown');
+		expect(explainMd).toContain('## Diagnostics');
+		expect(explainMd).toContain('## Concept Reference');
 	});
 });

@@ -180,6 +180,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 			expr: {
 				type: 'VALUE_LEAF',
 				matcher: { kind: 'string', value: target, quoted: true },
+				span,
 			},
 			span,
 			parenthesized: false,
@@ -208,6 +209,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 					expr: {
 						type: 'VALUE_LEAF',
 						matcher: { kind: 'string', value: `-${id.image}`, quoted: false },
+						span,
 					},
 					span,
 					parenthesized: false,
@@ -217,6 +219,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 				expr: {
 					type: 'VALUE_LEAF',
 					matcher: { kind: 'string', value: id.image, quoted: false },
+					span: idSpan,
 				},
 				span: idSpan,
 				parenthesized: false,
@@ -224,7 +227,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		}
 		const leaf = lowerLeafTokens(node.children);
 		return {
-			expr: { type: 'VALUE_LEAF', matcher: leaf.matcher },
+			expr: { type: 'VALUE_LEAF', matcher: leaf.matcher, span: leaf.span },
 			span: leaf.span,
 			parenthesized: false,
 		};
@@ -236,30 +239,36 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		if (lowered.length === 1) return lowered[0]!;
 		const first = lowered[0]!;
 		const last = lowered[lowered.length - 1]!;
+		const span = mergeSpans(first.span, last.span);
 		return {
 			expr: {
 				type: 'VALUE_LOGICAL',
 				operator: 'OR',
 				children: lowered.map((item) => item.expr),
+				span,
 			},
-			span: mergeSpans(first.span, last.span),
+			span,
 			parenthesized: false,
 		};
 	}
 
 	function lowerValueAndExpr(node: CstNode): LoweredValueExpr {
 		const subNodes = [...asNodes(node.children.lhs), ...asNodes(node.children.rhs)];
+		const andTokens = asTokens(node.children.And);
 		const lowered = subNodes.map(lowerValueNotExpr);
 		if (lowered.length === 1) return lowered[0]!;
 		const first = lowered[0]!;
 		const last = lowered[lowered.length - 1]!;
+		const span = mergeSpans(first.span, last.span);
 		return {
 			expr: {
 				type: 'VALUE_LOGICAL',
 				operator: 'AND',
+				implicit: andTokens.length === 0,
 				children: lowered.map((item) => item.expr),
+				span,
 			},
-			span: mergeSpans(first.span, last.span),
+			span,
 			parenthesized: false,
 		};
 	}
@@ -271,13 +280,15 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		if (notTok || hyphenTok) {
 			const opTok = (notTok ?? hyphenTok)!;
 			const child = lowerValueNotExpr(asNodes(ch.operand)[0]!);
+			const span = mergeSpans(tokenToSpan(opTok), child.span);
 			return {
 				expr: {
 					type: 'VALUE_NOT',
 					syntax: notTok ? 'NOT' : '-',
 					child: child.expr,
+					span,
 				},
-				span: mergeSpans(tokenToSpan(opTok), child.span),
+				span,
 				parenthesized: false,
 			};
 		}
@@ -285,9 +296,10 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		if (lparen) {
 			const rparen = asTokens(ch.RParen)[0]!;
 			const inner = lowerValueOrExpr(asNodes(ch.valueOrExpr)[0]!);
+			const span = mergeSpans(tokenToSpan(lparen), tokenToSpan(rparen));
 			return {
-				expr: inner.expr,
-				span: mergeSpans(tokenToSpan(lparen), tokenToSpan(rparen)),
+				expr: { ...inner.expr, span },
+				span,
 				parenthesized: true,
 			};
 		}
@@ -297,7 +309,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		const unsigned = asNodes(ch.unsignedValueLeaf)[0]!;
 		const leaf = lowerLeafTokens(unsigned.children);
 		return {
-			expr: { type: 'VALUE_LEAF', matcher: leaf.matcher },
+			expr: { type: 'VALUE_LEAF', matcher: leaf.matcher, span: leaf.span },
 			span: leaf.span,
 			parenthesized: false,
 		};
@@ -309,9 +321,10 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		if (lparen) {
 			const rparen = asTokens(ch.RParen)[0]!;
 			const inner = lowerValueOrExpr(asNodes(ch.valueOrExpr)[0]!);
+			const span = mergeSpans(tokenToSpan(lparen), tokenToSpan(rparen));
 			return {
-				expr: inner.expr,
-				span: mergeSpans(tokenToSpan(lparen), tokenToSpan(rparen)),
+				expr: { ...inner.expr, span },
+				span,
 				parenthesized: true,
 			};
 		}
@@ -420,6 +433,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		const tagShort = asNodes(ch.tagShorthand)[0];
 		if (tagShort) {
 			const tagTok = asTokens(tagShort.children.TagLiteral)[0]!;
+			const span = tokenToSpan(tagTok);
 			return {
 				type: 'SCOPED_FILTER',
 				scope: 'tag',
@@ -427,8 +441,9 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 				expr: {
 					type: 'VALUE_LEAF',
 					matcher: { kind: 'string', value: tagTok.image, quoted: false },
+					span,
 				},
-				span: tokenToSpan(tagTok),
+				span,
 			};
 		}
 
@@ -509,6 +524,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		return {
 			type: 'LOGICAL',
 			operator: 'AND',
+			implicit: andTokens.length === 0,
 			children,
 			...(firstSpan && lastSpan ? { span: mergeSpans(firstSpan, lastSpan) } : {}),
 		};

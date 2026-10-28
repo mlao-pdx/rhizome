@@ -4,6 +4,7 @@ import { isVirtualFileKey, type LogicalNode, type SearchAST, type ValueExprAST }
  * Recursively freezes a `ValueExprAST` node, including its `matcher` or `children` array.
  */
 export function deepFreezeValueExprAST(expr: ValueExprAST): ValueExprAST {
+	if (expr.span) Object.freeze(expr.span);
 	if (expr.type === 'VALUE_LEAF') {
 		Object.freeze(expr.matcher);
 		return Object.freeze(expr);
