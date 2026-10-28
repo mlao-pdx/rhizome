@@ -5,6 +5,7 @@ vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 
 import {
 	diagnoseVaultQuery,
+	explainVaultQuery,
 	parseObsidianTypesJson,
 	runVaultQuery,
 } from '../../src/adapters/vault-query-runner';
@@ -804,6 +805,56 @@ describe('runVaultQuery', () => {
 				matchCounts: { '«highPriority»': 0 },
 			});
 			expect(typeof summary?.meta?.['durationMs']).toBe('number');
+		});
+
+		it('explainVaultQuery loads types.json and merges overrides without scanning any vault notes', async () => {
+			let markdownFilesCalled = false;
+			let fileCacheCalled = false;
+			const spy = createLoggerSpy();
+			const app = makeMockApp({
+				typesJson: JSON.stringify({
+					types: {
+						priority: 'number',
+						due: 'date',
+					},
+				}),
+				notes: [
+					{
+						path: 'notes/a.md',
+						cache: { frontmatter: { priority: 1 } },
+					},
+				],
+				onGetMarkdownFiles: () => {
+					markdownFilesCalled = true;
+				},
+				onGetFileCache: () => {
+					fileCacheCalled = true;
+				},
+			});
+
+			const md = await explainVaultQuery(
+				app,
+				'#work [priority >= 2] [due = @today] [custom_override = true]',
+				{
+					timeZone: 'America/New_York',
+					referenceTimeMs: Date.parse('2026-10-22T15:30:00.000Z'),
+					propertyTypes: { custom_override: 'checkbox' },
+				},
+				spy.logger,
+			);
+
+			expect(markdownFilesCalled).toBe(false);
+			expect(fileCacheCalled).toBe(false);
+			expect(md).toContain('# Query Explain Plan');
+			expect(md).toContain('| `priority` | `number` |');
+			expect(md).toContain('| `due` | `date` |');
+			expect(md).toContain('| `custom_override` | `checkbox` |');
+			const explainLog = spy.calls.find((c) => c.message === 'Generated query explanation');
+			expect(explainLog?.level).toBe('debug');
+			expect(explainLog?.meta?.['query']).toBe(
+				'«#work [priority >= 2] [due = @today] [custom_override = true]»',
+			);
+			expect(typeof explainLog?.meta?.['durationMs']).toBe('number');
 		});
 	});
 });

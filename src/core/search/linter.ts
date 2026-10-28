@@ -158,7 +158,7 @@ function extractSingleValueEquality(child: SearchAST): SingleValueEquality | nul
 	return null;
 }
 
-function encodeDoubleQuoted(value: string): string {
+export function encodeDoubleQuoted(value: string): string {
 	let out = '"';
 	for (const ch of value) {
 		if (ch === '\\') out += '\\\\';
@@ -171,14 +171,14 @@ function encodeDoubleQuoted(value: string): string {
 	return out + '"';
 }
 
-function formatLeafMatcher(matcher: LeafMatcher): string {
+export function formatLeafMatcher(matcher: LeafMatcher): string {
 	if (matcher.kind === 'regex') {
 		return `/${matcher.pattern}/${matcher.flags}`;
 	}
 	return matcher.quoted ? encodeDoubleQuoted(matcher.value) : matcher.value;
 }
 
-function formatValueExprInner(expr: ValueExprAST, parentOp?: 'AND' | 'OR' | 'NOT'): string {
+export function formatValueExprInner(expr: ValueExprAST, parentOp?: 'AND' | 'OR' | 'NOT'): string {
 	switch (expr.type) {
 		case 'VALUE_LEAF':
 			return formatLeafMatcher(expr.matcher);
@@ -198,14 +198,14 @@ function formatValueExprInner(expr: ValueExprAST, parentOp?: 'AND' | 'OR' | 'NOT
 	}
 }
 
-function formatScopeRhsDisplay(valueExpr: ValueExprAST): string {
+export function formatScopeRhsDisplay(valueExpr: ValueExprAST): string {
 	if (valueExpr.type === 'VALUE_LEAF') {
 		return formatLeafMatcher(valueExpr.matcher);
 	}
 	return `(${formatValueExprInner(valueExpr)})`;
 }
 
-function formatRhsDisplay(valueExpr: ValueExprAST | undefined): string {
+export function formatRhsDisplay(valueExpr: ValueExprAST | undefined): string {
 	if (!valueExpr || valueExpr.type !== 'VALUE_LEAF') return '...';
 	if (valueExpr.matcher.kind === 'regex') {
 		return `/${valueExpr.matcher.pattern}/${valueExpr.matcher.flags}`;

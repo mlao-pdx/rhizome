@@ -4,6 +4,7 @@ import {
 	type DocumentDiagnostic,
 	evaluateDoc,
 	evaluateVault,
+	explainQuery,
 	FORBIDDEN_KEYS,
 	getExecutionPlan,
 	initEngineConfig,
@@ -487,4 +488,30 @@ export async function diagnoseVaultQuery(
 		diagnostics: compileResult.diagnostics,
 		propertyDiagnostics: report.propertyDiagnostics,
 	};
+}
+
+/**
+ * Generates a self-contained Diátaxis Markdown explanation plan for a search query
+ * using the vault's `types.json` registry without scanning or normalizing any vault notes.
+ */
+export async function explainVaultQuery(
+	app: App,
+	input: string = '',
+	options?: VaultQueryOptions,
+	logger?: LoggerPort,
+): Promise<string> {
+	const startedAt = Date.now();
+	const timeZone = options?.timeZone !== undefined ? options.timeZone : resolveDefaultTimeZone();
+	const referenceTimeMs = options?.referenceTimeMs ?? Date.now();
+	const vaultTypes = await loadVaultPropertyTypes(app, logger);
+	const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
+
+	const markdown = explainQuery(input, { timeZone, propertyTypes: mergedTypes }, referenceTimeMs);
+
+	logger?.log('debug', 'Generated query explanation', {
+		query: `«${input}»`,
+		durationMs: Math.max(0, Date.now() - startedAt),
+	});
+
+	return markdown;
 }

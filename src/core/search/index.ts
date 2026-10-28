@@ -15,3 +15,6 @@ export * from './compiler';
 export * from './oracle';
 export * from './execution-plan';
 export * from './evaluator';
+export * from './explain-helpers';
+export * from './explain-mermaid';
+export * from './explain-plan';

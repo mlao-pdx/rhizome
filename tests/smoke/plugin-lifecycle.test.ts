@@ -145,5 +145,14 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		const matchAllResult = await plugin.diagnoseQuery();
 		expect(matchAllResult.executable).toBe(true);
 		expect(matchAllResult.paths).toEqual(['notes/alpha.md']);
+
+		const explainMd = await plugin.explainQuery('#project [status: active]', {
+			timeZone: 'UTC',
+			referenceTimeMs: 1700000000000,
+		});
+		expect(explainMd).toContain('# Query Explain Plan');
+		expect(explainMd).toContain('## Explanation — How This Query Matches Notes');
+		expect(explainMd).toContain('## Reference — Execution Context & Resolution');
+		expect(explainMd).toContain('## Troubleshooting & Diagnostics');
 	});
 });

@@ -5,6 +5,7 @@ import { PluginDataStore } from './adapters/plugin-data-store';
 import {
 	diagnoseVaultQuery,
 	type DiagnoseVaultQueryResult,
+	explainVaultQuery,
 	runVaultQuery,
 	type VaultQueryOptions,
 	type VaultQueryResult,
@@ -88,5 +89,9 @@ export default class RhizomePlugin extends Plugin {
 		options?: VaultQueryOptions,
 	): Promise<DiagnoseVaultQueryResult> {
 		return diagnoseVaultQuery(this.app, input, options, this.loggerAdapter);
+	}
+
+	async explainQuery(input: string = '', options?: VaultQueryOptions): Promise<string> {
+		return explainVaultQuery(this.app, input, options, this.loggerAdapter);
 	}
 }
