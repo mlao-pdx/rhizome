@@ -3,14 +3,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 
 import type { App } from 'obsidian';
-import { ObsidianLoggerAdapter } from '../../src/adapters/obsidian-logger-adapter';
+import { LOG_FILE_HEADER } from '../../src/adapters/logger-format';
+import {
+	ObsidianLoggerAdapter,
+	SEGMENT_CAP_BYTES,
+} from '../../src/adapters/obsidian-logger-adapter';
 import { noticeMessages } from '../support/mock-obsidian-app';
 import { createInMemoryDataAdapter, type InMemoryDataAdapter } from '../support/mock-vault-adapter';
 
-const TEST_PLUGIN_ID = 'rhizome';
-const LOG_PATH = `_${TEST_PLUGIN_ID}/logs/${TEST_PLUGIN_ID}.log`;
-const BACKUP_PATH = `_${TEST_PLUGIN_ID}/logs/${TEST_PLUGIN_ID}.log.1`;
-const ROTATION_CAP_BYTES = 5 * 1024 * 1024;
+const TEST_PLUGIN_NAME = 'Rhizome';
+const LOGS_FOLDER = '◊Rhizome/logs';
 
 function createApp(adapter: InMemoryDataAdapter): App {
 	return {
@@ -30,6 +32,18 @@ describe('ObsidianLoggerAdapter', () => {
 		noticeMessages.length = 0;
 	});
 
+	it('derives systemRootPath as ◊Rhizome and logsFolderPath as ◊Rhizome/logs', () => {
+		const adapter = createInMemoryDataAdapter();
+		const logger = new ObsidianLoggerAdapter(
+			createApp(adapter),
+			() => ({ loggingEnabled: false, logLevel: 'warn' }),
+			TEST_PLUGIN_NAME,
+			0,
+		);
+		expect(logger.systemRootPath).toBe('◊Rhizome');
+		expect(logger.logsFolderPath).toBe(LOGS_FOLDER);
+	});
+
 	it('touches no vault I/O while logging is disabled', async () => {
 		const adapter = createInMemoryDataAdapter();
 		const logger = new ObsidianLoggerAdapter(
@@ -38,11 +52,12 @@ describe('ObsidianLoggerAdapter', () => {
 				loggingEnabled: false,
 				logLevel: 'debug',
 			}),
-			TEST_PLUGIN_ID,
+			TEST_PLUGIN_NAME,
+			0,
 		);
 
-		logger.log('error', 'should not write');
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		logger.log('error', 'should not write', { source: 'test' });
+		await logger.flush();
 
 		expect(adapter.files.size).toBe(0);
 		expect(adapter.dirs.size).toBe(0);
@@ -56,16 +71,17 @@ describe('ObsidianLoggerAdapter', () => {
 				loggingEnabled: true,
 				logLevel: 'warn',
 			}),
-			TEST_PLUGIN_ID,
+			TEST_PLUGIN_NAME,
+			0,
 		);
 
-		logger.log('debug', 'should not write');
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		logger.log('debug', 'should not write', { source: 'test' });
+		await logger.flush();
 
 		expect(adapter.files.size).toBe(0);
 	});
 
-	it('writes a formatted line to the derived log path', async () => {
+	it('writes a Markdown table file with ◊InternalRhizome frontmatter under ◊Rhizome/logs/<epoch>.md', async () => {
 		const adapter = createInMemoryDataAdapter();
 		const logger = new ObsidianLoggerAdapter(
 			createApp(adapter),
@@ -73,121 +89,123 @@ describe('ObsidianLoggerAdapter', () => {
 				loggingEnabled: true,
 				logLevel: 'debug',
 			}),
-			TEST_PLUGIN_ID,
+			TEST_PLUGIN_NAME,
+			0,
 		);
 
-		logger.log('debug', 'hello', { count: 1 });
-
-		await vi.waitFor(() => {
-			expect(adapter.files.get(LOG_PATH)).toBeDefined();
+		logger.log('debug', 'Compiled ‼️query1‼️', {
+			source: 'query.compile',
+			durationMs: 7,
+			count: 1,
 		});
-		const content = adapter.files.get(LOG_PATH) ?? '';
-		expect(content).toMatch(
-			/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \[DEBUG] hello \{"count":1\}\n$/,
+		await logger.flush();
+
+		expect(adapter.dirs.has('◊Rhizome')).toBe(true);
+		expect(adapter.dirs.has(LOGS_FOLDER)).toBe(true);
+		const logPath = logger.currentLogPath;
+		expect(logPath).toMatch(/^◊Rhizome\/logs\/\d+\.md$/);
+
+		const content = adapter.files.get(logPath!) ?? '';
+		expect(content.startsWith(LOG_FILE_HEADER)).toBe(true);
+		expect(content).toContain(
+			'| DEBUG | query.compile | 7 ms | 1 | Compiled xxxxx9 | Compiled ‼️query1‼️ |',
 		);
-		expect(adapter.dirs.has(`_${TEST_PLUGIN_ID}/logs`)).toBe(true);
 	});
 
-	it('rotates the log file to its backup once the size cap is exceeded', async () => {
+	it('coalesces debounced log calls into a single segment write', async () => {
 		const adapter = createInMemoryDataAdapter();
-		adapter.dirs.add(`_${TEST_PLUGIN_ID}/logs`);
-		adapter.files.set(LOG_PATH, 'x'.repeat(ROTATION_CAP_BYTES + 1));
+		const writeSpy = vi.spyOn(adapter, 'write');
+		const appendSpy = vi.spyOn(adapter, 'append');
 		const logger = new ObsidianLoggerAdapter(
 			createApp(adapter),
 			() => ({
 				loggingEnabled: true,
 				logLevel: 'debug',
 			}),
-			TEST_PLUGIN_ID,
+			TEST_PLUGIN_NAME,
+			25,
 		);
 
-		logger.log('debug', 'new line after rotation');
+		logger.log('debug', 'line 1', { source: 'test' });
+		logger.log('debug', 'line 2', { source: 'test' });
+		expect(adapter.files.size).toBe(0);
 
 		await vi.waitFor(() => {
-			expect(adapter.files.get(BACKUP_PATH)).toBeDefined();
+			expect(adapter.files.size).toBe(1);
 		});
-		expect(adapter.files.get(BACKUP_PATH)?.length).toBe(ROTATION_CAP_BYTES + 1);
-		expect(adapter.files.get(LOG_PATH)).toContain('new line after rotation');
+		expect(writeSpy).toHaveBeenCalledTimes(1);
+		expect(appendSpy).not.toHaveBeenCalled();
+		const logPath = logger.currentLogPath!;
+		const content = adapter.files.get(logPath) ?? '';
+		expect(content).toContain('line 1');
+		expect(content).toContain('line 2');
 	});
 
-	it('overwrites a prior backup on a second rotation, never accumulating generations', async () => {
+	it('segments into a new <epoch>.md file when the active file would exceed 512 KB', async () => {
 		const adapter = createInMemoryDataAdapter();
-		adapter.dirs.add(`_${TEST_PLUGIN_ID}/logs`);
-		adapter.files.set(LOG_PATH, 'x'.repeat(ROTATION_CAP_BYTES + 1));
-		adapter.files.set(BACKUP_PATH, 'stale backup');
 		const logger = new ObsidianLoggerAdapter(
 			createApp(adapter),
 			() => ({
 				loggingEnabled: true,
 				logLevel: 'debug',
 			}),
-			TEST_PLUGIN_ID,
+			TEST_PLUGIN_NAME,
+			0,
 		);
 
-		logger.log('debug', 'rotated line');
+		logger.log('debug', 'first segment line', { source: 'test' });
+		await logger.flush();
 
-		await vi.waitFor(() => {
-			expect(adapter.files.get(BACKUP_PATH)).not.toBe('stale backup');
-		});
-		expect(adapter.files.get(BACKUP_PATH)?.length).toBe(ROTATION_CAP_BYTES + 1);
+		const firstPath = logger.currentLogPath!;
+		adapter.files.set(firstPath, 'x'.repeat(SEGMENT_CAP_BYTES));
+
+		logger.log('debug', 'second segment line', { source: 'test' });
+		await logger.flush();
+
+		const secondPath = logger.currentLogPath!;
+		expect(secondPath).not.toBe(firstPath);
+		expect(adapter.files.get(firstPath)?.length).toBe(SEGMENT_CAP_BYTES);
+		const secondContent = adapter.files.get(secondPath) ?? '';
+		expect(secondContent.startsWith(LOG_FILE_HEADER)).toBe(true);
+		expect(secondContent).toContain('second segment line');
 	});
 
-	it('serializes concurrent log() calls so a race on rotation never loses a line or the backup', async () => {
+	it('clearLogs deletes <epoch>.md segment files in ◊Rhizome/logs while preserving non-segment files', async () => {
 		const adapter = createInMemoryDataAdapter();
-		adapter.dirs.add(`_${TEST_PLUGIN_ID}/logs`);
-		adapter.files.set(LOG_PATH, 'x'.repeat(ROTATION_CAP_BYTES + 1));
 		const logger = new ObsidianLoggerAdapter(
 			createApp(adapter),
 			() => ({
 				loggingEnabled: true,
 				logLevel: 'debug',
 			}),
-			TEST_PLUGIN_ID,
+			TEST_PLUGIN_NAME,
+			0,
 		);
 
-		// Two near-simultaneous calls both observe the file over the cap;
-		// without serialization the second rotate() would race the first.
-		logger.log('debug', 'line A');
-		logger.log('debug', 'line B');
-
-		await vi.waitFor(() => {
-			expect(adapter.files.get(LOG_PATH)).toContain('line B');
-		});
-		const backup = adapter.files.get(BACKUP_PATH);
-		expect(backup).toBeDefined();
-		expect(backup?.length).toBe(ROTATION_CAP_BYTES + 1);
-		expect(adapter.files.get(LOG_PATH)).toContain('line A');
-		expect(adapter.files.get(LOG_PATH)).toContain('line B');
-	});
-
-	it('clearLogs deletes both the log file and its backup', async () => {
-		const adapter = createInMemoryDataAdapter();
-		adapter.files.set(LOG_PATH, 'a');
-		adapter.files.set(BACKUP_PATH, 'b');
-		const logger = new ObsidianLoggerAdapter(
-			createApp(adapter),
-			() => ({
-				loggingEnabled: true,
-				logLevel: 'debug',
-			}),
-			TEST_PLUGIN_ID,
-		);
+		logger.log('debug', 'entry 1', { source: 'test' });
+		await logger.flush();
+		const firstPath = logger.currentLogPath!;
+		adapter.files.set(`${LOGS_FOLDER}/1700000000000.md`, 'old segment');
+		adapter.files.set(`${LOGS_FOLDER}/user-note.md`, 'keep me');
 
 		await logger.clearLogs();
 
-		expect(adapter.files.has(LOG_PATH)).toBe(false);
-		expect(adapter.files.has(BACKUP_PATH)).toBe(false);
+		expect(adapter.files.has(firstPath)).toBe(false);
+		expect(adapter.files.has(`${LOGS_FOLDER}/1700000000000.md`)).toBe(false);
+		expect(adapter.files.get(`${LOGS_FOLDER}/user-note.md`)).toBe('keep me');
+		expect(logger.currentLogPath).toBeUndefined();
 	});
 
 	describe('revealLogFolder', () => {
-		const mockFolder = { path: '_rhizome/logs' };
+		const mockFolder = { path: LOGS_FOLDER };
 
 		it('shows a Notice when the log folder does not exist yet', async () => {
 			const adapter = createInMemoryDataAdapter();
 			const logger = new ObsidianLoggerAdapter(
 				createApp(adapter),
 				() => ({ loggingEnabled: true, logLevel: 'warn' }),
-				TEST_PLUGIN_ID,
+				TEST_PLUGIN_NAME,
+				0,
 			);
 
 			await logger.revealLogFolder();
@@ -197,71 +215,7 @@ describe('ObsidianLoggerAdapter', () => {
 			]);
 		});
 
-		it('reveals in core Files when only file-explorer is available', async () => {
-			const adapter = createInMemoryDataAdapter();
-			const revealInFolder = vi.fn();
-			const leaf = { view: { revealInFolder } };
-			const revealLeaf = vi.fn(async () => {});
-			const app = {
-				vault: {
-					adapter,
-					getAbstractFileByPath: () => mockFolder,
-				},
-				workspace: {
-					getLeavesOfType: () => [leaf],
-					revealLeaf,
-				},
-			} as unknown as App;
-			const logger = new ObsidianLoggerAdapter(
-				app,
-				() => ({ loggingEnabled: true, logLevel: 'warn' }),
-				TEST_PLUGIN_ID,
-			);
-
-			await logger.revealLogFolder();
-
-			expect(revealLeaf).toHaveBeenCalledWith(leaf);
-			expect(revealInFolder).toHaveBeenCalledWith(mockFolder);
-			expect(noticeMessages).toEqual([]);
-		});
-
-		it('reveals in Notebook Navigator when only Notebook Navigator is available', async () => {
-			const adapter = createInMemoryDataAdapter();
-			const navigateToFolder = vi.fn(async () => true);
-			const app = {
-				vault: {
-					adapter,
-					getAbstractFileByPath: () => mockFolder,
-				},
-				workspace: {
-					getLeavesOfType: () => [],
-					revealLeaf: async () => {},
-				},
-				plugins: {
-					plugins: {
-						'notebook-navigator': {
-							api: {
-								navigation: {
-									navigateToFolder,
-								},
-							},
-						},
-					},
-				},
-			} as unknown as App;
-			const logger = new ObsidianLoggerAdapter(
-				app,
-				() => ({ loggingEnabled: true, logLevel: 'warn' }),
-				TEST_PLUGIN_ID,
-			);
-
-			await logger.revealLogFolder();
-
-			expect(navigateToFolder).toHaveBeenCalledWith(mockFolder);
-			expect(noticeMessages).toEqual([]);
-		});
-
-		it('reveals in core Files first and then Notebook Navigator when both are available', async () => {
+		it('prefers Notebook Navigator over core Files when both are available', async () => {
 			const adapter = createInMemoryDataAdapter();
 			const callOrder: string[] = [];
 			const revealInFolder = vi.fn(() => {
@@ -296,17 +250,22 @@ describe('ObsidianLoggerAdapter', () => {
 			const logger = new ObsidianLoggerAdapter(
 				app,
 				() => ({ loggingEnabled: true, logLevel: 'warn' }),
-				TEST_PLUGIN_ID,
+				TEST_PLUGIN_NAME,
+				0,
 			);
 
 			await logger.revealLogFolder();
 
-			expect(callOrder).toEqual(['files', 'notebook-navigator']);
+			expect(callOrder).toEqual(['notebook-navigator']);
+			expect(revealInFolder).not.toHaveBeenCalled();
 			expect(noticeMessages).toEqual([]);
 		});
 
-		it('shows the fallback path Notice when Notebook Navigator returns false and Files is unavailable', async () => {
+		it('falls back to core Files when Notebook Navigator is unavailable or returns false', async () => {
 			const adapter = createInMemoryDataAdapter();
+			const revealInFolder = vi.fn();
+			const leaf = { view: { revealInFolder } };
+			const revealLeaf = vi.fn(async () => {});
 			const navigateToFolder = vi.fn(async () => false);
 			const app = {
 				vault: {
@@ -314,8 +273,8 @@ describe('ObsidianLoggerAdapter', () => {
 					getAbstractFileByPath: () => mockFolder,
 				},
 				workspace: {
-					getLeavesOfType: () => [],
-					revealLeaf: async () => {},
+					getLeavesOfType: () => [leaf],
+					revealLeaf,
 				},
 				plugins: {
 					plugins: {
@@ -332,46 +291,19 @@ describe('ObsidianLoggerAdapter', () => {
 			const logger = new ObsidianLoggerAdapter(
 				app,
 				() => ({ loggingEnabled: true, logLevel: 'warn' }),
-				TEST_PLUGIN_ID,
+				TEST_PLUGIN_NAME,
+				0,
 			);
 
 			await logger.revealLogFolder();
 
 			expect(navigateToFolder).toHaveBeenCalledWith(mockFolder);
-			expect(noticeMessages).toEqual(['Log folder: _rhizome/logs']);
-		});
-
-		it('reveals in core Files when file-explorer view is deferred until revealLeaf resolves', async () => {
-			const adapter = createInMemoryDataAdapter();
-			const revealInFolder = vi.fn();
-			const leaf: { view: unknown } = { view: {} };
-			const revealLeaf = vi.fn(async () => {
-				leaf.view = { revealInFolder };
-			});
-			const app = {
-				vault: {
-					adapter,
-					getAbstractFileByPath: () => mockFolder,
-				},
-				workspace: {
-					getLeavesOfType: () => [leaf],
-					revealLeaf,
-				},
-			} as unknown as App;
-			const logger = new ObsidianLoggerAdapter(
-				app,
-				() => ({ loggingEnabled: true, logLevel: 'warn' }),
-				TEST_PLUGIN_ID,
-			);
-
-			await logger.revealLogFolder();
-
 			expect(revealLeaf).toHaveBeenCalledWith(leaf);
 			expect(revealInFolder).toHaveBeenCalledWith(mockFolder);
 			expect(noticeMessages).toEqual([]);
 		});
 
-		it('shows the fallback path Notice when neither Files nor Notebook Navigator is available', async () => {
+		it('shows the fallback path Notice when neither Notebook Navigator nor Files can reveal the folder', async () => {
 			const adapter = createInMemoryDataAdapter();
 			const app = {
 				vault: {
@@ -386,12 +318,13 @@ describe('ObsidianLoggerAdapter', () => {
 			const logger = new ObsidianLoggerAdapter(
 				app,
 				() => ({ loggingEnabled: true, logLevel: 'warn' }),
-				TEST_PLUGIN_ID,
+				TEST_PLUGIN_NAME,
+				0,
 			);
 
 			await logger.revealLogFolder();
 
-			expect(noticeMessages).toEqual(['Log folder: _rhizome/logs']);
+			expect(noticeMessages).toEqual([`Log folder: ${LOGS_FOLDER}`]);
 		});
 	});
 });

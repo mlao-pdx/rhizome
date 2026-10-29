@@ -476,6 +476,52 @@ describe('runVaultQuery', () => {
 		expect(diagRes.matches.map((d) => d.file.path)).toEqual(['notes/active.md']);
 	});
 
+	it('skips notes carrying ◊InternalRhizome code "001" in both runVaultQuery and diagnoseVaultQuery', async () => {
+		const app = makeMockApp({
+			notes: [
+				{
+					path: 'notes/user-note.md',
+					cache: { frontmatter: { status: 'active' } },
+				},
+				{
+					path: '◊Rhizome/logs/1700000000000.md',
+					cache: {
+						frontmatter: {
+							status: 'active',
+							'◊InternalRhizome': {
+								'001': 'Do not index or query.',
+							},
+						},
+					},
+				},
+				{
+					path: 'notes/other-internal-code.md',
+					cache: {
+						frontmatter: {
+							status: 'active',
+							'◊InternalRhizome': {
+								'024': 'The moon is blue, so do not wash the linens.',
+							},
+						},
+					},
+				},
+			],
+		});
+
+		const runRes = await runVaultQuery(
+			app,
+			{ active: '[status: active]' },
+			{ timeZone: 'UTC' },
+		);
+		expect(runRes['active']?.map((m) => m.file.path)).toEqual([
+			'notes/user-note.md',
+			'notes/other-internal-code.md',
+		]);
+
+		const diagRes = await diagnoseVaultQuery(app, '[status: active]', { timeZone: 'UTC' });
+		expect(diagRes.paths).toEqual(['notes/user-note.md', 'notes/other-internal-code.md']);
+	});
+
 	it('overrides types.json entries case-insensitively via options.propertyTypes', async () => {
 		const app = makeMockApp({
 			typesJson: JSON.stringify({ types: { due: 'text' } }),
@@ -555,7 +601,7 @@ describe('runVaultQuery', () => {
 			const calls: Array<{
 				level: 'debug' | 'warn' | 'error';
 				message: string;
-				meta?: Record<string, unknown>;
+				meta: Record<string, unknown>;
 			}> = [];
 			return {
 				calls,
@@ -563,9 +609,9 @@ describe('runVaultQuery', () => {
 					log(
 						level: 'debug' | 'warn' | 'error',
 						message: string,
-						meta?: Record<string, unknown>,
+						meta: { readonly source: string; readonly [key: string]: unknown },
 					) {
-						calls.push({ level, message, ...(meta !== undefined ? { meta } : {}) });
+						calls.push({ level, message, meta });
 					},
 				},
 			};
@@ -584,8 +630,8 @@ describe('runVaultQuery', () => {
 			);
 			expect(badTypesSpy.calls).toContainEqual({
 				level: 'warn',
-				message: 'Failed to parse vault property types from «mock-config/types.json»',
-				meta: { reason: 'invalid_json' },
+				message: 'Failed to parse vault property types from ‼️mock-config/types.json‼️',
+				meta: { source: 'query.types', reason: 'invalid_json' },
 			});
 
 			const filteredSpy = createLoggerSpy();
@@ -608,8 +654,10 @@ describe('runVaultQuery', () => {
 			expect(filteredSpy.calls).toContainEqual({
 				level: 'debug',
 				message:
-					'Filtered unsupported or colliding property types in «mock-config/types.json»',
+					'Filtered unsupported or colliding property types in ‼️mock-config/types.json‼️',
 				meta: {
+					source: 'query.types',
+					count: 1,
 					validCount: 1,
 					unsupportedCount: 1,
 					collisionCount: 1,
@@ -625,14 +673,15 @@ describe('runVaultQuery', () => {
 				level: 'error',
 				message: 'Query engine configuration failed',
 				meta: {
-					timeZone: '«Not/A_Real_Zone»',
+					source: 'query.config',
+					timeZone: '‼️Not/A_Real_Zone‼️',
 					codes: ['ERROR_INVALID_CONFIG'],
 					count: 1,
 				},
 			});
 		});
 
-		it('logs warn for compilation errors or lint warnings and debug for clean queries with guillemet wrapping', async () => {
+		it('logs warn for compilation errors or lint warnings and debug for clean queries with ‼️...‼️ wrapping', async () => {
 			const spy = createLoggerSpy();
 			const app = makeMockApp({
 				typesJson: JSON.stringify({ types: { priority: 'number' } }),
@@ -650,18 +699,22 @@ describe('runVaultQuery', () => {
 
 			expect(spy.calls).toContainEqual({
 				level: 'debug',
-				message: 'Compiled query «cleanQuery»',
+				message: 'Compiled query ‼️cleanQuery‼️',
 				meta: {
-					query: '«#project»',
+					source: 'query.compile',
+					count: 0,
+					query: '‼️#project‼️',
 					executable: true,
 					hintCodes: [],
 				},
 			});
 			expect(spy.calls).toContainEqual({
 				level: 'warn',
-				message: 'Query compilation diagnostics for «warnQuery»',
+				message: 'Query compilation diagnostics for ‼️warnQuery‼️',
 				meta: {
-					query: '«alpha and beta»',
+					source: 'query.compile',
+					count: 3,
+					query: '‼️alpha and beta‼️',
 					executable: true,
 					errorCodes: [],
 					warningCodes: ['WARN_LOWERCASE_BOOLEAN'],
@@ -670,9 +723,11 @@ describe('runVaultQuery', () => {
 			});
 			expect(spy.calls).toContainEqual({
 				level: 'warn',
-				message: 'Query compilation diagnostics for «brokenQuery»',
+				message: 'Query compilation diagnostics for ‼️brokenQuery‼️',
 				meta: {
-					query: '«[priority: = "nan"]»',
+					source: 'query.compile',
+					count: 1,
+					query: '‼️[priority: = "nan"]‼️',
 					executable: false,
 					errorCodes: ['ERROR_TYPE_MISMATCH'],
 					warningCodes: [],
@@ -721,25 +776,76 @@ describe('runVaultQuery', () => {
 				level: 'warn',
 				message: 'Encountered invalid property values on queried keys',
 				meta: {
+					source: 'query.run',
+					count: 1,
 					diagnosticCount: 1,
 					affectedNotes: 1,
 					codes: ['DOC_INVALID_PROPERTY_VALUE'],
-					keys: ['«priority»'],
-					sampleFiles: ['«notes/bad-priority.md»'],
+					keys: ['‼️priority‼️'],
+					sampleFiles: ['‼️notes/bad-priority.md‼️'],
 				},
 			});
 
 			const summary = spy.calls.find((c) => c.message === 'Completed vault query run');
 			expect(summary?.level).toBe('debug');
 			expect(summary?.meta).toMatchObject({
+				source: 'query.run',
+				count: 2,
 				queryCount: 1,
 				executableCount: 1,
 				notesScanned: 2,
 				uncachedNotes: 1,
 				docDiagnosticCount: 1,
-				matchCounts: { '«highPriority»': 0 },
+				matchCounts: { '‼️highPriority‼️': 0 },
 			});
 			expect(typeof summary?.meta?.['durationMs']).toBe('number');
+		});
+
+		it('diagnoseVaultQuery logs completion even when compilation fails and flushes property diagnostics when executable', async () => {
+			const failedSpy = createLoggerSpy();
+			const app = makeMockApp({
+				typesJson: JSON.stringify({ types: { priority: 'number' } }),
+				notes: [
+					{
+						path: 'notes/bad-priority.md',
+						cache: { frontmatter: { priority: 'urgent' } },
+					},
+				],
+			});
+
+			await diagnoseVaultQuery(
+				app,
+				'[priority: = "nan"]',
+				{ timeZone: 'UTC' },
+				failedSpy.logger,
+			);
+			const failedSummary = failedSpy.calls.find(
+				(c) => c.message === 'Completed diagnoseVaultQuery',
+			);
+			expect(failedSummary?.level).toBe('debug');
+			expect(failedSummary?.meta).toMatchObject({
+				source: 'query.diagnose',
+				count: 0,
+				queryCount: 1,
+				executableCount: 0,
+				notesScanned: 0,
+			});
+
+			const execSpy = createLoggerSpy();
+			await diagnoseVaultQuery(app, '[priority: > 1]', { timeZone: 'UTC' }, execSpy.logger);
+			expect(
+				execSpy.calls.find(
+					(c) => c.message === 'Encountered invalid property values on queried keys',
+				),
+			).toMatchObject({
+				level: 'warn',
+				meta: {
+					source: 'query.diagnose',
+					count: 1,
+					keys: ['‼️priority‼️'],
+					sampleFiles: ['‼️notes/bad-priority.md‼️'],
+				},
+			});
 		});
 
 		it('explainVaultQuery loads types.json and merges overrides without scanning any vault notes', async () => {
@@ -786,8 +892,9 @@ describe('runVaultQuery', () => {
 			expect(md).toContain('`custom_override`[^6]');
 			const explainLog = spy.calls.find((c) => c.message === 'Generated query explanation');
 			expect(explainLog?.level).toBe('debug');
+			expect(explainLog?.meta?.['source']).toBe('query.explain');
 			expect(explainLog?.meta?.['query']).toBe(
-				'«#work [priority: >= 2] [due: = @today] [custom_override: = true]»',
+				'‼️#work [priority: >= 2] [due: = @today] [custom_override: = true]‼️',
 			);
 			expect(typeof explainLog?.meta?.['durationMs']).toBe('number');
 		});

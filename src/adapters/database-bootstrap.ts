@@ -1,6 +1,7 @@
 import type { LoggerPort } from '@ports/logger-port';
 import type { PluginDatabase } from './dexie-persistence-adapter';
 import { IDENTITY_KEY, IDENTITY_RECORD_FORMAT, decideBootstrapAction } from './database-identity';
+import { markSensitive } from './logger-format';
 
 /**
  * The lazy bootstrap that finds, verifies, and (re)creates the persistence
@@ -58,8 +59,9 @@ export async function bootstrapPersistenceDatabase(
 		const created = await createWithIdentity(params.openDatabase, vaultInstanceId);
 		params.logger?.log(
 			'debug',
-			`Persistence database bootstrap complete on «${params.dbName}»`,
+			`Persistence database bootstrap complete on ${markSensitive(params.dbName)}`,
 			{
+				source: 'db.bootstrap',
 				action: 'create',
 			},
 		);
@@ -84,8 +86,9 @@ export async function bootstrapPersistenceDatabase(
 	if (decision.database === 'reuse') {
 		params.logger?.log(
 			'debug',
-			`Persistence database bootstrap complete on «${params.dbName}»`,
+			`Persistence database bootstrap complete on ${markSensitive(params.dbName)}`,
 			{
+				source: 'db.bootstrap',
 				action: 'reuse',
 			},
 		);
@@ -99,15 +102,16 @@ export async function bootstrapPersistenceDatabase(
 		await probed.delete();
 	} catch (error) {
 		throw new UntrustedDatabaseDeleteError(
-			`Unable to delete an untrusted database («${params.dbName}»); refusing to use it.`,
+			`Unable to delete an untrusted database (${markSensitive(params.dbName)}); refusing to use it.`,
 			{ cause: error },
 		);
 	}
 	const recreated = await createWithIdentity(params.openDatabase, vaultInstanceId);
 	params.logger?.log(
 		'warn',
-		`Recreated persistence database «${params.dbName}» due to missing or mismatched identity`,
+		`Recreated persistence database ${markSensitive(params.dbName)} due to missing or mismatched identity`,
 		{
+			source: 'db.bootstrap',
 			action: 'recreate',
 		},
 	);

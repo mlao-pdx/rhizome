@@ -8,6 +8,7 @@ import {
 	type SearchDiagnostic,
 } from '@core/search';
 import type { LoggerPort } from '@ports/logger-port';
+import { markSensitive } from './logger-format';
 
 const BUILTIN_PROPERTY_KEYS: ReadonlySet<string> = new Set(['alias', 'aliases', 'tag', 'tags']);
 const MAX_SAMPLE_FILES = 5;
@@ -126,18 +127,29 @@ export async function loadVaultPropertyTypes(
 
 	const inspected = inspectObsidianTypesJson(raw);
 	if (inspected.malformedReason !== null) {
-		logger?.log('warn', `Failed to parse vault property types from «${typesPath}»`, {
-			reason: inspected.malformedReason,
-		});
+		logger?.log(
+			'warn',
+			`Failed to parse vault property types from ${markSensitive(typesPath)}`,
+			{
+				source: 'query.types',
+				reason: inspected.malformedReason,
+			},
+		);
 		return inspected.registry;
 	}
 
 	if (inspected.unsupportedCount > 0 || inspected.collisionCount > 0) {
-		logger?.log('debug', `Filtered unsupported or colliding property types in «${typesPath}»`, {
-			validCount: inspected.validCount,
-			unsupportedCount: inspected.unsupportedCount,
-			collisionCount: inspected.collisionCount,
-		});
+		logger?.log(
+			'debug',
+			`Filtered unsupported or colliding property types in ${markSensitive(typesPath)}`,
+			{
+				source: 'query.types',
+				count: inspected.validCount,
+				validCount: inspected.validCount,
+				unsupportedCount: inspected.unsupportedCount,
+				collisionCount: inspected.collisionCount,
+			},
+		);
 	}
 
 	return inspected.registry;
@@ -149,7 +161,8 @@ export function logEngineConfigFailure(
 	diagnostics: readonly SearchDiagnostic[],
 ): void {
 	logger?.log('error', 'Query engine configuration failed', {
-		timeZone: `«${String(timeZone)}»`,
+		source: 'query.config',
+		timeZone: markSensitive(timeZone),
 		codes: diagnostics.map((d) => d.code),
 		count: diagnostics.length,
 	});
@@ -178,16 +191,20 @@ export function logQueryCompilation(
 	}
 
 	if (!compileResult.executable || warningCodes.size > 0) {
-		logger.log('warn', `Query compilation diagnostics for «${name}»`, {
-			query: `«${rawInput}»`,
+		logger.log('warn', `Query compilation diagnostics for ${markSensitive(name)}`, {
+			source: 'query.compile',
+			count: compileResult.diagnostics.length,
+			query: markSensitive(rawInput),
 			executable: compileResult.executable,
 			errorCodes: [...errorCodes],
 			warningCodes: [...warningCodes],
 			hintCodes: [...hintCodes],
 		});
 	} else {
-		logger.log('debug', `Compiled query «${name}»`, {
-			query: `«${rawInput}»`,
+		logger.log('debug', `Compiled query ${markSensitive(name)}`, {
+			source: 'query.compile',
+			count: compileResult.diagnostics.length,
+			query: markSensitive(rawInput),
 			executable: true,
 			hintCodes: [...hintCodes],
 		});
@@ -215,21 +232,23 @@ export class QueriedPropertyDiagnosticsAggregator {
 			noteAffected = true;
 			this.diagnosticCount++;
 			this.codes.add(d.code);
-			this.keys.add(`«${d.propertyKey}»`);
+			this.keys.add(markSensitive(d.propertyKey));
 		}
 		if (noteAffected) {
 			this.affectedNotes++;
 			if (this.sampleFiles.length < MAX_SAMPLE_FILES) {
-				this.sampleFiles.push(`«${filePath}»`);
+				this.sampleFiles.push(markSensitive(filePath));
 			}
 		}
 	}
 
-	flush(logger: LoggerPort | undefined): void {
+	flush(logger: LoggerPort | undefined, source: string = 'query.run'): void {
 		if (!logger || this.diagnosticCount === 0) {
 			return;
 		}
 		logger.log('warn', 'Encountered invalid property values on queried keys', {
+			source,
+			count: this.diagnosticCount,
 			diagnosticCount: this.diagnosticCount,
 			affectedNotes: this.affectedNotes,
 			codes: [...this.codes],

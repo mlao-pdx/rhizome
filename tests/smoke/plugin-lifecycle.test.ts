@@ -4,7 +4,12 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 
 import RhizomePlugin from '../../src/main';
-import { createMockApp, createMockManifest } from '../support/mock-obsidian-app';
+import {
+	createdSettings,
+	createMockApp,
+	createMockManifest,
+	openedModals,
+} from '../support/mock-obsidian-app';
 
 function createPlugin(): RhizomePlugin {
 	const app = createMockApp() as App;
@@ -25,10 +30,12 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 	});
 
 	it('settings load with defaults when loadData() resolves undefined', async () => {
+		openedModals.length = 0;
 		const plugin = createPlugin();
 		await plugin.onload();
 		expect(plugin.settings.loggingEnabled).toBe(false);
 		expect(plugin.settings.logLevel).toBe('warn');
+		expect(openedModals).toHaveLength(0);
 	});
 
 	it('constructs a loggerAdapter during onload()', async () => {
@@ -37,10 +44,44 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		expect(plugin.loggerAdapter).toBeDefined();
 	});
 
-	it('derives the log folder path from the manifest id, not a hardcoded literal', async () => {
+	it('derives the log folder path from the manifest name with the ◊ system prefix', async () => {
 		const plugin = createPlugin();
 		await plugin.onload();
-		expect(plugin.loggerAdapter.logsFolderPath).toBe('_rhizome/logs');
+		expect(plugin.loggerAdapter.logsFolderPath).toBe('◊Rhizome/logs');
+	});
+
+	it('opens DiagnosticsLoggingModal on layout ready when loggingEnabled is true and allows changing level or turning off logging', async () => {
+		openedModals.length = 0;
+		createdSettings.length = 0;
+		const plugin = createPlugin();
+		plugin.loadData = async () => ({
+			settings: { loggingEnabled: true, logLevel: 'debug' },
+		});
+		const savedData: unknown[] = [];
+		plugin.saveData = async (data: unknown) => {
+			savedData.push(data);
+		};
+
+		await plugin.onload();
+
+		expect(openedModals).toHaveLength(1);
+		const modal = openedModals[0]!;
+		expect(modal.title).toBe('Diagnostic logging is enabled');
+		expect(modal.paragraphs[0]).toContain('◊Rhizome/logs/');
+		expect(modal.paragraphs[0]).toContain('"debug"');
+
+		const dropdown = createdSettings.flatMap((s) => s.dropdowns)[0]!;
+		expect(dropdown.value).toBe('debug');
+		dropdown.changeHandler?.('warn');
+
+		const buttons = createdSettings.flatMap((s) => s.buttons);
+		expect(buttons.map((b) => b.buttonText)).toEqual(['Turn off logging', 'Continue logging']);
+
+		await buttons[0]!.clickHandler?.({} as MouseEvent);
+		expect(plugin.settings.loggingEnabled).toBe(false);
+		expect(plugin.settings.logLevel).toBe('warn');
+		expect(modal.isOpen).toBe(false);
+		expect(savedData).toHaveLength(1);
 	});
 
 	it('query() evaluates against the vault and returns matched note payloads keyed by query name', async () => {

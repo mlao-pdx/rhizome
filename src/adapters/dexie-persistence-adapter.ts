@@ -4,6 +4,7 @@ import type { LoggerPort } from '@ports/logger-port';
 import type { ExampleRecord, PersistencePort } from '@ports/persistence-port';
 import { UntrustedDatabaseDeleteError, bootstrapPersistenceDatabase } from './database-bootstrap';
 import type { DatabaseIdentityRecord } from './database-identity';
+import { markSensitive } from './logger-format';
 import { derivePersistenceDbName } from './persistence-db-name';
 
 /**
@@ -204,8 +205,8 @@ export class DexiePersistenceAdapter implements PersistencePort {
 	 * Uniform error policy: log at `error`, then rethrow. The port is a
 	 * data contract — swallowing errors would invent recovery policy the
 	 * caller cannot know. Vault-derived values (the database name embeds a
-	 * hash of the vault root) are wrapped in guillemets per `LoggerPort`'s
-	 * redaction contract; the raw vault path itself never appears.
+	 * hash of the vault root) are wrapped in `‼️...‼️` per `LoggerPort`'s
+	 * sensitivity-marking contract; the raw vault path itself never appears.
 	 */
 	private async withDb<T>(
 		operation: string,
@@ -215,9 +216,14 @@ export class DexiePersistenceAdapter implements PersistencePort {
 			const db = await this.bootstrap();
 			return await use(db);
 		} catch (error) {
-			this.logger.log('error', `IndexedDB ${operation} failed on «${this.dbName}»`, {
-				error: String(error),
-			});
+			this.logger.log(
+				'error',
+				`IndexedDB ${operation} failed on ${markSensitive(this.dbName)}`,
+				{
+					source: 'db.persistence',
+					error: String(error),
+				},
+			);
 			throw error;
 		}
 	}

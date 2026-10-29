@@ -54,6 +54,50 @@ export class Notice {
 	}
 }
 
+export const openedModals: Modal[] = [];
+
+export class Modal {
+	app: unknown;
+	title = '';
+	isOpen = false;
+	readonly paragraphs: string[] = [];
+	contentEl = {
+		empty: () => {
+			this.paragraphs.length = 0;
+		},
+		createEl: (_tag: string, options?: { text?: string }) => {
+			if (options?.text !== undefined) {
+				this.paragraphs.push(options.text);
+			}
+			return {};
+		},
+	};
+
+	constructor(app: unknown) {
+		this.app = app;
+	}
+
+	setTitle(title: string): this {
+		this.title = title;
+		return this;
+	}
+
+	onOpen(): void {}
+
+	onClose(): void {}
+
+	open(): void {
+		this.isOpen = true;
+		openedModals.push(this);
+		this.onOpen();
+	}
+
+	close(): void {
+		this.isOpen = false;
+		this.onClose();
+	}
+}
+
 export class PluginSettingTab {
 	app: unknown;
 	plugin: unknown;
@@ -68,14 +112,25 @@ export class PluginSettingTab {
 	}
 }
 
-export class Setting {
-	constructor(_containerEl: unknown) {}
+export const createdSettings: Setting[] = [];
 
-	setName(_name: string): this {
+export class Setting {
+	name = '';
+	desc = '';
+	readonly dropdowns: MockDropdownComponent[] = [];
+	readonly buttons: MockButtonComponent[] = [];
+
+	constructor(_containerEl: unknown) {
+		createdSettings.push(this);
+	}
+
+	setName(name: string): this {
+		this.name = name;
 		return this;
 	}
 
-	setDesc(_desc: string): this {
+	setDesc(desc: string): this {
+		this.desc = desc;
 		return this;
 	}
 
@@ -89,12 +144,16 @@ export class Setting {
 	}
 
 	addDropdown(configure: (component: MockDropdownComponent) => unknown): this {
-		configure(new MockDropdownComponent());
+		const dropdown = new MockDropdownComponent();
+		this.dropdowns.push(dropdown);
+		configure(dropdown);
 		return this;
 	}
 
 	addButton(configure: (component: MockButtonComponent) => unknown): this {
-		configure(new MockButtonComponent());
+		const button = new MockButtonComponent();
+		this.buttons.push(button);
+		configure(button);
 		return this;
 	}
 
@@ -116,34 +175,56 @@ export class MockToggleComponent {
 
 /** Minimal stand-in for Obsidian's `DropdownComponent`. */
 export class MockDropdownComponent {
-	addOption(_value: string, _display: string): this {
+	readonly options: Array<{ value: string; display: string }> = [];
+	value = '';
+	disabled = false;
+	changeHandler: ((value: string) => unknown) | undefined;
+
+	addOption(value: string, display: string): this {
+		this.options.push({ value, display });
 		return this;
 	}
 
-	setValue(_value: string): this {
+	setValue(value: string): this {
+		this.value = value;
 		return this;
 	}
 
-	setDisabled(_disabled: boolean): this {
+	setDisabled(disabled: boolean): this {
+		this.disabled = disabled;
 		return this;
 	}
 
-	onChange(_callback: (value: string) => unknown): this {
+	onChange(callback: (value: string) => unknown): this {
+		this.changeHandler = callback;
 		return this;
 	}
 }
 
 /** Minimal stand-in for Obsidian's `ButtonComponent`. */
 export class MockButtonComponent {
-	setButtonText(_text: string): this {
+	buttonText = '';
+	isCta = false;
+	isWarning = false;
+	clickHandler: ((evt: MouseEvent) => unknown) | undefined;
+
+	setButtonText(text: string): this {
+		this.buttonText = text;
+		return this;
+	}
+
+	setCta(): this {
+		this.isCta = true;
 		return this;
 	}
 
 	setWarning(): this {
+		this.isWarning = true;
 		return this;
 	}
 
-	onClick(_callback: (evt: MouseEvent) => unknown): this {
+	onClick(callback: (evt: MouseEvent) => unknown): this {
+		this.clickHandler = callback;
 		return this;
 	}
 }
@@ -191,6 +272,13 @@ export function createMockApp(): unknown {
 		metadataCache: {
 			getFileCache: () => null,
 			getFirstLinkpathDest: () => null,
+		},
+		workspace: {
+			onLayoutReady: (cb: () => unknown) => {
+				cb();
+			},
+			getLeavesOfType: () => [],
+			revealLeaf: async () => {},
 		},
 	};
 }

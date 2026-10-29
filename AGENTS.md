@@ -125,6 +125,10 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
 - IndexedDB database naming and identity (address vs identity, the
   `{pluginId}/{databaseId}/{vaultRootHash}` pattern, verification and
   crash-consistency ordering): `docs/dev/indexeddb-database-identity.md`.
+- Diagnostic logging contract for routines (`LoggerPort`, mandatory vs
+  optional table columns, `meta.source` naming, `‼️...‼️` sensitivity
+  markers, and `◊InternalRhizome` frontmatter flags):
+  `src/ports/README.md` and `src/ports/logger-port.ts`.
 - Creating or revising a decision record (rev-tagged IBIS diagrams
   recording a design decision's reasoning and history, with `wins over`
   supersession and `thus` consequence edges): load the

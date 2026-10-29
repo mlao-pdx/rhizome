@@ -7,7 +7,9 @@ import {
 	explainQuery,
 	FORBIDDEN_KEYS,
 	getExecutionPlan,
+	hasInternalRhizomeFlag,
 	initEngineConfig,
+	INTERNAL_RHIZOME_CODES,
 	type NormalizedDocument,
 	type NormalizedFileInfo,
 	type NormalizedHeading,
@@ -20,6 +22,7 @@ import {
 	type SearchDiagnostic,
 } from '@core/search';
 import type { LoggerPort } from '@ports/logger-port';
+import { markSensitive } from './logger-format';
 import {
 	loadVaultPropertyTypes,
 	logEngineConfigFailure,
@@ -205,7 +208,9 @@ export async function runVaultQuery(
 
 	if (executableQueries.length === 0) {
 		logger?.log('debug', 'Completed vault query run', {
+			source: 'query.run',
 			durationMs: Math.max(0, Date.now() - startedAt),
+			count: 0,
 			queryCount: sanitizedEntries.length,
 			executableCount: 0,
 			notesScanned: 0,
@@ -234,8 +239,13 @@ export async function runVaultQuery(
 		if ((file as { deleted?: boolean }).deleted) {
 			continue;
 		}
-		notesScanned++;
 		const cache = app.metadataCache.getFileCache(file);
+		if (
+			hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)
+		) {
+			continue;
+		}
+		notesScanned++;
 		if (cache === null) {
 			uncachedNotes++;
 		}
@@ -243,7 +253,8 @@ export async function runVaultQuery(
 		try {
 			doc = normalizeObsidianMetadata(file, cache, configResult.config, [], resolveLinkPath);
 		} catch (error) {
-			logger?.log('error', `Failed to normalize note «${file.path}»`, {
+			logger?.log('error', `Failed to normalize note ${markSensitive(file.path)}`, {
+				source: 'query.run',
 				error: String(error),
 			});
 			throw error;
@@ -259,14 +270,16 @@ export async function runVaultQuery(
 		}
 	}
 
-	propDiagnosticsAggregator.flush(logger);
+	propDiagnosticsAggregator.flush(logger, 'query.run');
 
 	const matchCounts: Record<string, number> = {};
 	for (const entry of executableQueries) {
-		matchCounts[`«${entry.name}»`] = entry.bucket.length;
+		matchCounts[markSensitive(entry.name)] = entry.bucket.length;
 	}
 	logger?.log('debug', 'Completed vault query run', {
+		source: 'query.run',
 		durationMs: Math.max(0, Date.now() - startedAt),
+		count: notesScanned,
 		queryCount: sanitizedEntries.length,
 		executableCount: executableQueries.length,
 		notesScanned,
@@ -311,6 +324,17 @@ export async function diagnoseVaultQuery(
 	const compileResult = compileQuery(input, configResult.config, referenceTimeMs);
 	logQueryCompilation(logger, 'diagnose', input, compileResult);
 	if (!compileResult.executable || !compileResult.prepared) {
+		logger?.log('debug', 'Completed diagnoseVaultQuery', {
+			source: 'query.diagnose',
+			durationMs: Math.max(0, Date.now() - startedAt),
+			count: 0,
+			queryCount: 1,
+			executableCount: 0,
+			notesScanned: 0,
+			uncachedNotes: 0,
+			docDiagnosticCount: 0,
+			matchCounts: {},
+		});
 		return {
 			executable: false,
 			paths: [],
@@ -319,6 +343,9 @@ export async function diagnoseVaultQuery(
 			propertyDiagnostics: [],
 		};
 	}
+
+	const queriedKeys = new Set<string>(getExecutionPlan(compileResult.prepared).queriedKeys);
+	const propDiagnosticsAggregator = new QueriedPropertyDiagnosticsAggregator(queriedKeys);
 
 	const resolveLinkPath: ResolveLinkPathFn = (rawTarget, sourcePath) =>
 		app.metadataCache.getFirstLinkpathDest(rawTarget, sourcePath)?.path ?? null;
@@ -331,33 +358,44 @@ export async function diagnoseVaultQuery(
 		if ((file as { deleted?: boolean }).deleted) {
 			continue;
 		}
-		notesScanned++;
 		const cache = app.metadataCache.getFileCache(file);
+		if (
+			hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)
+		) {
+			continue;
+		}
+		notesScanned++;
 		if (cache === null) {
 			uncachedNotes++;
 		}
+		let doc: NormalizedDocument;
 		try {
-			docs.push(
-				normalizeObsidianMetadata(file, cache, configResult.config, [], resolveLinkPath),
-			);
+			doc = normalizeObsidianMetadata(file, cache, configResult.config, [], resolveLinkPath);
 		} catch (error) {
-			logger?.log('error', `Failed to normalize note «${file.path}»`, {
+			logger?.log('error', `Failed to normalize note ${markSensitive(file.path)}`, {
+				source: 'query.diagnose',
 				error: String(error),
 			});
 			throw error;
 		}
+		propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
+		docs.push(doc);
 	}
+
+	propDiagnosticsAggregator.flush(logger, 'query.diagnose');
 
 	const report = evaluateVault(docs, compileResult.prepared);
 
 	logger?.log('debug', 'Completed diagnoseVaultQuery', {
+		source: 'query.diagnose',
 		durationMs: Math.max(0, Date.now() - startedAt),
+		count: notesScanned,
 		queryCount: 1,
 		executableCount: 1,
 		notesScanned,
 		uncachedNotes,
 		docDiagnosticCount: report.propertyDiagnostics.length,
-		matchCounts: { '«diagnose»': report.matches.length },
+		matchCounts: { [markSensitive('diagnose')]: report.matches.length },
 	});
 
 	return {
@@ -394,7 +432,8 @@ export async function explainVaultQuery(
 	);
 
 	logger?.log('debug', 'Generated query explanation', {
-		query: `«${input}»`,
+		source: 'query.explain',
+		query: markSensitive(input),
 		durationMs: Math.max(0, Date.now() - startedAt),
 	});
 

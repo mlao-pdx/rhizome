@@ -5,7 +5,7 @@ vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 import { Dexie } from 'dexie';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import type { ExampleRecord } from '../../src/ports/persistence-port';
-import type { LogLevel } from '../../src/ports/logger-port';
+import type { LogEntryMeta, LogLevel } from '../../src/ports/logger-port';
 import type { DatabaseIdentityRecord } from '../../src/adapters/database-identity';
 import { IDENTITY_KEY, IDENTITY_RECORD_FORMAT } from '../../src/adapters/database-identity';
 import {
@@ -27,18 +27,18 @@ const PERSISTED_ID = 'vault-instance-1';
 
 interface LoggerSpy {
 	readonly logger: {
-		log(level: LogLevel, message: string, meta?: Record<string, unknown>): void;
+		log(level: LogLevel, message: string, meta: LogEntryMeta): void;
 	};
-	readonly calls: Array<{ level: LogLevel; message: string; meta?: Record<string, unknown> }>;
+	readonly calls: Array<{ level: LogLevel; message: string; meta: LogEntryMeta }>;
 }
 
 function createLoggerSpy(): LoggerSpy {
-	const calls: Array<{ level: LogLevel; message: string; meta?: Record<string, unknown> }> = [];
+	const calls: Array<{ level: LogLevel; message: string; meta: LogEntryMeta }> = [];
 	return {
 		calls,
 		logger: {
 			log: (level, message, meta) => {
-				calls.push({ level, message, ...(meta !== undefined ? { meta } : {}) });
+				calls.push({ level, message, meta });
 			},
 		},
 	};
@@ -145,8 +145,8 @@ describe('DexiePersistenceAdapter', () => {
 
 		expect(logCalls).toContainEqual({
 			level: 'debug',
-			message: `Persistence database bootstrap complete on «${DB_NAME}»`,
-			meta: { action: 'create' },
+			message: `Persistence database bootstrap complete on ‼️${DB_NAME}‼️`,
+			meta: { source: 'db.bootstrap', action: 'create' },
 		});
 		const stored = (await readStoredIdentity(factory)) as DatabaseIdentityRecord;
 		expect(stored).toEqual(identityRecord(PERSISTED_ID));
@@ -169,8 +169,8 @@ describe('DexiePersistenceAdapter', () => {
 		expect(await adapter.get(1)).toEqual({ id: 1, value: 'kept' });
 		expect(logCalls).toContainEqual({
 			level: 'debug',
-			message: `Persistence database bootstrap complete on «${DB_NAME}»`,
-			meta: { action: 'reuse' },
+			message: `Persistence database bootstrap complete on ‼️${DB_NAME}‼️`,
+			meta: { source: 'db.bootstrap', action: 'reuse' },
 		});
 		expect(await readStoredIdentity(factory)).toEqual(identityRecord(PERSISTED_ID));
 	});
@@ -190,8 +190,8 @@ describe('DexiePersistenceAdapter', () => {
 		expect(await adapter.get(2)).toBeUndefined();
 		expect(logCalls).toContainEqual({
 			level: 'warn',
-			message: `Recreated persistence database «${DB_NAME}» due to missing or mismatched identity`,
-			meta: { action: 'recreate' },
+			message: `Recreated persistence database ‼️${DB_NAME}‼️ due to missing or mismatched identity`,
+			meta: { source: 'db.bootstrap', action: 'recreate' },
 		});
 		expect(await readStoredIdentity(factory)).toEqual(identityRecord(PERSISTED_ID));
 		expect((await factory.databases()).map((info) => info.name)).toEqual([DB_NAME]);

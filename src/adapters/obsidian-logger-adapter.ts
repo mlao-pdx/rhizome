@@ -1,9 +1,15 @@
 import { App, Notice, type TAbstractFile, normalizePath } from 'obsidian';
-import type { LoggerPort, LogLevel } from '@ports/logger-port';
-import { formatLogLine, shouldLog } from './logger-format';
+import type { LogEntryMeta, LoggerPort, LogLevel } from '@ports/logger-port';
+import { formatLogLine, LOG_FILE_HEADER, shouldLog } from './logger-format';
 
-/** Rotation cap, in bytes, before the log file is backed up and truncated. */
-const ROTATION_CAP_BYTES = 5 * 1024 * 1024;
+/** Maximum size, in bytes, of a single Markdown log segment before rolling over to a new epoch file. */
+export const SEGMENT_CAP_BYTES = 512 * 1024;
+
+/** Debounce interval, in milliseconds, used to coalesce bursts of `log()` calls into one disk write. */
+export const FLUSH_DEBOUNCE_MS = 50;
+
+const HEADER_BYTES = new TextEncoder().encode(LOG_FILE_HEADER).byteLength;
+const SEGMENT_FILE_RE = /(?:^|\/)\d+\.md$/;
 
 interface NotebookNavigatorNavigationApi {
 	navigateToFolder?: (folder: TAbstractFile | string) => Promise<boolean>;
@@ -26,40 +32,40 @@ export interface ObsidianLoggerSettings {
 	readonly logLevel: LogLevel;
 }
 
+function byteLength(str: string): number {
+	return new TextEncoder().encode(str).byteLength;
+}
+
 /**
  * Obsidian-backed `LoggerPort` adapter. Owns the enabled/level checks,
- * formatting, single-backup rotation, and the vault file writes — via
- * `Vault.adapter` (`DataAdapter`), not `Vault.create`/`Vault.modify`.
+ * Markdown table formatting, debounced batch queueing, 512 KB epoch-file
+ * segmentation, and vault file writes — via `Vault.adapter` (`DataAdapter`).
  *
- * Redaction of vault-derived content is the *caller's* responsibility (see
- * `LoggerPort`); this adapter never inspects `message`/`meta` for vault
- * content.
+ * Sensitivity marking of vault-derived content is the *caller's*
+ * responsibility (see `LoggerPort`); this adapter delegates `‼️...‼️`
+ * redaction to `logger-format.ts`.
  *
  * @remarks
- * Writing via `Vault.adapter` instead of `Vault.create`/`Vault.modify`
- * means the plain-text log file never triggers a `vault.on('modify')`
- * event or gets treated as an indexed note. `logsFolderPath`/`logPath`/
- * `backupPath`/`logFileName`/`backupFileName` are public so
- * `settings.ts`'s diagnostics copy can read them instead of duplicating
- * the derived paths as literal strings.
+ * (design, 2026-10-29) Writes Markdown table segments under
+ * `◊<pluginName>/logs/<epochMs>.md` with `◊InternalRhizome: \{ "001": ... \}`
+ * frontmatter, coalescing burst writes via a short debounce and opening a
+ * new `<epochMs>.md` segment whenever the active file would exceed 512 KB.
+ *
+ * SUPERSEDED (design, 2026-08-01): Originally wrote plain-text lines to
+ * `_<pluginId>/logs/<pluginId>.log` with single-backup `.log.1` rotation at
+ * 5 MB. Replaced by `◊Rhizome/logs/<epochMs>.md` Markdown segments so users
+ * can inspect logs directly in Obsidian and delete the `‼️Description‼️`
+ * column before sharing.
  */
 export class ObsidianLoggerAdapter implements LoggerPort {
+	readonly systemRootPath: string;
 	readonly logsFolderPath: string;
-	readonly logPath: string;
-	readonly backupPath: string;
-	readonly logFileName: string;
-	readonly backupFileName: string;
 
-	/**
-	 * Serializes `writeLine()` calls so concurrent `log()` calls can never
-	 * race on rotation.
-	 *
-	 * @remarks
-	 * E.g. two calls both seeing the file at/over the cap and both calling
-	 * `rotate()`, where the second `rename()` targets a file the first
-	 * already moved away.
-	 */
+	private pendingLines: string[] = [];
+	private flushTimer: ReturnType<typeof setTimeout> | undefined;
 	private writeQueue: Promise<void> = Promise.resolve();
+	private activeSegmentPath: string | undefined;
+	private lastSegmentEpoch = 0;
 
 	constructor(
 		private readonly app: App,
@@ -71,16 +77,21 @@ export class ObsidianLoggerAdapter implements LoggerPort {
 		 * without needing to re-wire this adapter.
 		 */
 		private readonly getSettings: () => ObsidianLoggerSettings,
-		pluginId: string,
+		pluginName: string = 'Rhizome',
+		private readonly debounceMs: number = FLUSH_DEBOUNCE_MS,
 	) {
-		this.logFileName = `${pluginId}.log`;
-		this.backupFileName = `${pluginId}.log.1`;
-		this.logsFolderPath = normalizePath(`_${pluginId}/logs`);
-		this.logPath = normalizePath(`${this.logsFolderPath}/${this.logFileName}`);
-		this.backupPath = normalizePath(`${this.logsFolderPath}/${this.backupFileName}`);
+		const trimmed = pluginName.trim() || 'Rhizome';
+		const normalizedTitle = `${trimmed[0]!.toUpperCase()}${trimmed.slice(1)}`;
+		this.systemRootPath = normalizePath(`◊${normalizedTitle}`);
+		this.logsFolderPath = normalizePath(`${this.systemRootPath}/logs`);
 	}
 
-	log(level: LogLevel, message: string, meta?: Record<string, unknown>): void {
+	/** Path of the currently active `<epochMs>.md` segment file, if one has been opened. */
+	get currentLogPath(): string | undefined {
+		return this.activeSegmentPath;
+	}
+
+	log(level: LogLevel, message: string, meta: LogEntryMeta): void {
 		const settings = this.getSettings();
 		// No I/O at all below the configured threshold or while disabled —
 		// this check must happen before any file access, not after.
@@ -88,61 +99,158 @@ export class ObsidianLoggerAdapter implements LoggerPort {
 			return;
 		}
 		const line = formatLogLine(new Date().toISOString(), level, message, meta);
-		// log() is synchronous by LoggerPort's contract; the write itself is
-		// fire-and-forget. A logging failure must never throw into the
-		// caller or surface to the user — that would make diagnostics
-		// riskier to call than not logging at all. Chaining onto writeQueue
-		// (rather than calling writeLine directly) serializes writes so two
-		// near-simultaneous calls can never both observe the rotation cap
-		// and race on rotate().
-		this.writeQueue = this.writeQueue.then(() => this.writeLine(line)).catch(() => {});
-	}
-
-	private async writeLine(line: string): Promise<void> {
-		const adapter = this.app.vault.adapter;
-		if (!(await adapter.exists(this.logsFolderPath))) {
-			await adapter.mkdir(this.logsFolderPath);
-		}
-		if (await adapter.exists(this.logPath)) {
-			const stat = await adapter.stat(this.logPath);
-			if (stat && stat.size >= ROTATION_CAP_BYTES) {
-				await this.rotate();
-			}
-		}
-		if (await adapter.exists(this.logPath)) {
-			await adapter.append(this.logPath, line);
-		} else {
-			await adapter.write(this.logPath, line);
-		}
-	}
-
-	/** Rotates the log file to its backup path, overwriting any prior backup. */
-	private async rotate(): Promise<void> {
-		const adapter = this.app.vault.adapter;
-		if (await adapter.exists(this.backupPath)) {
-			await adapter.remove(this.backupPath);
-		}
-		await adapter.rename(this.logPath, this.backupPath);
-	}
-
-	/** Deletes the log file and its backup, if present. */
-	async clearLogs(): Promise<void> {
-		const adapter = this.app.vault.adapter;
-		if (await adapter.exists(this.logPath)) {
-			await adapter.remove(this.logPath);
-		}
-		if (await adapter.exists(this.backupPath)) {
-			await adapter.remove(this.backupPath);
-		}
+		this.pendingLines.push(line);
+		this.scheduleFlush();
 	}
 
 	/**
-	 * Reveals the log folder in Obsidian's file explorer first and then in
-	 * Notebook Navigator (when active). Falls back to a `Notice` stating
-	 * the path when the folder does not exist yet (no log has been written)
-	 * or when neither navigation target can reveal it.
+	 * Immediately flushes any buffered log rows onto the serialized write queue
+	 * and resolves once all queued writes have settled.
+	 */
+	flush(): Promise<void> {
+		if (this.flushTimer !== undefined) {
+			clearTimeout(this.flushTimer);
+			this.flushTimer = undefined;
+		}
+		if (this.pendingLines.length > 0) {
+			const batch = this.pendingLines.splice(0, this.pendingLines.length);
+			this.writeQueue = this.writeQueue
+				.then(() => this.writeBatch(batch))
+				.catch(() => undefined);
+		}
+		return this.writeQueue;
+	}
+
+	private scheduleFlush(): void {
+		if (this.debounceMs <= 0) {
+			void this.flush();
+			return;
+		}
+		if (this.flushTimer !== undefined) {
+			return;
+		}
+		this.flushTimer = setTimeout(() => {
+			this.flushTimer = undefined;
+			void this.flush();
+		}, this.debounceMs);
+	}
+
+	private async nextSegmentPath(): Promise<string> {
+		const adapter = this.app.vault.adapter;
+		let nextEpoch = Math.max(Date.now(), this.lastSegmentEpoch + 1);
+		let candidate = normalizePath(`${this.logsFolderPath}/${nextEpoch}.md`);
+		while (await adapter.exists(candidate)) {
+			nextEpoch++;
+			candidate = normalizePath(`${this.logsFolderPath}/${nextEpoch}.md`);
+		}
+		this.lastSegmentEpoch = nextEpoch;
+		return candidate;
+	}
+
+	private async ensureLogsFolder(): Promise<void> {
+		const adapter = this.app.vault.adapter;
+		if (!(await adapter.exists(this.systemRootPath))) {
+			await adapter.mkdir(this.systemRootPath);
+		}
+		if (!(await adapter.exists(this.logsFolderPath))) {
+			await adapter.mkdir(this.logsFolderPath);
+		}
+	}
+
+	private async writeBatch(lines: readonly string[]): Promise<void> {
+		if (lines.length === 0) {
+			return;
+		}
+		await this.ensureLogsFolder();
+		const adapter = this.app.vault.adapter;
+
+		let currentSize = 0;
+		let isNewSegment = false;
+
+		if (this.activeSegmentPath !== undefined) {
+			const stat = (await adapter.exists(this.activeSegmentPath))
+				? await adapter.stat(this.activeSegmentPath)
+				: null;
+			if (!stat) {
+				this.activeSegmentPath = undefined;
+			} else {
+				currentSize = stat.size;
+			}
+		}
+
+		let chunk = '';
+
+		const flushChunk = async (): Promise<void> => {
+			if (chunk.length === 0) {
+				return;
+			}
+			if (isNewSegment || this.activeSegmentPath === undefined) {
+				this.activeSegmentPath = await this.nextSegmentPath();
+				await adapter.write(this.activeSegmentPath, `${LOG_FILE_HEADER}${chunk}`);
+			} else {
+				await adapter.append(this.activeSegmentPath, chunk);
+			}
+			chunk = '';
+			isNewSegment = false;
+		};
+
+		for (const line of lines) {
+			const lineBytes = byteLength(line);
+
+			if (this.activeSegmentPath === undefined && !isNewSegment) {
+				isNewSegment = true;
+				currentSize = HEADER_BYTES;
+			} else if (currentSize + lineBytes > SEGMENT_CAP_BYTES) {
+				await flushChunk();
+				this.activeSegmentPath = undefined;
+				isNewSegment = true;
+				currentSize = HEADER_BYTES;
+			}
+
+			chunk += line;
+			currentSize += lineBytes;
+		}
+
+		await flushChunk();
+	}
+
+	/** Deletes all `<epoch>.md` log segment files inside `logsFolderPath`, if present. */
+	async clearLogs(): Promise<void> {
+		if (this.flushTimer !== undefined) {
+			clearTimeout(this.flushTimer);
+			this.flushTimer = undefined;
+		}
+		this.pendingLines.length = 0;
+
+		const task = this.writeQueue.then(async () => {
+			const adapter = this.app.vault.adapter;
+			this.activeSegmentPath = undefined;
+			if (!(await adapter.exists(this.logsFolderPath))) {
+				return;
+			}
+			if (typeof adapter.list === 'function') {
+				const listed = await adapter.list(this.logsFolderPath);
+				for (const filePath of listed.files) {
+					if (!SEGMENT_FILE_RE.test(filePath)) {
+						continue;
+					}
+					if (await adapter.exists(filePath)) {
+						await adapter.remove(filePath);
+					}
+				}
+			}
+		});
+		this.writeQueue = task.catch(() => undefined);
+		await task;
+	}
+
+	/**
+	 * Reveals the log folder in Notebook Navigator (when available and active),
+	 * falling back to Obsidian's core Files explorer, and finally to a `Notice`
+	 * stating the path when neither navigation target can reveal it.
 	 */
 	async revealLogFolder(): Promise<void> {
+		await this.flush();
 		const folder = this.app.vault.getAbstractFileByPath(this.logsFolderPath);
 		if (!folder) {
 			new Notice(
@@ -150,7 +258,22 @@ export class ObsidianLoggerAdapter implements LoggerPort {
 			);
 			return;
 		}
-		let revealedInFiles = false;
+
+		const navigation = (this.app as AppWithPlugins).plugins?.plugins?.['notebook-navigator']
+			?.api?.navigation;
+		if (typeof navigation?.navigateToFolder === 'function') {
+			try {
+				const revealedInNotebookNavigator = Boolean(
+					await navigation.navigateToFolder(folder),
+				);
+				if (revealedInNotebookNavigator) {
+					return;
+				}
+			} catch {
+				// Fall through to Obsidian's core Files plugin.
+			}
+		}
+
 		const fileExplorerLeaf = this.app.workspace.getLeavesOfType('file-explorer')[0];
 		if (fileExplorerLeaf) {
 			try {
@@ -159,27 +282,13 @@ export class ObsidianLoggerAdapter implements LoggerPort {
 					{ revealInFolder?: (file: typeof folder) => void } | undefined;
 				if (typeof view?.revealInFolder === 'function') {
 					view.revealInFolder(folder);
-					revealedInFiles = true;
+					return;
 				}
 			} catch {
-				revealedInFiles = false;
+				// Fall through to fallback Notice.
 			}
 		}
 
-		let revealedInNotebookNavigator = false;
-		const navigation = (this.app as AppWithPlugins).plugins?.plugins?.['notebook-navigator']
-			?.api?.navigation;
-		if (typeof navigation?.navigateToFolder === 'function') {
-			try {
-				const result = await navigation.navigateToFolder(folder);
-				revealedInNotebookNavigator = Boolean(result);
-			} catch {
-				revealedInNotebookNavigator = false;
-			}
-		}
-
-		if (!revealedInFiles && !revealedInNotebookNavigator) {
-			new Notice(`Log folder: ${this.logsFolderPath}`);
-		}
+		new Notice(`Log folder: ${this.logsFolderPath}`);
 	}
 }

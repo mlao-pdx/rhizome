@@ -10,7 +10,12 @@ import {
 	type VaultQueryOptions,
 	type VaultQueryResult,
 } from './adapters/vault-query-runner';
-import { DEFAULT_SETTINGS, type RhizomeSettings, RhizomeSettingTab } from './settings';
+import {
+	DEFAULT_SETTINGS,
+	DiagnosticsLoggingModal,
+	type RhizomeSettings,
+	RhizomeSettingTab,
+} from './settings';
 
 export default class RhizomePlugin extends Plugin {
 	declare settings: RhizomeSettings;
@@ -27,7 +32,7 @@ export default class RhizomePlugin extends Plugin {
 		this.loggerAdapter = new ObsidianLoggerAdapter(
 			this.app,
 			() => this.settings,
-			this.manifest.id,
+			this.manifest.name,
 		);
 
 		this.dataStore = new PluginDataStore(
@@ -39,6 +44,7 @@ export default class RhizomePlugin extends Plugin {
 		await this.loadSettings();
 
 		this.loggerAdapter.log('debug', `${this.manifest.name} loaded`, {
+			source: 'lifecycle',
 			version: this.manifest.version,
 		});
 
@@ -63,10 +69,19 @@ export default class RhizomePlugin extends Plugin {
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new RhizomeSettingTab(this.app, this));
+
+		this.app.workspace.onLayoutReady(() => {
+			if (this.settings.loggingEnabled) {
+				new DiagnosticsLoggingModal(this.app, this).open();
+			}
+		});
 	}
 
 	override onunload() {
-		this.loggerAdapter?.log('debug', `${this.manifest.name} unloaded`);
+		this.loggerAdapter?.log('debug', `${this.manifest.name} unloaded`, {
+			source: 'lifecycle',
+		});
+		void this.loggerAdapter?.flush();
 	}
 
 	async loadSettings() {

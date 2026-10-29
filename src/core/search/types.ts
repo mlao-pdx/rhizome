@@ -36,6 +36,39 @@ export function isVirtualFileKey(key: string): boolean {
 
 export type PropertyTypeRegistry = Record<string, ObsidianPropertyType>;
 
+/**
+ * Reserved frontmatter property key used by Rhizome to mark system or internal notes
+ * with structured handling codes (e.g. `{"001": "Do not index or query."}`).
+ */
+export const INTERNAL_RHIZOME_PROPERTY_KEY = '◊InternalRhizome';
+
+/**
+ * Recognized flag codes inside the `◊InternalRhizome` frontmatter object.
+ */
+export const INTERNAL_RHIZOME_CODES = Object.freeze({
+	DO_NOT_INDEX_OR_QUERY: '001',
+} as const);
+
+export type InternalRhizomeCode =
+	(typeof INTERNAL_RHIZOME_CODES)[keyof typeof INTERNAL_RHIZOME_CODES];
+
+/**
+ * Returns `true` when `frontmatter` declares an `◊InternalRhizome` object containing `code`.
+ */
+export function hasInternalRhizomeFlag(
+	frontmatter: Readonly<Record<string, unknown>> | null | undefined,
+	code: InternalRhizomeCode,
+): boolean {
+	if (!frontmatter || typeof frontmatter !== 'object') {
+		return false;
+	}
+	const flags = frontmatter[INTERNAL_RHIZOME_PROPERTY_KEY];
+	if (typeof flags !== 'object' || flags === null || Array.isArray(flags)) {
+		return false;
+	}
+	return Object.prototype.hasOwnProperty.call(flags, code);
+}
+
 export type DateGrain =
 	'year' | 'quarter' | 'month' | 'week' | 'day' | 'minute' | 'second' | 'ms' | 'range';
 

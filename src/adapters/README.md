@@ -15,7 +15,7 @@ See `docs/dev/tsdoc-conventions.md` for the doc-comment format (`@see`/
 
 | Adapter                   | Implements        | Wraps                                                                                                                                                                     |
 | ------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ObsidianLoggerAdapter`   | `LoggerPort`      | `Vault.adapter` (`DataAdapter`), under a `_<manifest.id>/logs/` folder derived at runtime                                                                                 |
+| `ObsidianLoggerAdapter`   | `LoggerPort`      | `Vault.adapter` (`DataAdapter`), writing segmented Markdown tables under `◊Rhizome/logs/<epoch>.md`                                                                       |
 | `DexiePersistenceAdapter` | `PersistencePort` | Dexie over IndexedDB, at an address scoped to the plugin and vault location — see `docs/dev/indexeddb-database-identity.md`                                               |
 | `vault-query-runner.ts`   | —                 | `App.vault` (`getMarkdownFiles`, `adapter.read` on `types.json`) and `App.metadataCache` (`getFileCache`, `getFirstLinkpathDest`) to run search queries against the vault |
 

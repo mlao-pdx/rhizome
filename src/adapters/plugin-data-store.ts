@@ -83,7 +83,7 @@ export class PluginDataStore {
 		}
 		const minted = mintVaultInstanceId();
 		await this.enqueueWrite((current) => ({ ...current, vaultInstanceId: minted }));
-		this.logger?.log('debug', 'Minted new vaultInstanceId');
+		this.logger?.log('debug', 'Minted new vaultInstanceId', { source: 'datastore' });
 		return minted;
 	}
 
@@ -98,6 +98,7 @@ export class PluginDataStore {
 				return this.cached;
 			} catch (error) {
 				this.logger?.log('error', 'Failed to load plugin data', {
+					source: 'datastore',
 					error: String(error),
 				});
 				throw error;
@@ -116,6 +117,7 @@ export class PluginDataStore {
 				await this.saveData(next);
 			} catch (error) {
 				this.logger?.log('error', 'Failed to save plugin data', {
+					source: 'datastore',
 					error: String(error),
 				});
 				throw error;
