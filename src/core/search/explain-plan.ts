@@ -9,6 +9,7 @@ import {
 	refRegexFootnote,
 	refScopeFootnote,
 	refTimezoneFootnote,
+	renderIntervalComparisonDiagram,
 } from './explain-concepts';
 import {
 	buildRegex101Url,
@@ -809,6 +810,7 @@ export function explainQuery(
 	// SECTION 3: Concept Reference
 	// =========================================================================
 	lines.push('## Concept Reference', '');
+	lines.push(renderIntervalComparisonDiagram(), '');
 	lines.push(footnotes.renderDefinitions());
 
 	return lines.join('\n');

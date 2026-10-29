@@ -139,7 +139,9 @@ describe('explainQuery', () => {
 		expect(md).toContain('> [!tip] No issues found');
 		expect(md).toContain('## Concept Reference');
 		expect(md).toContain('[^1]: **Half-Open Temporal Intervals');
-		expect(md).toContain('```mermaid\ngantt\n    title [Half-Open) Interval Comparisons');
+		expect(md).toContain(
+			'```mermaid\ngantt\n    title [Half-Open) Interval Comparison Matches',
+		);
 		expect(md).toContain('[^2]: **Timezone Resolution**');
 		expect(md).not.toContain('flowchart TD');
 		expect(md).not.toContain('## Reference — Execution Context & Resolution');
@@ -217,12 +219,16 @@ describe('explainQuery', () => {
 		expect(md).toContain('> [!info] Hint 2: `HINT_BARE_TEXT_NO_BODY`');
 		expect(md).toContain('‼️"draft"‼️');
 
-		// Concept Reference separates each numbered footnote definition with an empty line (\n\n)
+		// Concept Reference places the Mermaid diagram first, followed by numbered footnote definitions
 		const refSection = md.slice(refIdx);
+		const mermaidIdx = refSection.indexOf('```mermaid\ngantt');
+		const firstFootnoteIdx = refSection.indexOf('[^1]: ');
+		expect(mermaidIdx).toBeGreaterThan(-1);
+		expect(firstFootnoteIdx).toBeGreaterThan(mermaidIdx);
 		for (let i = 1; i <= 10; i++) {
 			expect(refSection).toMatch(new RegExp(`^\\[\\^${i}\\]: `, 'm'));
 		}
-		expect(refSection).toContain('title [Half-Open) Interval Comparisons');
+		expect(refSection).toContain('title [Half-Open) Interval Comparison Matches');
 		expect(refSection).toContain('[2 <= Criteria < 5)');
 	});
 

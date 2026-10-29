@@ -46,46 +46,48 @@ export class FootnoteRegistry {
 	}
 }
 
+export function renderIntervalComparisonDiagram(): string {
+	return [
+		'```mermaid',
+		'gantt',
+		'    title [Half-Open) Interval Comparison Matches',
+		'    dateFormat YYYY-MM-DD HH:mm:ss',
+		'    axisFormat %S',
+		'    tickInterval 1second',
+		'    todayMarker off',
+		'',
+		'    section Given:',
+		'    [2 <= Criteria < 5)            :crit,   1970-01-01 00:00:02, 1970-01-01 00:00:05',
+		'',
+		'    section : OR =',
+		'    Note matches exactly           :active, 1970-01-01 00:00:02, 1970-01-01 00:00:05',
+		'    Note starts and ends within    :active, 1970-01-01 00:00:03, 1970-01-01 00:00:04',
+		'',
+		'    section !=',
+		'    Note starts before             :active, 1970-01-01 00:00:01, 1970-01-01 00:00:04',
+		'    Note ends after                :active, 1970-01-01 00:00:03, 1970-01-01 00:00:06',
+		'',
+		'    section <',
+		'    Note ends at start or before   :active, 1970-01-01 00:00:01, 1970-01-01 00:00:02',
+		'',
+		'    section <=',
+		'    Note ends at end or before     :active, 1970-01-01 00:00:01, 1970-01-01 00:00:05',
+		'',
+		'    section >=',
+		'    Note starts at start or after  :active, 1970-01-01 00:00:02, 1970-01-01 00:00:06',
+		'',
+		'    section >',
+		'    Note starts at end or after    :active, 1970-01-01 00:00:05, 1970-01-01 00:00:06',
+		'```',
+	].join('\n');
+}
+
 export function refIntervalFootnote(registry: FootnoteRegistry, todayWindowLocal?: string): string {
 	return registry.ref('interval', () => {
 		const todayExample = todayWindowLocal
 			? ` For example, \`@today\` spans \`${todayWindowLocal}\`.`
 			: '';
-		return [
-			`**Half-Open Temporal Intervals (\`[start, end)\`)**: Every date, datetime, or relative token expands into a half-open interval where the start is inclusive and the end is exclusive.${todayExample}`,
-			'',
-			'```mermaid',
-			'gantt',
-			'    title [Half-Open) Interval Comparisons',
-			'    dateFormat YYYY-MM-DD HH:mm:ss',
-			'    axisFormat %S',
-			'    tickInterval 1second',
-			'    todayMarker off',
-			'',
-			'    section Given:',
-			'    [2 <= Criteria < 5)            :crit,   1970-01-01 00:00:02, 1970-01-01 00:00:05',
-			'',
-			'    section : OR =',
-			'    Note matches exactly           :active, 1970-01-01 00:00:02, 1970-01-01 00:00:05',
-			'    Note starts and ends within    :active, 1970-01-01 00:00:03, 1970-01-01 00:00:04',
-			'',
-			'    section !=',
-			'    Note starts before             :active, 1970-01-01 00:00:01, 1970-01-01 00:00:04',
-			'    Note ends after                :active, 1970-01-01 00:00:03, 1970-01-01 00:00:06',
-			'',
-			'    section <',
-			'    Note ends at start or before   :active, 1970-01-01 00:00:01, 1970-01-01 00:00:02',
-			'',
-			'    section <=',
-			'    Note ends at end or before     :active, 1970-01-01 00:00:01, 1970-01-01 00:00:05',
-			'',
-			'    section >=',
-			'    Note starts at start or after  :active, 1970-01-01 00:00:02, 1970-01-01 00:00:06',
-			'',
-			'    section >',
-			'    Note starts at end or after    :active, 1970-01-01 00:00:05, 1970-01-01 00:00:06',
-			'```',
-		].join('\n');
+		return `**Half-Open Temporal Intervals (\`[start, end)\`)**: Every date, datetime, or relative token expands into a half-open interval where the start is inclusive and the end is exclusive.${todayExample}`;
 	});
 }
 
