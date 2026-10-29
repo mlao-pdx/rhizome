@@ -39,8 +39,10 @@ const regexArb = fc
 			`/${start ? '^' : ''}${atoms.join('')}${end ? '$' : ''}/${flags.join('')}`,
 	);
 
+const nonEmptyTextArb = textArb.filter((s) => s.length > 0);
+
 export const valueLeafArb = fc.oneof(
-	textArb.map(quoteQueryString),
+	nonEmptyTextArb.map(quoteQueryString),
 	fc.constantFrom('alpha', 'beta', 'work', 'draft', 'open', 'true', 'false'),
 	regexArb,
 );
@@ -117,17 +119,17 @@ const numberComparisonArb = fc
 		comparisonOperatorArb,
 		fc.integer({ min: -300, max: 300 }),
 	)
-	.map(([key, op, tenths]) => `[${key} ${op} ${tenths / 10}]`);
+	.map(([key, op, tenths]) => `[${key}: ${op} ${tenths / 10}]`);
 const checkboxComparisonArb = fc
 	.tuple(fc.constantFrom('=', '!='), fc.boolean())
-	.map(([op, value]) => `[done ${op} ${value}]`);
+	.map(([op, value]) => `[done: ${op} ${value}]`);
 const temporalComparisonArb = fc
 	.tuple(
 		fc.constantFrom('due', 'meeting', 'sprint', 'file.modified', 'file.created'),
 		comparisonOperatorArb,
 		temporalLiteralArb,
 	)
-	.map(([key, op, value]) => `[${key} ${op} ${value}]`);
+	.map(([key, op, value]) => `[${key}: ${op} ${value}]`);
 const textComparisonArb = fc
 	.tuple(
 		fc.constantFrom(
@@ -142,9 +144,9 @@ const textComparisonArb = fc
 			),
 		),
 		comparisonOperatorArb,
-		textArb,
+		nonEmptyTextArb,
 	)
-	.map(([key, op, value]) => `[${key} ${op} ${quoteQueryString(value)}]`);
+	.map(([key, op, value]) => `[${key}: ${op} ${quoteQueryString(value)}]`);
 const propertyColonArb = fc.oneof(
 	fc.tuple(colonPropertyArb, valueExprArb).map(([key, expr]) => `[${key}: (${expr})]`),
 	numberColonExprArb.map((expr) => `[score: (${expr})]`),
@@ -156,22 +158,25 @@ const checkboxColonArb = nestedQuery(fc.constantFrom('true', 'false'), 1).map(
 	(expr) => `[done: (${expr})]`,
 );
 const existsArb = fc
-	.constantFrom(
-		'score',
-		'priority',
-		'due',
-		'meeting',
-		'sprint',
-		'status',
-		'labels',
-		'topics',
-		'tags',
-		'aliases',
-		'done',
-		'unknown',
-		...VIRTUAL_FILE_KEYS_LIST,
+	.tuple(
+		fc.constantFrom(
+			'score',
+			'priority',
+			'due',
+			'meeting',
+			'sprint',
+			'status',
+			'labels',
+			'topics',
+			'tags',
+			'aliases',
+			'done',
+			'unknown',
+			...VIRTUAL_FILE_KEYS_LIST,
+		),
+		fc.constantFrom('', ':', ':""'),
 	)
-	.map((key) => `[${key}]`);
+	.map(([key, suffix]) => `[${key}${suffix}]`);
 const scopedArb = fc.tuple(scopeArb, valueExprArb).map(([scope, expr]) => `${scope}:(${expr})`);
 const atomArb = fc.oneof(
 	valueLeafArb,

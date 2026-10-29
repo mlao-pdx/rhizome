@@ -69,6 +69,7 @@ export type CompiledSearchNode =
 			readonly expr: CompiledValueExprNode;
 	  }
 	| { readonly type: 'PROPERTY_EXISTS'; readonly lowerKey: string }
+	| { readonly type: 'PROPERTY_EMPTY'; readonly lowerKey: string }
 	| {
 			readonly type: 'PROPERTY_COLON';
 			readonly lowerKey: string;
@@ -298,6 +299,9 @@ function compileSearchNode(
 			const lowerKey = ast.key.trim().toLowerCase();
 			if (ast.operator === 'EXISTS') {
 				return { type: 'PROPERTY_EXISTS', lowerKey };
+			}
+			if (ast.operator === 'EMPTY') {
+				return { type: 'PROPERTY_EMPTY', lowerKey };
 			}
 			const propType = resolveQueryPropertyType(lowerKey, resolvedConfig.propertyTypes);
 			if (ast.operator === ':') {

@@ -16,14 +16,13 @@ export const unquotedIdentifierArb: fc.Arbitrary<string> = fc
 	.filter((value) => !['AND', 'OR', 'NOT'].includes(value));
 
 export const quotedValueArb: fc.Arbitrary<string> = fc.oneof(
-	fc.string({ maxLength: 16 }),
+	fc.string({ minLength: 1, maxLength: 16 }),
 	fc.constantFrom(
 		'Action Items',
 		'/projects/active',
 		'quote "in" text',
 		'line1\nline2\tindent',
 		'back\\slash',
-		'',
 	),
 );
 

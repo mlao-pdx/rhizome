@@ -310,7 +310,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 				(val, propType, tz) => {
 					const tv = coercePropertyValue(val, propType, tz);
 
-					if (val === null || val === undefined) {
+					if (val === null || val === undefined || val === '') {
 						expect(tv).toEqual({ kind: 'null' });
 						return;
 					}

@@ -84,7 +84,7 @@ export function coercePropertyValue(
 	propType: ObsidianPropertyType,
 	timeZone: string,
 ): TypedPropertyValue {
-	if (val === null || val === undefined) return NULL_TYPED_VALUE;
+	if (val === null || val === undefined || val === '') return NULL_TYPED_VALUE;
 
 	switch (propType) {
 		case 'number': {

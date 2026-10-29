@@ -244,8 +244,8 @@ export function lintQueryAST(
 						diagnostics.push({
 							code: 'HINT_PROP_NEQ_EXISTENCE',
 							severity: 'hint',
-							issue: `"[${node.key} != ${rhsDisplay}]" requires "${node.key}" to exist.`,
-							hint: `To exclude notes (including notes missing "${node.key}"), use "![${node.key} = ${rhsDisplay}]".`,
+							issue: `"[${node.key}:!=${rhsDisplay}]" requires "${node.key}" to exist.`,
+							hint: `To exclude notes (including notes missing "${node.key}"), use "![${node.key}:=${rhsDisplay}]".`,
 							span: node.span ?? null,
 						});
 					} else if (node.operator === ':' && node.valueExpr !== undefined) {

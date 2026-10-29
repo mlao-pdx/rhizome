@@ -79,14 +79,14 @@ Parenthesized ::= "(" OrExpression ")"
 
 ## 2. Property Filters & Scoped Operators
 
-Bracketed property filters (`[key]`, `[key: value]`, `[key op value]`) and `scope:value` operators delegate colon right-hand sides to `valueNotExpr` and comparison right-hand sides to `valueLeaf`.
+Bracketed property filters (`[key]`, `[key:]`, `[key: value]`, `[key: op value]`) and `scope:value` operators delegate colon right-hand sides to `valueNotExpr` and comparison right-hand sides to `valueLeaf`.
 
 ### `propertyFilter`
 
-Bracketed frontmatter or virtual file property filter (`[key]` existence check, `[key: value]` colon match, or `[key >= value]` comparison).
+Bracketed frontmatter or virtual file property filter (`[key]` key-presence check, `[key:]` empty/no-value check, `[key: value]` colon match, or `[key: >= value]` comparison).
 
 ```ebnf
-PropertyFilter ::= "[" PropertyKey ( ":" ValueNotExpr | CompOp ValueLeaf )? "]"
+PropertyFilter ::= "[" PropertyKey ( ":" ( CompOp ValueLeaf | ValueNotExpr )? )? "]"
 ```
 
 ![propertyFilter](./assets/propertyFilter.svg)
@@ -141,7 +141,7 @@ Terminal-level productions disambiguating property keys, scope identifiers, `#ta
 
 ### `propertyKey`
 
-Frontmatter or virtual property name inside `[...]`. Quoted strings allow spaces and special characters (e.g. `["Due Date" < @today]`).
+Frontmatter or virtual property name inside `[...]`. Quoted strings allow spaces and special characters (e.g. `["Due Date": < @today]`).
 
 ```ebnf
 PropertyKey ::= QuotedString | Identifier

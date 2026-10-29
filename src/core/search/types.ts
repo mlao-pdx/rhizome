@@ -236,14 +236,14 @@ export interface ScopedFilterNode {
 	readonly span?: SourceSpan;
 }
 
-export type PropertyOperator = 'EXISTS' | ':' | '=' | '!=' | '<' | '>' | '<=' | '>=';
+export type PropertyOperator = 'EXISTS' | 'EMPTY' | ':' | '=' | '!=' | '<' | '>' | '<=' | '>=';
 
 export interface PropertyFilterNode {
 	readonly type: 'PROPERTY_FILTER';
 	readonly key: string; // Decoded, trimmed, lowercased property key
 	readonly rawKey: string; // Decoded property key (with outer quotes stripped if quoted)
 	readonly operator: PropertyOperator;
-	readonly valueExpr?: ValueExprAST; // Present iff operator !== 'EXISTS'
+	readonly valueExpr?: ValueExprAST; // Present iff operator !== 'EXISTS' && operator !== 'EMPTY'
 	readonly span?: SourceSpan;
 }
 

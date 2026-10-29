@@ -151,6 +151,14 @@ export function normalizeAST(ast: SearchAST): SearchAST {
 		}
 		case 'PROPERTY_FILTER': {
 			const lowerKey = ast.key.trim().toLowerCase();
+			if (ast.operator === 'EMPTY') {
+				return {
+					type: 'PROPERTY_FILTER',
+					key: lowerKey,
+					rawKey: lowerKey,
+					operator: 'EMPTY',
+				};
+			}
 			return {
 				type: 'PROPERTY_FILTER',
 				key: lowerKey,

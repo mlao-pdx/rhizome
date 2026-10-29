@@ -120,7 +120,7 @@ describe('Step 1 & 2: SYNTAX_ERROR diagnostics', () => {
 			'HINT_BARE_TEXT_NO_BODY',
 		]);
 
-		const emptyKeyNeq = compileQuery('["" != high]', config, PINNED_REF_MS);
+		const emptyKeyNeq = compileQuery('["" : != high]', config, PINNED_REF_MS);
 		expect(emptyKeyNeq.executable).toBe(false);
 		expect(emptyKeyNeq.ast).toBeNull();
 		expect(emptyKeyNeq.prepared).toBeNull();
@@ -234,7 +234,7 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 	const config = createStandardConfig();
 
 	it('Conformance Test 10: enforces short-circuit precedence across SYNTAX_ERROR, ERROR_INVALID_OPERATOR_FOR_TYPE, and ERROR_TYPE_MISMATCH', () => {
-		const r1 = compileQuery('NOT [priority > high]', config, PINNED_REF_MS);
+		const r1 = compileQuery('NOT [priority: > high]', config, PINNED_REF_MS);
 		expect(r1.executable).toBe(false);
 		expect(r1.ast).toBeNull();
 		expect(r1.prepared).toBeNull();
@@ -247,7 +247,7 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 		});
 		expect(r1.diagnostics[0]?.span).not.toBeNull();
 
-		const r2 = compileQuery('[priority = /10/]', config, PINNED_REF_MS);
+		const r2 = compileQuery('[priority: = /10/]', config, PINNED_REF_MS);
 		expect(r2.executable).toBe(false);
 		expect(r2.ast).toBeNull();
 		expect(r2.prepared).toBeNull();
@@ -260,14 +260,14 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 		});
 		expect(r2.diagnostics[0]?.span).not.toBeNull();
 
-		const r3 = compileQuery('[priority = /foo(/]', config, PINNED_REF_MS);
+		const r3 = compileQuery('[priority: = /foo(/]', config, PINNED_REF_MS);
 		expect(r3.executable).toBe(false);
 		expect(r3.ast).toBeNull();
 		expect(r3.prepared).toBeNull();
 		expect(r3.diagnostics).toHaveLength(1);
 		expect(r3.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
 
-		const r4 = compileQuery('[priority != high]', config, PINNED_REF_MS);
+		const r4 = compileQuery('[priority: != high]', config, PINNED_REF_MS);
 		expect(r4.executable).toBe(false);
 		expect(r4.diagnostics).toHaveLength(1);
 		expect(r4.diagnostics[0]?.code).toBe('ERROR_TYPE_MISMATCH');
@@ -275,7 +275,7 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 
 	it('validates checkbox operators and literals (ERROR_INVALID_OPERATOR_FOR_TYPE & ERROR_TYPE_MISMATCH)', () => {
 		for (const op of ['<', '>', '<=', '>=']) {
-			const res = compileQuery(`[done ${op} true]`, config, PINNED_REF_MS);
+			const res = compileQuery(`[done: ${op} true]`, config, PINNED_REF_MS);
 			expect(res.executable).toBe(false);
 			expect(res.diagnostics).toHaveLength(1);
 			expect(res.diagnostics[0]?.code).toBe('ERROR_INVALID_OPERATOR_FOR_TYPE');
@@ -286,30 +286,38 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 		expect(regexColon.diagnostics).toHaveLength(1);
 		expect(regexColon.diagnostics[0]?.code).toBe('ERROR_INVALID_OPERATOR_FOR_TYPE');
 
-		const quotedBool = compileQuery('[done = "true"]', config, PINNED_REF_MS);
+		const quotedBool = compileQuery('[done: = "true"]', config, PINNED_REF_MS);
 		expect(quotedBool.executable).toBe(false);
 		expect(quotedBool.diagnostics[0]?.code).toBe('ERROR_TYPE_MISMATCH');
 
-		const invalidBool = compileQuery('[done = yes]', config, PINNED_REF_MS);
+		const invalidBool = compileQuery('[done: = yes]', config, PINNED_REF_MS);
 		expect(invalidBool.executable).toBe(false);
 		expect(invalidBool.diagnostics[0]?.code).toBe('ERROR_TYPE_MISMATCH');
 
-		const validBool = compileQuery('[done = true] AND [done != FALSE]', config, PINNED_REF_MS);
+		const validBool = compileQuery(
+			'[done: = true] AND [done: != FALSE] AND [done] AND [done:] AND [done:""]',
+			config,
+			PINNED_REF_MS,
+		);
 		expect(validBool.executable).toBe(true);
 	});
 
 	it('validates number literals (rejects quoted numbers and non-numbers)', () => {
-		const quotedNum = compileQuery('[score = "42"]', config, PINNED_REF_MS);
+		const quotedNum = compileQuery('[score: = "42"]', config, PINNED_REF_MS);
 		expect(quotedNum.executable).toBe(false);
 		expect(quotedNum.diagnostics[0]?.code).toBe('ERROR_TYPE_MISMATCH');
 
-		const validSigned = compileQuery('[score >= -10.5]', config, PINNED_REF_MS);
+		const validSigned = compileQuery(
+			'[score: >= -10.5] AND [score:] AND [score:""]',
+			config,
+			PINNED_REF_MS,
+		);
 		expect(validSigned.executable).toBe(true);
 		expect(validSigned.diagnostics).toEqual([]);
 	});
 
-	it('Conformance Test 6: rejects invalid & skipped dates (including NOT [due = @today+1d] landing on skipped date)', () => {
-		const feb31 = compileQuery('[due = 2026-02-31]', config, PINNED_REF_MS);
+	it('Conformance Test 6: rejects invalid & skipped dates (including NOT [due: = @today+1d] landing on skipped date)', () => {
+		const feb31 = compileQuery('[due: = 2026-02-31]', config, PINNED_REF_MS);
 		expect(feb31.executable).toBe(false);
 		expect(feb31.ast).toBeNull();
 		expect(feb31.prepared).toBeNull();
@@ -323,11 +331,15 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 		if (!apiaCfgRes.ok) return;
 		const apiaRefMs = Date.parse('2011-12-29T12:00:00.000Z');
 
-		const explicitSkipped = compileQuery('[due = 2011-12-30]', apiaCfgRes.config, apiaRefMs);
+		const explicitSkipped = compileQuery('[due: = 2011-12-30]', apiaCfgRes.config, apiaRefMs);
 		expect(explicitSkipped.executable).toBe(false);
 		expect(explicitSkipped.diagnostics[0]?.code).toBe('ERROR_TYPE_MISMATCH');
 
-		const relativeSkipped = compileQuery('NOT [due = @today+1d]', apiaCfgRes.config, apiaRefMs);
+		const relativeSkipped = compileQuery(
+			'NOT [due: = @today+1d]',
+			apiaCfgRes.config,
+			apiaRefMs,
+		);
 		expect(relativeSkipped.executable).toBe(false);
 		expect(relativeSkipped.ast).toBeNull();
 		expect(relativeSkipped.prepared).toBeNull();
@@ -336,18 +348,18 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 
 	it('Conformance Test 14: compiles valid positional date ranges and rejects reversed date ranges with SYNTAX_ERROR and swap hints', () => {
 		for (const validQ of [
-			'[due = 2026-10-22..2026]',
-			'[due = @thisyear..@today]',
-			'[due = @today..@thisyear]',
-			'[due = @today-6d..@today]',
-			'[due = @today-7d..@today]',
+			'[due: = 2026-10-22..2026]',
+			'[due: = @thisyear..@today]',
+			'[due: = @today..@thisyear]',
+			'[due: = @today-6d..@today]',
+			'[due: = @today-7d..@today]',
 		]) {
 			const res = compileQuery(validQ, config, PINNED_REF_MS);
 			expect(res.executable).toBe(true);
 			expect(res.diagnostics).toEqual([]);
 		}
 
-		const revRel = compileQuery('[due = @today..@today-7d]', config, PINNED_REF_MS);
+		const revRel = compileQuery('[due: = @today..@today-7d]', config, PINNED_REF_MS);
 		expect(revRel.executable).toBe(false);
 		expect(revRel.ast).toBeNull();
 		expect(revRel.prepared).toBeNull();
@@ -360,7 +372,7 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 		});
 		expect(revRel.diagnostics[0]?.span).not.toBeNull();
 
-		const revIso = compileQuery('[due = 2026-10-15..2026-10-01]', config, PINNED_REF_MS);
+		const revIso = compileQuery('[due: = 2026-10-15..2026-10-01]', config, PINNED_REF_MS);
 		expect(revIso.executable).toBe(false);
 		expect(revIso.diagnostics).toHaveLength(1);
 		expect(revIso.diagnostics[0]).toMatchObject({
@@ -472,12 +484,12 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 	it('emits WARN_SINGLE_VALUE_CONTRADICTION on contradicting single-valued fields in AND', () => {
 		const contradictions: Array<[string, string, string]> = [
 			['ext:md AND ext:pdf', 'md', 'pdf'],
-			['ext:md AND [file.extension = pdf]', 'md', 'pdf'],
-			['[file.extension = ".md"] AND [file.extension = "pdf"]', '.md', 'pdf'],
-			['[file.name = "a.md"] AND [file.name = "b.md"]', 'a.md', 'b.md'],
-			['[file.basename = alpha] AND [file.basename = beta]', 'alpha', 'beta'],
-			['[file.path = "a/b.md"] AND [file.path = "c/d.md"]', 'a/b.md', 'c/d.md'],
-			['[file.parent = "dir1"] AND [file.parent = "dir2"]', 'dir1', 'dir2'],
+			['ext:md AND [file.extension: = pdf]', 'md', 'pdf'],
+			['[file.extension: = ".md"] AND [file.extension: = "pdf"]', '.md', 'pdf'],
+			['[file.name: = "a.md"] AND [file.name: = "b.md"]', 'a.md', 'b.md'],
+			['[file.basename: = alpha] AND [file.basename: = beta]', 'alpha', 'beta'],
+			['[file.path: = "a/b.md"] AND [file.path: = "c/d.md"]', 'a/b.md', 'c/d.md'],
+			['[file.parent: = "dir1"] AND [file.parent: = "dir2"]', 'dir1', 'dir2'],
 		];
 
 		for (const [q, a, b] of contradictions) {
@@ -495,7 +507,7 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 
 		// Same normalized extension (.md vs md) does not warn
 		const sameExt = compileQuery(
-			'ext:md AND ext:.md AND [file.extension = MD]',
+			'ext:md AND ext:.md AND [file.extension: = MD]',
 			config,
 			PINNED_REF_MS,
 		);
@@ -503,15 +515,15 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 		expect(sameExt.diagnostics).toEqual([]);
 	});
 
-	it('Conformance Test 9: emits HINT_PROP_NEQ_EXISTENCE with exact interpolated hint on [status != done]', () => {
-		const res = compileQuery('[status != done]', config, PINNED_REF_MS);
+	it('Conformance Test 9: emits HINT_PROP_NEQ_EXISTENCE with exact interpolated hint on [status: != done]', () => {
+		const res = compileQuery('[status: != done]', config, PINNED_REF_MS);
 		expect(res.executable).toBe(true);
 		expect(res.diagnostics).toHaveLength(1);
 		expect(res.diagnostics[0]).toMatchObject({
 			code: 'HINT_PROP_NEQ_EXISTENCE',
 			severity: 'hint',
-			issue: '"[status != done]" requires "status" to exist.',
-			hint: 'To exclude notes (including notes missing "status"), use "![status = done]".',
+			issue: '"[status:!=done]" requires "status" to exist.',
+			hint: 'To exclude notes (including notes missing "status"), use "![status:=done]".',
 		});
 		expect(res.diagnostics[0]?.span).not.toBeNull();
 	});
@@ -594,10 +606,12 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 		expect(compoundRes.diagnostics[0]?.span).not.toBeNull();
 
 		const nonColonQueries = [
-			'[tag < 20]',
-			'[tag = Foo]',
-			'[tag != Foo]',
+			'[tag: < 20]',
+			'[tag: = Foo]',
+			'[tag: != Foo]',
 			'[tag]',
+			'[tag:]',
+			'[tag:""]',
 			'[tags: Foo]',
 		];
 		for (const q of nonColonQueries) {
@@ -685,8 +699,8 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 			'file:/^draft/',
 			'//',
 			'file://',
-			'[status = /todo]',
-			'[status != /todo]',
+			'[status: = /todo]',
+			'[status: != /todo]',
 			'[done: /true]',
 			'[score: /100]',
 		];
@@ -701,7 +715,7 @@ describe('Step 6: PreparedQuery & AST deep freeze (Conformance Test 16c)', () =>
 	const config = createStandardConfig();
 
 	it('Conformance Test 16c: deeply freezes compiled.ast and compiled.prepared so mutation throws TypeError', () => {
-		const compiled = compileQuery('tag:work AND [score >= 10]', config, PINNED_REF_MS);
+		const compiled = compileQuery('tag:work AND [score: >= 10]', config, PINNED_REF_MS);
 		expect(compiled.executable).toBe(true);
 		expect(compiled.ast).not.toBeNull();
 		expect(compiled.prepared).not.toBeNull();

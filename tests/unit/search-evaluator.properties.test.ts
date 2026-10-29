@@ -176,7 +176,7 @@ describe('Phase 6 evaluator invariants', () => {
 							operators.map((op) => [
 								op,
 								evaluatorQuery(
-									`[file.${virtualKey} ${op} ${literal}]`,
+									`[file.${virtualKey}: ${op} ${literal}]`,
 									config,
 									referenceTimeMs,
 								),

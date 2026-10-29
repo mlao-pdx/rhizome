@@ -242,7 +242,7 @@ export function refPropertyFootnote(
 		if (lowerKey === 'tags' || lowerKey === 'tag') {
 			return registry.ref(
 				'prop-tags',
-				'**Predetermined Property (`tags`)**: Built-in Obsidian `tags` property. Always resolves to type `tags`: `:` matches hierarchically (`#a` or `#a/...`), `=` and `!=` test exact normalized tag equality, and `<`, `<=`, `>`, `>=` compare normalized tag names alphabetically.',
+				'**Predetermined Property (`tags`)**: Built-in Obsidian frontmatter `tags` property. Always resolves to type `tags`: `:` matches hierarchically (`#a` or `#a/...`), `=` and `!=` test exact normalized tag equality, and `<`, `<=`, `>`, `>=` compare normalized tag names alphabetically.',
 			);
 		}
 		return registry.ref(

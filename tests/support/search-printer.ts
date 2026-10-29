@@ -82,6 +82,7 @@ function printSearchAST(ast: SearchAST, parentOp?: 'AND' | 'OR' | 'NOT'): string
 		case 'PROPERTY_FILTER': {
 			const key = printPropertyKey(ast.rawKey);
 			if (ast.operator === 'EXISTS') return `[${key}]`;
+			if (ast.operator === 'EMPTY') return `[${key}:]`;
 			const value = ast.valueExpr!;
 			if (ast.operator === ':') {
 				if (value.type === 'VALUE_LEAF') {
@@ -89,7 +90,7 @@ function printSearchAST(ast: SearchAST, parentOp?: 'AND' | 'OR' | 'NOT'): string
 				}
 				return `[${key}:(${printValueExpr(value)})]`;
 			}
-			return `[${key} ${ast.operator} ${printValueExpr(value)}]`;
+			return `[${key}:${ast.operator}${printValueExpr(value)}]`;
 		}
 		case 'LOGICAL': {
 			const joined = ast.children

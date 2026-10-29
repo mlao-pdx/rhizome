@@ -111,7 +111,9 @@ describe('property-coercion helpers', () => {
 	it('coerces values across all 7 ObsidianPropertyType types and shares frozen singletons', () => {
 		const null1 = coercePropertyValue(null, 'text', 'UTC');
 		const null2 = coercePropertyValue(undefined, 'number', 'UTC');
+		const null3 = coercePropertyValue('', 'date', 'UTC');
 		expect(null1).toBe(null2);
+		expect(null1).toBe(null3);
 		expect(null1).toEqual({ kind: 'null' });
 		expect(Object.isFrozen(null1)).toBe(true);
 
@@ -457,6 +459,15 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		]);
 		expect(doc.blocks).toEqual(['Block-One', 'block-two']);
 		expect(doc.propertyKeys).not.toContain('position');
+
+		const docEmptyScalarTag = normalizeObsidianMetadata(
+			makeFile(),
+			{ frontmatter: { tags: '' } },
+			config,
+		);
+		expect(docEmptyScalarTag.propertyKeys).toEqual(['tags']);
+		expect(docEmptyScalarTag.properties['tags']).toBeNull();
+		expect(docEmptyScalarTag.propertyOccurrences[0]?.typedValues).toEqual([{ kind: 'null' }]);
 	});
 
 	it('validates file stats eagerly and throws on out-of-range or non-integer stats', () => {

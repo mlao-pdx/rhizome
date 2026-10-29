@@ -688,7 +688,17 @@ export function explainQuery(
 						const remDiag = consumeUnattachedContainedDiags(node.span);
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ${prefix}${propTargetLabel} exists with a non-empty valid value.${exactDiagSuffix}${remDiag}`,
+							`${indent}  ${prefix}${propTargetLabel} is present on the note (regardless of value).${exactDiagSuffix}${remDiag}`,
+						);
+						return;
+					}
+
+					if (node.operator === 'EMPTY') {
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						bulletLines.push(`${indent}- ${sliceCode}`);
+						bulletLines.push(
+							`${indent}  ${prefix}${propTargetLabel} is present on the note with no value (empty or null).${exactDiagSuffix}${remDiag}`,
 						);
 						return;
 					}

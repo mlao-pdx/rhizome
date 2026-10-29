@@ -132,20 +132,22 @@ export class SearchParser extends CstParser {
 		this.CONSUME(LBracket);
 		this.SUBRULE(this.propertyKey);
 		this.OPTION(() => {
-			this.OR([
-				{
-					ALT: () => {
-						this.CONSUME(Colon);
-						this.SUBRULE(this.valueNotExpr);
+			this.CONSUME(Colon);
+			this.OPTION2(() => {
+				this.OR([
+					{
+						ALT: () => {
+							this.CONSUME(CompOp);
+							this.SUBRULE(this.valueLeaf);
+						},
 					},
-				},
-				{
-					ALT: () => {
-						this.CONSUME(CompOp);
-						this.SUBRULE(this.valueLeaf);
+					{
+						ALT: () => {
+							this.SUBRULE(this.valueNotExpr);
+						},
 					},
-				},
-			]);
+				]);
+			});
 		});
 		this.CONSUME(RBracket);
 	});

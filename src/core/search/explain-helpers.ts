@@ -254,11 +254,14 @@ export function formatAuthoredFilter(
 			if (node.operator === 'EXISTS') {
 				return `[${node.rawKey}]`;
 			}
+			if (node.operator === 'EMPTY') {
+				return `[${node.rawKey}:]`;
+			}
 			const rhs = node.valueExpr ? formatScopeRhsDisplay(node.valueExpr) : '';
 			if (node.operator === ':') {
 				return `[${node.rawKey}:${rhs}]`;
 			}
-			return `[${node.rawKey} ${node.operator} ${rhs}]`;
+			return `[${node.rawKey}:${node.operator}${rhs}]`;
 		}
 	}
 }

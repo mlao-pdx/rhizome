@@ -115,26 +115,78 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 			makeDoc(config, 'b.md', { frontmatter: fm2 }),
 		];
 		const aQueries =
-			'[num = 10];[num < 20];[num <= 10];[label = bravo];[label < charlie];[label <= BRAVO];[day = 2026-10-15];[day < 2026-10-20];[day <= 2026-10-15];[stamp = 2026-10-15];[stamp < 2026-10-20T10:00:00Z];[stamp <= 2026-10-15T10:00:00Z];[flag = true];[flag != false]'.split(
+			'[num:=10];[num:<20];[num:<=10];[label:=bravo];[label:<charlie];[label:<=BRAVO];[day:=2026-10-15];[day:<2026-10-20];[day:<=2026-10-15];[stamp:=2026-10-15];[stamp:<2026-10-20T10:00:00Z];[stamp:<=2026-10-15T10:00:00Z];[flag:=true];[flag:!=false]'.split(
 				';',
 			);
 		const bQueries =
-			'[num != 10];[num > 10];[num >= 20];[label != bravo];[label > bravo];[label >= CHARLIE];[day != 2026-10-15];[day > 2026-10-15];[day >= 2026-10-20];[stamp != 2026-10-15];[stamp > 2026-10-15T10:00:00Z];[stamp >= 2026-10-20T10:00:00Z];[flag != true];[flag = false]'.split(
+			'[num:!=10];[num:>10];[num:>=20];[label:!=bravo];[label:>bravo];[label:>=CHARLIE];[day:!=2026-10-15];[day:>2026-10-15];[day:>=2026-10-20];[stamp:!=2026-10-15];[stamp:>2026-10-15T10:00:00Z];[stamp:>=2026-10-20T10:00:00Z];[flag:!=true];[flag:=false]'.split(
 				';',
 			);
 		for (const q of aQueries) assertEval(docs, q, config, ['a.md']);
 		for (const q of bQueries) assertEval(docs, q, config, ['b.md']);
 	});
 
-	it('excludes missing, null, and invalid property values from EXISTS while matching valid entries', () => {
+	it('evaluates the 5 property states: ![prop] (absent), [prop] (present regardless of value), [prop:] / [prop:""] (present with no value), [prop] ![prop:] (present with any value, valid or malformed), and [prop:value]', () => {
 		const config = makeConfig();
 		const docs = [
 			makeDoc(config, 'missing.md'),
 			makeDoc(config, 'null.md', { frontmatter: { num: null } }),
+			makeDoc(config, 'empty-str.md', { frontmatter: { num: '' } }),
+			makeDoc(config, 'empty-list.md', { frontmatter: { num: [] } }),
+			makeDoc(config, 'null-and-empty-list.md', { frontmatter: { num: [null, ''] } }),
+			makeDoc(config, 'multi-occ-empty.md', { frontmatter: { num: null } }, [
+				{ key: 'num', value: '', line: 5 },
+			]),
+			makeDoc(config, 'multi-occ-one-filled.md', { frontmatter: { num: null } }, [
+				{ key: 'num', value: 10, line: 5 },
+			]),
 			makeDoc(config, 'invalid.md', { frontmatter: { num: 'not-a-number' } }),
 			makeDoc(config, 'valid.md', { frontmatter: { num: [null, 'bad', 42] } }),
 		];
-		assertEval(docs, '[num]', config, ['valid.md']);
+
+		// 1. Property not present: ![num]
+		assertEval(docs, '![num]', config, ['missing.md']);
+
+		// 2. Property present, regardless of value: [num]
+		assertEval(docs, '[num]', config, [
+			'null.md',
+			'empty-str.md',
+			'empty-list.md',
+			'null-and-empty-list.md',
+			'multi-occ-empty.md',
+			'multi-occ-one-filled.md',
+			'invalid.md',
+			'valid.md',
+		]);
+
+		// 3. Property present, no value: [num:] and [num:""] and [num:''] and [num: ("")]
+		for (const q of ['[num:]', '[num:""]', "[num:'']", '[num: ("")]']) {
+			assertEval(docs, q, config, [
+				'null.md',
+				'empty-str.md',
+				'empty-list.md',
+				'null-and-empty-list.md',
+				'multi-occ-empty.md',
+			]);
+		}
+
+		// 4. Property present, any value (including malformed — judge, don't sentence): [num] ![num:]
+		assertEval(docs, '[num] ![num:]', config, [
+			'multi-occ-one-filled.md',
+			'invalid.md',
+			'valid.md',
+		]);
+
+		// 5. Property present, specific value: [num:42]
+		assertEval(docs, '[num:42]', config, ['valid.md']);
+
+		// Also verify [label:null] searches for literal string "null" while [label:] matches empty
+		const labelDocs = [
+			makeDoc(config, 'l-empty.md', { frontmatter: { label: null } }),
+			makeDoc(config, 'l-literal-null.md', { frontmatter: { label: 'null' } }),
+		];
+		assertEval(labelDocs, '[label:]', config, ['l-empty.md']);
+		assertEval(labelDocs, '[label:null]', config, ['l-literal-null.md']);
 	});
 
 	it('evaluates property colon as typed equality on number, date, and checkbox, hierarchical tag matching on tags, regex on raw/normalized representations, and per-entry logical grouping', () => {
@@ -157,7 +209,7 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 			makeDoc(config, 'raw1.md', { frontmatter: fm1 }),
 			makeDoc(config, 'raw2.md', { frontmatter: fm2 }),
 		];
-		for (const q of '[num: /1\\.5e2/];[day: 2026-10];[day: @today];[day: (@today OR @yesterday)];[day: /^2026-10/];[flag: true];[multi: (alpha AND !two)];[multi: (/^alpha/ AND !/two$/)];[tags: #work/urgent];[tags: work/urgent];[tags = #project];[tags = project]'.split(
+		for (const q of '[num: /1\\.5e2/];[day: 2026-10];[day: @today];[day: (@today OR @yesterday)];[day: /^2026-10/];[flag: true];[multi: (alpha AND !two)];[multi: (/^alpha/ AND !/two$/)];[tags: #work/urgent];[tags: work/urgent];[tags: = #project];[tags: = project]'.split(
 			';',
 		)) {
 			assertEval(docs, q, config, ['raw1.md']);
@@ -167,8 +219,8 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		)) {
 			assertEval(docs, q, config, ['raw1.md', 'raw2.md']);
 		}
-		assertEval(docs, '[tags = #work]', config, ['raw2.md']);
-		assertEval(docs, '[tags = work]', config, ['raw2.md']);
+		assertEval(docs, '[tags: = #work]', config, ['raw2.md']);
+		assertEval(docs, '[tags: = work]', config, ['raw2.md']);
 		assertEval(docs, '[flag: false]', config, ['raw2.md']);
 		assertEval(docs, '[multi: (alpha AND beta)]', config, []);
 		assertEval(docs, '[multi: (beta OR gamma)]', config, ['raw1.md', 'raw2.md']);
@@ -201,12 +253,23 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 			'file.ext': 'legacy-ext',
 		};
 		const docs = [makeDoc(config, 'Archive/2026/Report.md', { frontmatter: shadowFm })];
-		for (const q of '[file.modified = 2026-06-15];[file.created = 2026-03-01];[file.size = 4096];[file.extension = md];[file.name = Report.md];[file.basename = Report];[file.path = Archive/2026/Report.md];[file.parent = Archive/2026];[file.mtime = legacy-mtime];[file.ctime = legacy-ctime];[file.ext = legacy-ext]'.split(
+		for (const q of '[file.modified: = 2026-06-15];[file.created: = 2026-03-01];[file.size: = 4096];[file.extension: = md];[file.name: = Report.md];[file.basename: = Report];[file.path: = Archive/2026/Report.md];[file.parent: = Archive/2026];[file.mtime: = legacy-mtime];[file.ctime: = legacy-ctime];[file.ext: = legacy-ext]'.split(
 			';',
 		)) {
 			assertEval(docs, q, config, ['Archive/2026/Report.md']);
 		}
-		assertEval(docs, '[file.name = Fake.txt]', config, []);
+		assertEval(docs, '[file.name: = Fake.txt]', config, []);
+		// Virtual file.* keys are always present ([file.*]), while [file.parent:] matches vault-root notes
+		const rootAndSubDocs = [...docs, makeDoc(config, 'RootNote.md')];
+		assertEval(rootAndSubDocs, '[file.parent]', config, [
+			'Archive/2026/Report.md',
+			'RootNote.md',
+		]);
+		assertEval(rootAndSubDocs, '[file.parent:]', config, ['RootNote.md']);
+		assertEval(rootAndSubDocs, '[file.parent] ![file.parent:]', config, [
+			'Archive/2026/Report.md',
+		]);
+		assertEval(rootAndSubDocs, '[file.size:]', config, []);
 	});
 
 	it('evaluates case-sensitive vs case-insensitive regexes on tags and blocks while keeping non-regex queries case-insensitive', () => {
@@ -223,7 +286,7 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		});
 		const docs = [doc1, doc2];
 
-		// Case-sensitive regex on properties and blocks matches exact authored casing;
+		// Case-sensitive regex on properties and blocks matches authored casing;
 		// tag: scope reads the lowercased doc.tags selection set
 		assertEval(docs, 'tag:/^Work/', config, []);
 		assertEval(docs, 'tag:/^work/', config, ['upper.md', 'lower.md']);
@@ -241,7 +304,7 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 			'#work',
 			'tag:work',
 			'[tags: work]',
-			'[tags = work/urgent]',
+			'[tags: = work/urgent]',
 			'blocks:/^blk-alpha$/i',
 			'blocks:blk-alpha',
 			'blocks:^BLK-ALPHA',
@@ -275,7 +338,7 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		const doc2 = makeDoc(config, 'd2.md', { frontmatter: { num: 'bad3' } });
 		const report = assertEval(
 			[doc1, doc2],
-			'file:d1 OR ([num > 5] AND [num < 10] AND [day = 2026-10-22])',
+			'file:d1 OR ([num: > 5] AND [num: < 10] AND [day: = 2026-10-22])',
 			config,
 			['d1.md'],
 		);
@@ -311,15 +374,15 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		corruptedDoc.propertyOccurrences[3]!.typedValues = [{ kind: 'number', value: 5, raw: '5' }];
 		corruptedDoc.propertyOccurrences[4]!.typedValues = [{ kind: 'number', value: 7, raw: '7' }];
 
-		expect(evaluateDoc(corruptedDoc, prepare('[num = 10]', config))).toBe(false);
+		expect(evaluateDoc(corruptedDoc, prepare('[num: = 10]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[num: 10]', config))).toBe(false);
-		expect(evaluateDoc(corruptedDoc, prepare('[flag = true]', config))).toBe(false);
+		expect(evaluateDoc(corruptedDoc, prepare('[flag: = true]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[flag: true]', config))).toBe(false);
-		expect(evaluateDoc(corruptedDoc, prepare('[day = 2026-10-22]', config))).toBe(false);
+		expect(evaluateDoc(corruptedDoc, prepare('[day: = 2026-10-22]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[day: 2026-10-22]', config))).toBe(false);
-		expect(evaluateDoc(corruptedDoc, prepare('[label = 5]', config))).toBe(false);
+		expect(evaluateDoc(corruptedDoc, prepare('[label: = 5]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[label: 5]', config))).toBe(false);
-		expect(evaluateDoc(corruptedDoc, prepare('[tags = work]', config))).toBe(false);
+		expect(evaluateDoc(corruptedDoc, prepare('[tags: = work]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[tags: work]', config))).toBe(false);
 	});
 });

@@ -204,9 +204,9 @@ const RULE_METADATA = {
 			'Groups a document-level boolean expression inside `(...)`. Increments syntactic nesting depth by `+1`.',
 	},
 	propertyFilter: {
-		ebnf: 'PropertyFilter ::= "[" PropertyKey ( ":" ValueNotExpr | CompOp ValueLeaf )? "]"',
+		ebnf: 'PropertyFilter ::= "[" PropertyKey ( ":" ( CompOp ValueLeaf | ValueNotExpr )? )? "]"',
 		description:
-			'Bracketed frontmatter or virtual file property filter (`[key]` existence check, `[key: value]` colon match, or `[key >= value]` comparison).',
+			'Bracketed frontmatter or virtual file property filter (`[key]` key-presence check, `[key:]` empty/no-value check, `[key: value]` colon match, or `[key: >= value]` comparison).',
 	},
 	scopedOperator: {
 		ebnf: 'ScopedOperator ::= ScopeName ":" ValueNotExpr',
@@ -231,7 +231,7 @@ const RULE_METADATA = {
 	propertyKey: {
 		ebnf: 'PropertyKey ::= QuotedString | Identifier',
 		description:
-			'Frontmatter or virtual property name inside `[...]`. Quoted strings allow spaces and special characters (e.g. `["Due Date" < @today]`).',
+			'Frontmatter or virtual property name inside `[...]`. Quoted strings allow spaces and special characters (e.g. `["Due Date": < @today]`).',
 	},
 	scopeName: {
 		ebnf: 'ScopeName ::= Identifier',
@@ -270,7 +270,7 @@ const SECTIONS = [
 	},
 	{
 		title: '2. Property Filters & Scoped Operators',
-		intro: 'Bracketed property filters (`[key]`, `[key: value]`, `[key op value]`) and `scope:value` operators delegate colon right-hand sides to `valueNotExpr` and comparison right-hand sides to `valueLeaf`.',
+		intro: 'Bracketed property filters (`[key]`, `[key:]`, `[key: value]`, `[key: op value]`) and `scope:value` operators delegate colon right-hand sides to `valueNotExpr` and comparison right-hand sides to `valueLeaf`.',
 		rules: ['propertyFilter', 'scopedOperator'],
 	},
 	{

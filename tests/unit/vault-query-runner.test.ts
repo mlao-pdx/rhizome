@@ -211,7 +211,7 @@ describe('diagnoseVaultQuery', () => {
 
 		const res = await diagnoseVaultQuery(
 			app,
-			'#work [priority < 3] [due <= 2026-10-25] [done = false] link:"projects/roadmap.md"',
+			'#work [priority: < 3] [due: <= 2026-10-25] [done: = false] link:"projects/roadmap.md"',
 			{ timeZone: 'UTC' },
 		);
 
@@ -247,7 +247,7 @@ describe('diagnoseVaultQuery', () => {
 		});
 		app.vault.getMarkdownFiles = getMarkdownFilesSpy;
 
-		const res = await diagnoseVaultQuery(app, '[priority = "not-a-number"]');
+		const res = await diagnoseVaultQuery(app, '[priority: = "not-a-number"]');
 		expect(res.executable).toBe(false);
 		expect(res.paths).toEqual([]);
 		expect(res.matches).toEqual([]);
@@ -271,7 +271,7 @@ describe('diagnoseVaultQuery', () => {
 			],
 		});
 
-		const res = await diagnoseVaultQuery(app, '[priority > 1]');
+		const res = await diagnoseVaultQuery(app, '[priority: > 1]');
 		expect(res.executable).toBe(true);
 		expect(res.paths).toEqual(['notes/valid.md']);
 		expect(res.propertyDiagnostics).toHaveLength(1);
@@ -296,7 +296,7 @@ describe('diagnoseVaultQuery', () => {
 		});
 
 		const referenceTimeMs = Date.UTC(2026, 9, 25, 12, 0, 0);
-		const res = await diagnoseVaultQuery(app, '[due = @today]', {
+		const res = await diagnoseVaultQuery(app, '[due: = @today]', {
 			timeZone: 'UTC',
 			propertyTypes: { due: 'date' },
 			referenceTimeMs,
@@ -375,7 +375,7 @@ describe('runVaultQuery', () => {
 			app,
 			{
 				urgentRoadmap:
-					'#work [priority < 3] [due <= 2026-10-25] [done = false] link:"projects/roadmap.md"',
+					'#work [priority: < 3] [due: <= 2026-10-25] [done: = false] link:"projects/roadmap.md"',
 				allWork: '#work',
 			},
 			{ timeZone: 'UTC', referenceTimeMs },
@@ -462,8 +462,8 @@ describe('runVaultQuery', () => {
 		const res = await runVaultQuery(
 			app,
 			{
-				validQuery: '[priority < 3]',
-				brokenQuery: '[priority = "not-a-number"]',
+				validQuery: '[priority: < 3]',
+				brokenQuery: '[priority: = "not-a-number"]',
 			},
 			{ timeZone: 'UTC', referenceTimeMs: 1700000000000 },
 		);
@@ -522,7 +522,7 @@ describe('runVaultQuery', () => {
 		const referenceTimeMs = Date.UTC(2026, 9, 25, 12, 0, 0);
 		const res = await runVaultQuery(
 			app,
-			{ today: '[due = @today]' },
+			{ today: '[due: = @today]' },
 			{
 				timeZone: 'UTC',
 				propertyTypes: { Due: 'date' },
@@ -560,7 +560,7 @@ describe('runVaultQuery', () => {
 
 		const failedRes = await runVaultQuery(
 			app,
-			{ bad: '[priority = "not-a-number"]' },
+			{ bad: '[priority: = "not-a-number"]' },
 			{
 				timeZone: 'UTC',
 				referenceTimeMs: 1700000000000,
@@ -707,7 +707,7 @@ describe('runVaultQuery', () => {
 				{
 					cleanQuery: '#project',
 					warnQuery: 'alpha and beta',
-					brokenQuery: '[priority = "nan"]',
+					brokenQuery: '[priority: = "nan"]',
 				},
 				{ timeZone: 'UTC' },
 				spy.logger,
@@ -737,7 +737,7 @@ describe('runVaultQuery', () => {
 				level: 'warn',
 				message: 'Query compilation diagnostics for «brokenQuery»',
 				meta: {
-					query: '«[priority = "nan"]»',
+					query: '«[priority: = "nan"]»',
 					executable: false,
 					errorCodes: ['ERROR_TYPE_MISMATCH'],
 					warningCodes: [],
@@ -774,7 +774,7 @@ describe('runVaultQuery', () => {
 
 			await runVaultQuery(
 				app,
-				{ highPriority: '[priority > 1]' },
+				{ highPriority: '[priority: > 1]' },
 				{ timeZone: 'UTC' },
 				spy.logger,
 			);
@@ -834,7 +834,7 @@ describe('runVaultQuery', () => {
 
 			const md = await explainVaultQuery(
 				app,
-				'#work [priority >= 2] [due = @today] [custom_override = true]',
+				'#work [priority: >= 2] [due: = @today] [custom_override: = true]',
 				{
 					timeZone: 'America/New_York',
 					referenceTimeMs: Date.parse('2026-10-22T15:30:00.000Z'),
@@ -852,7 +852,7 @@ describe('runVaultQuery', () => {
 			const explainLog = spy.calls.find((c) => c.message === 'Generated query explanation');
 			expect(explainLog?.level).toBe('debug');
 			expect(explainLog?.meta?.['query']).toBe(
-				'«#work [priority >= 2] [due = @today] [custom_override = true]»',
+				'«#work [priority: >= 2] [due: = @today] [custom_override: = true]»',
 			);
 			expect(typeof explainLog?.meta?.['durationMs']).toBe('number');
 		});

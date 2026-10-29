@@ -414,9 +414,13 @@ export function normalizeObsidianMetadata(
 			let valForCoerce: unknown = val;
 			if (propertyType === 'tags' && typeof scalar === 'string') {
 				const stripped = stripTagHash(scalar);
-				if (!stripped) return;
-				scalar = stripped;
-				valForCoerce = stripped;
+				if (!stripped) {
+					scalar = null;
+					valForCoerce = null;
+				} else {
+					scalar = stripped;
+					valForCoerce = stripped;
+				}
 			}
 			const tv = coercePropertyValue(valForCoerce, propertyType, timeZone);
 			recordDocDiagnosticIfInvalid(tv, key, rawKey, source, line, occurrenceIndex, 0);

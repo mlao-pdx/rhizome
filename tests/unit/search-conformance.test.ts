@@ -113,7 +113,7 @@ describe('search conformance matrix', () => {
 	it('2: compares signed decimal numbers', () => {
 		const passing = makeDoc('Passing.md', { frontmatter: { score: -5 } });
 		const failing = makeDoc('Failing.md', { frontmatter: { score: -20 } });
-		assertReports('[score >= -10.5]', [failing, passing], [passing]);
+		assertReports('[score: >= -10.5]', [failing, passing], [passing]);
 	});
 
 	it('3: distinguishes document negation, signed strings, and per-filename negation', () => {
@@ -142,15 +142,15 @@ describe('search conformance matrix', () => {
 			frontmatter: { meeting: '2026-10-22T12:00:00.000Z' },
 		});
 		const other = makeDoc('Other.md', { frontmatter: { meeting: '2026-10-22T14:00:00.000Z' } });
-		assertReports('[meeting = 2026-10-22T14:00:00+02:00]', [other, meeting], [meeting]);
+		assertReports('[meeting: = 2026-10-22T14:00:00+02:00]', [other, meeting], [meeting]);
 	});
 
 	it('6: gates invalid and skipped dates even under negation', () => {
-		assertRejected('[due = 2026-02-31]', 'ERROR_TYPE_MISMATCH');
+		assertRejected('[due: = 2026-02-31]', 'ERROR_TYPE_MISMATCH');
 		const apia = createStandardConfig({ timeZone: 'Pacific/Apia' });
 		const ref = Date.parse('2011-12-29T12:00:00.000Z');
-		assertRejected('[due = 2011-12-30]', 'ERROR_TYPE_MISMATCH', apia, ref);
-		assertRejected('NOT [due = @today+1d]', 'ERROR_TYPE_MISMATCH', apia, ref);
+		assertRejected('[due: = 2011-12-30]', 'ERROR_TYPE_MISMATCH', apia, ref);
+		assertRejected('NOT [due: = @today+1d]', 'ERROR_TYPE_MISMATCH', apia, ref);
 	});
 
 	it('7: includes every hour and both boundaries of the 25-hour DST fall-back day', () => {
@@ -169,7 +169,7 @@ describe('search conformance matrix', () => {
 				frontmatter: { modified: new Date(ms).toISOString() },
 			}),
 		);
-		assertReports('[modified = 2026-11-01]', [outside[0]!, ...inside, outside[1]!], inside);
+		assertReports('[modified: = 2026-11-01]', [outside[0]!, ...inside, outside[1]!], inside);
 	});
 
 	it('8: applies scoped conjunction to a single heading', () => {
@@ -190,20 +190,20 @@ describe('search conformance matrix', () => {
 		const done = makeDoc('Done.md', { frontmatter: { status: 'done' } });
 		const active = makeDoc('Active.md', { frontmatter: { status: 'active' } });
 		const docs = [missing, done, active];
-		const compiled = assertReports('[status != done]', docs, [active]);
+		const compiled = assertReports('[status: != done]', docs, [active]);
 		expect(compiled.diagnostics).toMatchObject([
 			{
 				code: 'HINT_PROP_NEQ_EXISTENCE',
-				hint: 'To exclude notes (including notes missing "status"), use "![status = done]".',
+				hint: 'To exclude notes (including notes missing "status"), use "![status:=done]".',
 			},
 		]);
-		assertReports('![status = done]', docs, [missing, active]);
+		assertReports('![status: = done]', docs, [missing, active]);
 	});
 
 	it('10: respects syntax, operator, and type error precedence', () => {
-		assertRejected('NOT [priority > high]', 'ERROR_TYPE_MISMATCH');
-		assertRejected('[priority = /10/]', 'ERROR_INVALID_OPERATOR_FOR_TYPE');
-		assertRejected('[priority = /foo(/]', 'SYNTAX_ERROR');
+		assertRejected('NOT [priority: > high]', 'ERROR_TYPE_MISMATCH');
+		assertRejected('[priority: = /10/]', 'ERROR_INVALID_OPERATOR_FOR_TYPE');
+		assertRejected('[priority: = /foo(/]', 'SYNTAX_ERROR');
 	});
 
 	it('11: resolves self-links and strips wikilink aliases before evaluation', () => {
@@ -242,7 +242,7 @@ describe('search conformance matrix', () => {
 		]);
 		expect(doc.propertyKeys).toEqual(['foo', '10', '2']);
 		expect(doc.properties['foo']).toEqual(['fm1', 'fm2', 'inline1', 'inline2', 'inline3']);
-		assertReports('[foo: inline3] AND ["10" = ten] AND ["2" = two]', [doc], [doc], custom);
+		assertReports('[foo: inline3] AND ["10": = ten] AND ["2": = two]', [doc], [doc], custom);
 		const urgent = makeDoc(
 			'Urgent.md',
 			{ frontmatter: { aliases: ['Urgent review'] } },
@@ -310,7 +310,7 @@ describe('search conformance matrix', () => {
 		const docs = bounds.map((ms, index) =>
 			makeDoc(`Bound-${index}.md`, { frontmatter: { due: new Date(ms).toISOString() } }),
 		);
-		assertReports(`[due = ${literal}]`, docs, [docs[1]!, docs[2]!]);
+		assertReports(`[due: = ${literal}]`, docs, [docs[1]!, docs[2]!]);
 	});
 
 	it('14: rejects reversed positional ranges with exact swap hints', () => {
@@ -318,7 +318,7 @@ describe('search conformance matrix', () => {
 			['@today..@today-7d', 'Use @today-7d..@today'],
 			['2026-10-15..2026-10-01', 'Use 2026-10-01..2026-10-15'],
 		]) {
-			const rejected = assertRejected(`[due = ${literal}]`, 'SYNTAX_ERROR');
+			const rejected = assertRejected(`[due: = ${literal}]`, 'SYNTAX_ERROR');
 			expect(rejected.diagnostics[0]?.hint).toBe(hint);
 		}
 	});
@@ -335,7 +335,7 @@ describe('search conformance matrix', () => {
 			{ size: 2048 },
 		);
 		expect(doc.propertyOccurrences[0]?.typedValues).toEqual([{ kind: 'text', value: 'large' }]);
-		assertReports('[file.size > 1024]', [doc], [doc]);
+		assertReports('[file.size: > 1024]', [doc], [doc]);
 		const sprint: DocumentDiagnostic = {
 			code: 'DOC_REVERSED_DATE_RANGE',
 			filePath: 'Projects/Sprint-12.md',
@@ -366,8 +366,8 @@ describe('search conformance matrix', () => {
 			issue: 'Value "2026-01-01..@today" is not a valid date.',
 			hint: 'Relative @date anchors are only allowed in search queries, not in stored note properties.',
 		};
-		assertReports('[sprint = @thisquarter]', [doc], [], config, [sprint]);
-		assertReports('[due = @today]', [doc], [], config, [due]);
+		assertReports('[sprint: = @thisquarter]', [doc], [], config, [sprint]);
+		assertReports('[due: = @today]', [doc], [], config, [due]);
 	});
 
 	it('16a: fingerprints are stable across registry key order', () => {
@@ -381,7 +381,7 @@ describe('search conformance matrix', () => {
 		});
 		expect(first.normalizationFingerprint).toBe(second.normalizationFingerprint);
 		const doc = makeDoc('A.md', { frontmatter: { a: 10 } }, first);
-		assertReports('[a = 10]', [doc], [doc], second);
+		assertReports('[a: = 10]', [doc], [doc], second);
 	});
 
 	it('16b: both vault and document entrypoints reject incompatible normalization', () => {
@@ -403,7 +403,7 @@ describe('search conformance matrix', () => {
 	});
 
 	it('16c: compiled AST nodes, child arrays, matchers, and prepared queries are immutable', () => {
-		const compiled = compile('tag:work AND [score >= 10]');
+		const compiled = compile('tag:work AND [score: >= 10]');
 		const ast = compiled.ast as LogicalNode;
 		expect(compiled.prepared.ast).toBe(ast);
 		expect(() => (ast.children as SearchAST[]).push({ type: 'MATCH_ALL' })).toThrow(TypeError);
@@ -419,7 +419,7 @@ describe('search conformance matrix', () => {
 	it('16d: temporal snapshots survive wall-clock changes in repeated evaluations', () => {
 		const today = makeDoc('Today.md', { frontmatter: { due: '2026-10-22' } });
 		const tomorrow = makeDoc('Tomorrow.md', { frontmatter: { due: '2026-10-23' } });
-		const { prepared } = compile('[due = @today]');
+		const { prepared } = compile('[due: = @today]');
 		try {
 			vi.useFakeTimers();
 			for (const now of [
@@ -454,7 +454,7 @@ describe('search conformance matrix', () => {
 		const getScope = vi.fn(custom.getScope);
 		const instrumented = Object.freeze({ ...custom, getScope });
 		const query =
-			'file:/a/i AND task:/^urgent/i AND [status: /open/i] AND /a/i AND [due = @today] AND [score > 1] AND [done = true]';
+			'file:/a/i AND task:/^urgent/i AND [status: /open/i] AND /a/i AND [due: = @today] AND [score: > 1] AND [done: = true]';
 		const { prepared } = compile(query, instrumented);
 		const doc = makeDoc(
 			'A.md',
@@ -500,7 +500,7 @@ describe('search conformance matrix', () => {
 	});
 
 	it('16d: prepares every branch even for an empty vault and reuses that plan', () => {
-		const { prepared } = compile('[score] OR file:/^unused/i OR [due = @tomorrow]');
+		const { prepared } = compile('[score] OR file:/^unused/i OR [due: = @tomorrow]');
 		const doc = makeDoc('A.md', { frontmatter: { score: 1 } });
 		const regex = vi.spyOn(literals, 'validateRegexLiteral');
 		const date = vi.spyOn(temporal, 'parseTemporalExpr');
@@ -525,6 +525,6 @@ describe('search conformance matrix', () => {
 			[0, 0],
 			[0, 1],
 		]);
-		assertReports('[sprint = @thisquarter]', [doc], [], config, doc.diagnostics);
+		assertReports('[sprint: = @thisquarter]', [doc], [], config, doc.diagnostics);
 	});
 });

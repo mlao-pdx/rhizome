@@ -311,15 +311,14 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 			}
 			const colon = asTokens(prop.children.Colon)[0];
 			const compOp = asTokens(prop.children.CompOp)[0];
+			const valueNotExprNode = asNodes(prop.children.valueNotExpr)[0];
 			let propNode: PropertyFilterNode;
-			if (colon) {
-				const rhs = lowerValueNotExpr(asNodes(prop.children.valueNotExpr)[0]!);
+			if (!colon) {
 				propNode = {
 					type: 'PROPERTY_FILTER',
 					key,
 					rawKey,
-					operator: ':',
-					valueExpr: rhs.expr,
+					operator: 'EXISTS',
 					span,
 				};
 			} else if (compOp) {
@@ -332,12 +331,36 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 					valueExpr: rhs.expr,
 					span,
 				};
+			} else if (valueNotExprNode) {
+				const rhs = lowerValueNotExpr(valueNotExprNode);
+				if (
+					rhs.expr.type === 'VALUE_LEAF' &&
+					rhs.expr.matcher.kind === 'string' &&
+					rhs.expr.matcher.value === ''
+				) {
+					propNode = {
+						type: 'PROPERTY_FILTER',
+						key,
+						rawKey,
+						operator: 'EMPTY',
+						span,
+					};
+				} else {
+					propNode = {
+						type: 'PROPERTY_FILTER',
+						key,
+						rawKey,
+						operator: ':',
+						valueExpr: rhs.expr,
+						span,
+					};
+				}
 			} else {
 				propNode = {
 					type: 'PROPERTY_FILTER',
 					key,
 					rawKey,
-					operator: 'EXISTS',
+					operator: 'EMPTY',
 					span,
 				};
 			}

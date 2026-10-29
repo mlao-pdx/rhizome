@@ -5,7 +5,7 @@ import {
 	type CompiledSearchNode,
 	type CompiledValueExprNode,
 } from './execution-plan';
-import { getTypedPropertyEntries } from './oracle';
+import { getTypedPropertyEntries, hasPropertyOccurrence } from './oracle';
 import { hierarchicalTagMatch, normalizeTagBody, substringStringMatch } from './scopes';
 import { compareDateIntervals } from './temporal';
 import type {
@@ -181,8 +181,12 @@ function evalCompiledSearchNode(doc: NormalizedDocument, node: CompiledSearchNod
 			return targets.some((t) => evalCompiledValueExpr(t, node.expr, node.scopeDef));
 		}
 		case 'PROPERTY_EXISTS': {
+			return hasPropertyOccurrence(doc, node.lowerKey);
+		}
+		case 'PROPERTY_EMPTY': {
+			if (!hasPropertyOccurrence(doc, node.lowerKey)) return false;
 			const entries = getTypedPropertyEntries(doc, node.lowerKey);
-			return entries.some((e) => e.kind !== 'null' && e.kind !== 'invalid');
+			return entries.every((e) => e.kind === 'null');
 		}
 		case 'PROPERTY_COLON': {
 			const entries = getTypedPropertyEntries(doc, node.lowerKey);

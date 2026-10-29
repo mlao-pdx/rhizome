@@ -148,6 +148,7 @@ function printablePropertyFilterArb(
 	const temporalLiteralArb = printableTemporalLiteralArb(resolvedConfig, refMs);
 	const propOperatorArb: fc.Arbitrary<PropertyOperator> = fc.constantFrom(
 		'EXISTS',
+		'EMPTY',
 		':',
 		'=',
 		'!=',
@@ -166,12 +167,12 @@ function printablePropertyFilterArb(
 				propType === 'checkbox' && ['<', '>', '<=', '>='].includes(requestedOp)
 					? '='
 					: requestedOp;
-			if (op === 'EXISTS') {
+			if (op === 'EXISTS' || op === 'EMPTY') {
 				return fc.constant<PropertyFilterNode>({
 					type: 'PROPERTY_FILTER',
 					key,
 					rawKey,
-					operator: 'EXISTS',
+					operator: op,
 				});
 			}
 			if (op === ':') {

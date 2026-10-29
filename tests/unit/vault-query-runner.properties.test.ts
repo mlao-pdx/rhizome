@@ -153,10 +153,11 @@ const tokenFragmentArb = fc.constantFrom(
 	'/unclosed(/',
 	'#work',
 	'file:note',
-	'[priority > 1]',
-	'[priority = "bad"]',
-	'[due = @today]',
+	'[priority: > 1]',
+	'[priority: = "bad"]',
+	'[due: = @today]',
 	'[status: active]',
+	'[status:]',
 	'and',
 	'or',
 	'bareword',
@@ -532,7 +533,7 @@ describe('Vault Query Runner Property Invariants', () => {
 					maxLength: 4,
 				}),
 				executableQueryStringArb,
-				fc.constantFrom('/unclosed(/', '[priority = "not-a-number"]', 'AND'),
+				fc.constantFrom('/unclosed(/', '[priority: = "not-a-number"]', 'AND'),
 				async (notes, validQuery, invalidQuery) => {
 					const typesJson = JSON.stringify({
 						types: {
@@ -637,10 +638,10 @@ describe('Vault Query Runner Property Invariants', () => {
 							appRun,
 							{
 								all: '',
-								lt: '[due < @today]',
-								eq: '[due = @today]',
-								gt: '[due > @today]',
-								hasDue: '[due]',
+								lt: '[due: < @today]',
+								eq: '[due: = @today]',
+								gt: '[due: > @today]',
+								hasDue: '[due: <= @today] OR [due: > @today]',
 							},
 							{
 								timeZone: rawTz,

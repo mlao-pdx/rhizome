@@ -319,7 +319,8 @@ export function validateQueryAST(
 		switch (node.type) {
 			case 'PROPERTY_FILTER': {
 				if (invalidRegexPropNodes.has(node)) return;
-				if (node.operator === 'EXISTS' || !node.valueExpr) return;
+				if (node.operator === 'EXISTS' || node.operator === 'EMPTY' || !node.valueExpr)
+					return;
 
 				const propType = resolveQueryPropertyType(node.key, resolvedConfig.propertyTypes);
 				const hasRegex = containsRegexLeaf(node.valueExpr);

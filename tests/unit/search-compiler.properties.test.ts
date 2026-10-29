@@ -184,16 +184,18 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 		'prop:status',
 		'ext:md',
 		'ext:pdf',
-		'[score >= -10.5]',
-		'[priority > high]',
-		'[priority = /10/]',
-		'[priority = /foo(/]',
-		'[done < true]',
-		'[done = "true"]',
-		'[due = 2026-02-31]',
-		'[due = 2026-10-15..2026-10-01]',
-		'[due = @today..@today-7d]',
-		'[status != done]',
+		'[score: >= -10.5]',
+		'[priority: > high]',
+		'[priority: = /10/]',
+		'[priority: = /foo(/]',
+		'[done: < true]',
+		'[done: = "true"]',
+		'[due: = 2026-02-31]',
+		'[due: = 2026-10-15..2026-10-01]',
+		'[due: = @today..@today-7d]',
+		'[status: != done]',
+		'[status:]',
+		'[status:""]',
 		'and',
 		'or',
 		'not',
@@ -277,7 +279,7 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 			fc.property(propKeyArb, compOpArb, fc.boolean(), (key, op, negate) => {
 				const wrap = (query: string): string => (negate ? `NOT (${query})` : query);
 				const invalidRegexRes = compileQuery(
-					wrap(`[${key} ${op} /unclosed(/]`),
+					wrap(`[${key}: ${op} /unclosed(/]`),
 					resolvedConfig,
 					PINNED_REF_MS,
 				);
@@ -286,7 +288,7 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 					'SYNTAX_ERROR',
 				]);
 				const validRegexRes = compileQuery(
-					wrap(`[${key} ${op} /^abc$/i]`),
+					wrap(`[${key}: ${op} /^abc$/i]`),
 					resolvedConfig,
 					PINNED_REF_MS,
 				);
@@ -381,7 +383,7 @@ describe('Invariant: Scope-Property Portability, Operator Gate & Suggested Query
 		printableValueExprArb,
 	);
 
-	const nonColonOpArb = fc.constantFrom('EXISTS', '=', '!=', '<', '>', '<=', '>=');
+	const nonColonOpArb = fc.constantFrom('EXISTS', 'EMPTY', '=', '!=', '<', '>', '<=', '>=');
 	const compLeafArb = fc.oneof(
 		unquotedIdentifierArb,
 		quotedValueArb.map((val) =>
@@ -484,7 +486,9 @@ describe('Invariant: Scope-Property Portability, Operator Gate & Suggested Query
 					const nonColonQuery =
 						nonColonOp === 'EXISTS'
 							? `[${rawScopeKey}]`
-							: `[${rawScopeKey} ${nonColonOp} ${compLeaf}]`;
+							: nonColonOp === 'EMPTY'
+								? `[${rawScopeKey}:]`
+								: `[${rawScopeKey}: ${nonColonOp} ${compLeaf}]`;
 					const nonColonRes = compileQuery(
 						nonColonQuery,
 						configWithCustomScopes,

@@ -3,19 +3,25 @@ import { testRegex } from './literals';
 import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
 import { hierarchicalTagMatch, normalizeTagBody, substringStringMatch } from './scopes';
 import { compareDateIntervals, parseTemporalExpr } from './temporal';
-import type {
-	DocumentDiagnostic,
-	NormalizedDocument,
-	ObsidianPropertyType,
-	PreparedQuery,
-	PropertyOperator,
-	ResolvedEngineConfig,
-	ScopeDefinition,
-	SearchAST,
-	TypedPropertyValue,
-	ValueExprAST,
-	VaultEvaluationReport,
+import {
+	isVirtualFileKey,
+	type DocumentDiagnostic,
+	type NormalizedDocument,
+	type ObsidianPropertyType,
+	type PreparedQuery,
+	type PropertyOperator,
+	type ResolvedEngineConfig,
+	type ScopeDefinition,
+	type SearchAST,
+	type TypedPropertyValue,
+	type ValueExprAST,
+	type VaultEvaluationReport,
 } from './types';
+
+export function hasPropertyOccurrence(doc: NormalizedDocument, lowerKey: string): boolean {
+	if (isVirtualFileKey(lowerKey)) return true;
+	return doc.propertyOccurrences.some((occ) => occ.key === lowerKey);
+}
 
 export function getTypedPropertyEntries(
 	doc: NormalizedDocument,
@@ -36,12 +42,26 @@ export function getTypedPropertyEntries(
 		return [{ kind: 'number', value: s, raw: String(s) }];
 	}
 	if (lowerKey === 'file.extension') {
-		return [{ kind: 'text', value: doc.file.extension }];
+		return doc.file.extension === ''
+			? [{ kind: 'null' }]
+			: [{ kind: 'text', value: doc.file.extension }];
 	}
-	if (lowerKey === 'file.name') return [{ kind: 'text', value: doc.file.name }];
-	if (lowerKey === 'file.basename') return [{ kind: 'text', value: doc.file.basename }];
-	if (lowerKey === 'file.path') return [{ kind: 'text', value: doc.file.path }];
-	if (lowerKey === 'file.parent') return [{ kind: 'text', value: doc.file.parent }];
+	if (lowerKey === 'file.name') {
+		return doc.file.name === '' ? [{ kind: 'null' }] : [{ kind: 'text', value: doc.file.name }];
+	}
+	if (lowerKey === 'file.basename') {
+		return doc.file.basename === ''
+			? [{ kind: 'null' }]
+			: [{ kind: 'text', value: doc.file.basename }];
+	}
+	if (lowerKey === 'file.path') {
+		return doc.file.path === '' ? [{ kind: 'null' }] : [{ kind: 'text', value: doc.file.path }];
+	}
+	if (lowerKey === 'file.parent') {
+		return doc.file.parent === ''
+			? [{ kind: 'null' }]
+			: [{ kind: 'text', value: doc.file.parent }];
+	}
 	return doc.propertyOccurrences
 		.filter((occ) => occ.key === lowerKey)
 		.flatMap((occ) => occ.typedValues);
@@ -253,10 +273,17 @@ function evalAstNode(
 		}
 		case 'PROPERTY_FILTER': {
 			const lowerKey = ast.key.trim().toLowerCase();
+			if (ast.operator === 'EXISTS') {
+				return hasPropertyOccurrence(doc, lowerKey);
+			}
+			if (ast.operator === 'EMPTY') {
+				if (!hasPropertyOccurrence(doc, lowerKey)) return false;
+				const entries = getTypedPropertyEntries(doc, lowerKey);
+				return entries.every((e) => e.kind === 'null');
+			}
 			const entries = getTypedPropertyEntries(doc, lowerKey);
 			const validEntries = entries.filter((e) => e.kind !== 'null' && e.kind !== 'invalid');
 			if (validEntries.length === 0) return false;
-			if (ast.operator === 'EXISTS') return true;
 			const valueExpr = ast.valueExpr;
 			if (!valueExpr) return false;
 			const propType = resolveQueryPropertyType(lowerKey, resolvedConfig.propertyTypes);

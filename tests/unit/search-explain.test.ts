@@ -145,18 +145,20 @@ describe('explainQuery', () => {
 		expect(md).not.toContain('## Reference — Execution Context & Resolution');
 
 		const customHeadingMd = explainQuery(
-			'#work',
+			'#work [status] [due:]',
 			cfg,
 			REF_TIME_MS,
 			'Active Projects — Explain Plan',
 		);
 		expect(customHeadingMd.startsWith('# Active Projects — Explain Plan\n')).toBe(true);
+		expect(customHeadingMd).toContain('is present on the note (regardless of value).');
+		expect(customHeadingMd).toContain('is present on the note with no value (empty or null).');
 	});
 
 	it('progressively shrinks query slices, distinguishes implicit vs explicit AND, uses italic emphasis, and emits numbered footnotes', () => {
 		const cfg = makeConfig();
 		const query =
-			'folder:projects AND #work/auth tag:(#urgent !#archived) [priority >= 2] [status != "done"] !( [done = true] OR "draft" )';
+			'folder:projects AND #work/auth tag:(#urgent !#archived) [priority: >= 2] [status: != "done"] !( [done: = true] OR "draft" )';
 		const md = explainQuery(query, cfg, REF_TIME_MS);
 
 		expect(md).toContain(`- **Query**: \`${query}\``);
@@ -184,20 +186,20 @@ describe('explainQuery', () => {
 			'      - `#archived`\n          Is `#archived` or a nested tag under `#archived/...` (case-insensitive).',
 		);
 		// Property operators without repeating operator symbols (`>=`, `!=`)
-		expect(md).toContain('- `[priority >= 2]`\n    `priority`[^5] is at least `2`.');
+		expect(md).toContain('- `[priority: >= 2]`\n    `priority`[^5] is at least `2`.');
 		expect(md).toContain(
-			'- `[status != "done"]`\n    `status`[^6] does not equal `"done"` (case-insensitive). · [^7]',
+			'- `[status: != "done"]`\n    `status`[^6] does not equal `"done"` (case-insensitive). · [^7]',
 		);
 		expect(md).not.toContain('(`>= 2`)');
 		expect(md).not.toContain('(`!=`,');
 		// Note-level NOT and OR shrinking
 		expect(md).toContain(
-			'- `!( [done = true] OR "draft" )`\n    Excludes notes matching (`!` / `NOT`):',
+			'- `!( [done: = true] OR "draft" )`\n    Excludes notes matching (`!` / `NOT`):',
 		);
 		expect(md).toContain(
-			'  - `( [done = true] OR "draft" )`\n      Matches notes where *any* of the following hold (`OR`):',
+			'  - `( [done: = true] OR "draft" )`\n      Matches notes where *any* of the following hold (`OR`):',
 		);
-		expect(md).toContain('    - `[done = true]`\n        `done`[^8] is `true`.');
+		expect(md).toContain('    - `[done: = true]`\n        `done`[^8] is `true`.');
 		expect(md).toContain(
 			'    - `"draft"`\n        Note metadata ([^9]) contains `draft` (case-insensitive). · [^10]',
 		);
@@ -211,7 +213,7 @@ describe('explainQuery', () => {
 		expect(refIdx).toBeGreaterThan(diagIdx);
 
 		expect(md).toContain('> [!info] Hint 1: `HINT_PROP_NEQ_EXISTENCE`');
-		expect(md).toContain('‼️[status != "done"]‼️');
+		expect(md).toContain('‼️[status: != "done"]‼️');
 		expect(md).toContain('> [!info] Hint 2: `HINT_BARE_TEXT_NO_BODY`');
 		expect(md).toContain('‼️"draft"‼️');
 
@@ -227,7 +229,7 @@ describe('explainQuery', () => {
 	it('resolves temporal windows in the configured timezone and links numbered footnotes', () => {
 		const cfg = makeConfig({ timeZone: 'Asia/Tokyo' });
 		const md = explainQuery(
-			'[due = @today] [updated >= 2026-01-01..2026-06-30] [file.modified < @thisweek]',
+			'[due: = @today] [updated: >= 2026-01-01..2026-06-30] [file.modified: < @thisweek]',
 			cfg,
 			REF_TIME_MS,
 		);
@@ -268,7 +270,7 @@ describe('explainQuery', () => {
 	it('preserves the best-effort Logic Breakdown and attaches numbered diagnostic links on semantic errors', () => {
 		const cfg = makeConfig();
 		const md = explainQuery(
-			'bogus:value [priority = "nan"] [done > true] [unconfigured_prop = "ok"]',
+			'bogus:value [priority: = "nan"] [done: > true] [unconfigured_prop: = "ok"]',
 			cfg,
 			REF_TIME_MS,
 		);
@@ -277,21 +279,21 @@ describe('explainQuery', () => {
 		expect(md).toContain('## Logic Breakdown');
 		expect(md).toContain('- `bogus:value`\n    ❌ Unknown search scope `bogus:`. · [^3]');
 		expect(md).toContain(
-			'- `[priority = "nan"]`\n    ❌ `priority`[^4] ❌ `"nan"` (expected an unquoted number such as `42` or `-3.5`). · [^5]',
+			'- `[priority: = "nan"]`\n    ❌ `priority`[^4] ❌ `"nan"` (expected an unquoted number such as `42` or `-3.5`). · [^5]',
 		);
 		expect(md).toContain(
-			'- `[done > true]`\n    ❌ `done`[^6] ❌ `true` (ordering comparison is not supported on `checkbox` properties). · [^7]',
+			'- `[done: > true]`\n    ❌ `done`[^6] ❌ `true` (ordering comparison is not supported on `checkbox` properties). · [^7]',
 		);
 		expect(md).toContain(
-			'- `[unconfigured_prop = "ok"]`\n    `unconfigured_prop`[^8] equals `"ok"` (case-insensitive).',
+			'- `[unconfigured_prop: = "ok"]`\n    `unconfigured_prop`[^8] equals `"ok"` (case-insensitive).',
 		);
 		expect(md).toContain('[^8]: **Untyped Property (Default `text`)**');
 		expect(md).toContain('> [!danger] Error 1: `ERROR_UNKNOWN_SCOPE`');
 		expect(md).toContain('‼️bogus:value‼️');
 		expect(md).toContain('> [!danger] Error 2: `ERROR_TYPE_MISMATCH`');
-		expect(md).toContain('‼️[priority = "nan"]‼️');
+		expect(md).toContain('‼️[priority: = "nan"]‼️');
 		expect(md).toContain('> [!danger] Error 3: `ERROR_INVALID_OPERATOR_FOR_TYPE`');
-		expect(md).toContain('‼️[done > true]‼️');
+		expect(md).toContain('‼️[done: > true]‼️');
 	});
 
 	it('handles syntax errors, invalid EngineConfig, and invalid referenceTimeMs gracefully', () => {
@@ -304,7 +306,7 @@ describe('explainQuery', () => {
 		expect(badSyntaxMd).toContain('> [!danger] Error 1: `SYNTAX_ERROR`');
 
 		const badConfigMd = explainQuery(
-			'#work [priority: (1 OR 2)] [due = @today]',
+			'#work [priority: (1 OR 2)] [due: = @today]',
 			{
 				timeZone: 'Mars/Phobos',
 				propertyTypes: { priority: 'number', due: 'date', bad: 'invalid_type' as never },
@@ -324,7 +326,7 @@ describe('explainQuery', () => {
 	it('safely fences backticks and special characters in inline code and regex links', () => {
 		const cfg = makeConfig();
 		const md = explainQuery(
-			'file:"a|b<c>`d`[e]" tag:"x`y" blocks:"^id`1" ["prop`key" != "val"] [status: (/foo|bar/ OR "x|y")]',
+			'file:"a|b<c>`d`[e]" tag:"x`y" blocks:"^id`1" ["prop`key": != "val"] [status: (/foo|bar/ OR "x|y")]',
 			cfg,
 			REF_TIME_MS,
 		);

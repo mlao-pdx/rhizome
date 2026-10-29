@@ -74,7 +74,7 @@ describe('Invariant 1a: Lexer & SearchParser self-analysis smoke test', () => {
 		expect(unclosedParen.diagnostics[0]?.issue).toContain(')');
 		expect(unclosedParen.diagnostics[0]?.issue).not.toContain('RParen');
 
-		const unclosedBracket = parseQuery('[status = 1');
+		const unclosedBracket = parseQuery('[status: = 1');
 		expect(unclosedBracket.ast).toBeNull();
 		expect(unclosedBracket.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
 		expect(unclosedBracket.diagnostics[0]?.issue).toContain(']');
@@ -114,17 +114,49 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 		expect(normalizeAST(bareTagScopeRes.ast!)).toEqual(normalizeAST(shortRes.ast!));
 	});
 
-	it('Conformance Test 2: lowers signed numeric RHS [score >= -10.5], [score: !-10.5], and [score: (-10.5 OR -20)] via ValueLeaf', () => {
-		const res = parseQuery('[score >= -10.5]');
-		expect(res.diagnostics).toEqual([]);
-		expect(res.ast).toMatchObject({
+	it('Conformance Test 2: lowers signed numeric RHS [score:>=-10.5], [score: >= -10.5], [score: !-10.5], and [score: (-10.5 OR -20)] via ValueLeaf, plus [prop:] and [prop:""] to EMPTY', () => {
+		for (const q of ['[score:>=-10.5]', '[score: >= -10.5]']) {
+			const res = parseQuery(q);
+			expect(res.diagnostics).toEqual([]);
+			expect(res.ast).toMatchObject({
+				type: 'PROPERTY_FILTER',
+				key: 'score',
+				rawKey: 'score',
+				operator: '>=',
+				valueExpr: {
+					type: 'VALUE_LEAF',
+					matcher: { kind: 'string', value: '-10.5', quoted: false },
+				},
+			});
+		}
+
+		for (const emptyQ of ['[status:]', '[status:""]', "[status:'']", '[status: ("")]']) {
+			const emptyRes = parseQuery(emptyQ);
+			expect(emptyRes.diagnostics).toEqual([]);
+			expect(emptyRes.ast).toMatchObject({
+				type: 'PROPERTY_FILTER',
+				key: 'status',
+				rawKey: 'status',
+				operator: 'EMPTY',
+			});
+			expect(normalizeAST(emptyRes.ast!)).toEqual({
+				type: 'PROPERTY_FILTER',
+				key: 'status',
+				rawKey: 'status',
+				operator: 'EMPTY',
+			});
+		}
+
+		const nullTextRes = parseQuery('[status:null]');
+		expect(nullTextRes.diagnostics).toEqual([]);
+		expect(nullTextRes.ast).toMatchObject({
 			type: 'PROPERTY_FILTER',
-			key: 'score',
-			rawKey: 'score',
-			operator: '>=',
+			key: 'status',
+			rawKey: 'status',
+			operator: ':',
 			valueExpr: {
 				type: 'VALUE_LEAF',
-				matcher: { kind: 'string', value: '-10.5', quoted: false },
+				matcher: { kind: 'string', value: 'null', quoted: false },
 			},
 		});
 
@@ -457,8 +489,17 @@ describe('Resource Limits & Syntax Error Boundaries', () => {
 		expect(seqRes.ast).not.toBeNull();
 	});
 
-	it('rejects spaced bang ! 5, [score = ! 5], and lone bang [score = !] with SYNTAX_ERROR', () => {
-		for (const bad of ['! 5', '[score = ! 5]', '[score = !]', '(', 'NOT', 'unclosed "quote']) {
+	it('rejects spaced bang ! 5, [score: = ! 5], lone bang [score: = !], and unprefixed comparisons [score = 5] with SYNTAX_ERROR', () => {
+		for (const bad of [
+			'! 5',
+			'[score: = ! 5]',
+			'[score: = !]',
+			'[score = 5]',
+			'[score >= 5]',
+			'(',
+			'NOT',
+			'unclosed "quote',
+		]) {
 			const res = parseQuery(bad);
 			expect(res.ast).toBeNull();
 			expect(res.diagnostics.length).toBeGreaterThan(0);
@@ -513,7 +554,7 @@ describe('Resource Limits & Syntax Error Boundaries', () => {
 			'SYNTAX_ERROR',
 		]);
 
-		for (const badProp of ['[""]', '["   " = 1]', "['']"]) {
+		for (const badProp of ['[""]', '["   ": = 1]', "['']", '["" : ]']) {
 			const res = parseQuery(badProp);
 			expect(res.ast).toBeNull();
 			expect(res.diagnostics).toHaveLength(1);
@@ -595,7 +636,7 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 	});
 
 	it('deeply freezes all AST nodes, children arrays, matchers, and spans via deepFreezeAST', () => {
-		const res = parseQuery('headings:(Intro OR /sum.*/i) AND ![status = "active"] AND note');
+		const res = parseQuery('headings:(Intro OR /sum.*/i) AND ![status: = "active"] AND note');
 		expect(res.ast).not.toBeNull();
 		const frozen = deepFreezeAST(res.ast!);
 
@@ -622,8 +663,8 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 	});
 
 	it('normalizes ASTs idempotently and flattens nested logical operators in normalizeAST', () => {
-		const q1 = parseQuery('((a AND b) AND c) AND !d AND #work AND ["Status" = 1]');
-		const q2 = parseQuery('a AND (b AND c) AND NOT d AND tag:work AND [status = 1]');
+		const q1 = parseQuery('((a AND b) AND c) AND !d AND #work AND ["Status": = 1]');
+		const q2 = parseQuery('a AND (b AND c) AND NOT d AND tag:work AND [status:=1]');
 		expect(q1.ast).not.toBeNull();
 		expect(q2.ast).not.toBeNull();
 
@@ -640,7 +681,7 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 
 	it('collects only non-virtual property keys across the entire AST in collectReferencedPropertyKeys', () => {
 		const virtualFilters = VIRTUAL_FILE_KEYS_LIST.map((k) => `[${k}]`).join(' AND ');
-		const query = `${virtualFilters} AND [Status = "done"] AND !["Due Date" < 2026-01-01] OR [priority]`;
+		const query = `${virtualFilters} AND [Status: = "done"] AND !["Due Date": < 2026-01-01] OR [priority:]`;
 		const res = parseQuery(query);
 		expect(res.ast).not.toBeNull();
 
