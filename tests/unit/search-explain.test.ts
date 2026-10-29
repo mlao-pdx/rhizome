@@ -139,7 +139,7 @@ describe('explainQuery', () => {
 		expect(md).toContain('> [!tip] No issues found');
 		expect(md).toContain('## Concept Reference');
 		expect(md).toContain('[^1]: **Half-Open Temporal Intervals');
-		expect(md).toContain('```mermaid\ngantt\n    title Half-Open Interval Comparisons');
+		expect(md).toContain('```mermaid\ngantt\n    title [Half-Open) Interval Comparisons');
 		expect(md).toContain('[^2]: **Timezone Resolution**');
 		expect(md).not.toContain('flowchart TD');
 		expect(md).not.toContain('## Reference — Execution Context & Resolution');
@@ -222,8 +222,8 @@ describe('explainQuery', () => {
 		for (let i = 1; i <= 10; i++) {
 			expect(refSection).toMatch(new RegExp(`^\\[\\^${i}\\]: `, 'm'));
 		}
-		expect(refSection).toContain('title Half-Open Interval Comparisons');
-		expect(refSection).toContain('Note starts before and ends after');
+		expect(refSection).toContain('title [Half-Open) Interval Comparisons');
+		expect(refSection).toContain('[2 <= Criteria < 5)');
 	});
 
 	it('resolves temporal windows in the configured timezone and links numbered footnotes', () => {

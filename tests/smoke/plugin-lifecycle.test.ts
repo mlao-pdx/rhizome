@@ -43,7 +43,7 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		expect(plugin.loggerAdapter.logsFolderPath).toBe('_rhizome/logs');
 	});
 
-	it('query() evaluates against the vault and returns { context, diagnostics, matches }', async () => {
+	it('query() evaluates against the vault and returns matched note payloads keyed by query name', async () => {
 		const app = createMockApp() as App;
 		const mockFile = {
 			path: 'notes/alpha.md',
@@ -73,45 +73,28 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 				referenceTimeMs: 1700000000000,
 			},
 		);
-		expect(result.context).toEqual({
-			timeZone: 'UTC',
-			referenceTimeMs: 1700000000000,
-			propertyTypes: {},
-			normalizationFingerprint: JSON.stringify({ tz: 'UTC', types: [] }),
-		});
-		expect(result.diagnostics).toEqual({
-			executable: true,
-			findings: [],
-			queries: {
-				activeProjects: { executable: true, findings: [] },
-				allNotes: { executable: true, findings: [] },
-			},
-		});
-		expect(result.matches['activeProjects']).toHaveLength(1);
-		expect(result.matches['allNotes']).toHaveLength(1);
-		expect(result.matches['activeProjects']?.[0]).toBe(result.matches['allNotes']?.[0]);
-		expect(result.matches['activeProjects']?.[0]?.file.path).toBe('notes/alpha.md');
-		expect(result.matches['activeProjects']?.[0]?.tagLocations).toEqual([
+		expect(Object.keys(result)).toEqual(['activeProjects', 'allNotes']);
+		expect(result['activeProjects']).toHaveLength(1);
+		expect(result['allNotes']).toHaveLength(1);
+		expect(result['activeProjects']?.[0]).toBe(result['allNotes']?.[0]);
+		expect(result['activeProjects']?.[0]?.file.path).toBe('notes/alpha.md');
+		expect(result['activeProjects']?.[0]?.tagLocations).toEqual([
 			{
 				tag: 'project',
 				source: 'body',
 				origin: '[[notes/alpha.md|alpha]]',
 			},
 		]);
-		expect('normalizationFingerprint' in (result.matches['activeProjects']?.[0] ?? {})).toBe(
-			false,
-		);
-		expect('propertyOccurrences' in (result.matches['activeProjects']?.[0] ?? {})).toBe(false);
+		expect('normalizationFingerprint' in (result['activeProjects']?.[0] ?? {})).toBe(false);
+		expect('propertyOccurrences' in (result['activeProjects']?.[0] ?? {})).toBe(false);
+		expect('context' in result).toBe(false);
+		expect('diagnostics' in result).toBe(false);
+		expect('matches' in result).toBe(false);
 		expect('paths' in result).toBe(false);
 		expect('propertyDiagnostics' in result).toBe(false);
 
 		const emptyResult = await plugin.query();
-		expect(emptyResult.diagnostics).toEqual({
-			executable: true,
-			findings: [],
-			queries: {},
-		});
-		expect(emptyResult.matches).toEqual({});
+		expect(emptyResult).toEqual({});
 	});
 
 	it('diagnoseQuery() evaluates against the vault and returns matches, paths, and propertyDiagnostics', async () => {

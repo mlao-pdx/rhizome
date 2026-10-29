@@ -8,8 +8,6 @@ import {
 	FORBIDDEN_KEYS,
 	getExecutionPlan,
 	initEngineConfig,
-	isValidPropertyType,
-	isValidReferenceTimeMs,
 	type NormalizedDocument,
 	type NormalizedFileInfo,
 	type NormalizedHeading,
@@ -47,49 +45,7 @@ export interface VaultQueryOptions {
 }
 
 /**
- * Run-level environment context returned by `runVaultQuery` and `plugin.query`.
- */
-export interface VaultQueryContext {
-	/** Resolved IANA timezone used for query compilation and date coercion (trimmed). */
-	readonly timeZone: string;
-	/**
-	 * Reference timestamp in UTC epoch ms for `@` relative date anchors,
-	 * or `null` if an invalid `referenceTimeMs` override was supplied.
-	 */
-	readonly referenceTimeMs: number | null;
-	/** Active normalized property-type registry (merged `.obsidian/types.json` and `options.propertyTypes`). */
-	readonly propertyTypes: Readonly<PropertyTypeRegistry>;
-	/**
-	 * Canonical normalization fingerprint (`{"tz":...,"types":...}`) shared across all queries,
-	 * or `null` if engine configuration failed.
-	 */
-	readonly normalizationFingerprint: string | null;
-}
-
-/**
- * Per-query compilation and lint diagnostics returned in `MultiQueryDiagnostics.queries`.
- */
-export interface QueryDiagnostics {
-	/** Whether the query compiled without errors and was evaluated against the vault. */
-	readonly executable: boolean;
-	/** Query lexer, parser, validator, config, and linter findings. */
-	readonly findings: SearchDiagnostic[];
-}
-
-/**
- * Aggregate and per-query compilation and lint diagnostics returned by `runVaultQuery` and `plugin.query`.
- */
-export interface MultiQueryDiagnostics {
-	/** True iff engine config succeeded AND every query in `queries` has `executable === true`. */
-	readonly executable: boolean;
-	/** Engine/config-level findings (e.g. `ERROR_INVALID_CONFIG` for `timeZone` or `propertyTypes`). */
-	readonly findings: SearchDiagnostic[];
-	/** Per-query compilation and lint diagnostics keyed by query name. */
-	readonly queries: Record<string, QueryDiagnostics>;
-}
-
-/**
- * User-facing matched note metadata returned in `VaultQueryResult.matches`.
+ * User-facing matched note metadata returned in `VaultQueryResult`.
  */
 export interface VaultQueryMatch {
 	readonly file: NormalizedFileInfo;
@@ -104,19 +60,11 @@ export interface VaultQueryMatch {
 }
 
 /**
- * Result returned by `runVaultQuery` and `plugin.query`.
+ * Result returned by `runVaultQuery` and `plugin.query`, mapping each executable query name
+ * to its matched Markdown notes in vault evaluation order.
+ * Queries that fail compilation (or runs where engine configuration fails) are omitted.
  */
-export interface VaultQueryResult {
-	/** Run-level environment context (frozen, JSON-safe POJO). */
-	readonly context: VaultQueryContext;
-	/** Aggregate and per-query compilation and lint diagnostics. */
-	readonly diagnostics: MultiQueryDiagnostics;
-	/**
-	 * Matched Markdown notes in vault evaluation order, keyed by query name.
-	 * Queries that fail compilation are omitted from `matches`.
-	 */
-	readonly matches: Record<string, VaultQueryMatch[]>;
-}
+export type VaultQueryResult = Record<string, VaultQueryMatch[]>;
 
 /**
  * Projects a `NormalizedDocument` into a user-facing `VaultQueryMatch` POJO.
@@ -193,26 +141,6 @@ function mergePropertyTypes(
 	return merged;
 }
 
-function sanitizeFallbackPropertyTypes(
-	rawTypes: PropertyTypeRegistry,
-): Readonly<PropertyTypeRegistry> {
-	const fallback = Object.create(null) as PropertyTypeRegistry;
-	for (const [rawKey, propType] of Object.entries(rawTypes)) {
-		const key = rawKey.trim().toLowerCase();
-		if (!key || FORBIDDEN_KEYS.has(key) || FORBIDDEN_KEYS.has(rawKey)) {
-			continue;
-		}
-		if (!isValidPropertyType(propType)) {
-			continue;
-		}
-		if (Object.prototype.hasOwnProperty.call(fallback, key)) {
-			continue;
-		}
-		fallback[key] = propType;
-	}
-	return Object.freeze(fallback);
-}
-
 function sanitizeQueryEntries(queries: unknown): Array<[string, string]> {
 	if (typeof queries !== 'object' || queries === null || Array.isArray(queries)) {
 		return [];
@@ -241,7 +169,6 @@ export async function runVaultQuery(
 	const sanitizedEntries = sanitizeQueryEntries(queries);
 	const timeZone = options?.timeZone !== undefined ? options.timeZone : resolveDefaultTimeZone();
 	const rawRefTimeMs = options?.referenceTimeMs ?? Date.now();
-	const validRefTimeMs = isValidReferenceTimeMs(rawRefTimeMs) ? rawRefTimeMs : null;
 
 	const vaultTypes = await loadVaultPropertyTypes(app, logger);
 	const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
@@ -252,71 +179,29 @@ export async function runVaultQuery(
 	});
 	if (!configResult.ok) {
 		logEngineConfigFailure(logger, timeZone, configResult.diagnostics);
-		const context: VaultQueryContext = Object.freeze({
-			timeZone: typeof timeZone === 'string' ? timeZone.trim() : '',
-			referenceTimeMs: validRefTimeMs,
-			propertyTypes: sanitizeFallbackPropertyTypes(mergedTypes),
-			normalizationFingerprint: null,
-		});
-		const queryDiagnosticsMap: Record<string, QueryDiagnostics> = {};
-		for (const [name] of sanitizedEntries) {
-			queryDiagnosticsMap[name] = {
-				executable: false,
-				findings: [],
-			};
-		}
-		return {
-			context,
-			diagnostics: {
-				executable: false,
-				findings: [...configResult.diagnostics],
-				queries: queryDiagnosticsMap,
-			},
-			matches: {},
-		};
+		return {};
 	}
 
-	const context: VaultQueryContext = Object.freeze({
-		timeZone: configResult.config.timeZone,
-		referenceTimeMs: validRefTimeMs,
-		propertyTypes: configResult.config.propertyTypes,
-		normalizationFingerprint: configResult.config.normalizationFingerprint,
-	});
-
-	const queryDiagnosticsMap: Record<string, QueryDiagnostics> = {};
-	const matches: Record<string, VaultQueryMatch[]> = {};
+	const results: VaultQueryResult = {};
 	const executableQueries: Array<{
 		name: string;
 		prepared: PreparedQuery;
 		bucket: VaultQueryMatch[];
 	}> = [];
-	let allQueriesExecutable = true;
 
 	for (const [name, rawInput] of sanitizedEntries) {
 		const compileResult = compileQuery(rawInput, configResult.config, rawRefTimeMs);
 		logQueryCompilation(logger, name, rawInput, compileResult);
-		queryDiagnosticsMap[name] = {
-			executable: compileResult.executable,
-			findings: compileResult.diagnostics,
-		};
 		if (compileResult.executable && compileResult.prepared) {
 			const bucket: VaultQueryMatch[] = [];
-			matches[name] = bucket;
+			results[name] = bucket;
 			executableQueries.push({
 				name,
 				prepared: compileResult.prepared,
 				bucket,
 			});
-		} else {
-			allQueriesExecutable = false;
 		}
 	}
-
-	const diagnostics: MultiQueryDiagnostics = {
-		executable: allQueriesExecutable,
-		findings: [],
-		queries: queryDiagnosticsMap,
-	};
 
 	if (executableQueries.length === 0) {
 		logger?.log('debug', 'Completed vault query run', {
@@ -328,11 +213,7 @@ export async function runVaultQuery(
 			docDiagnosticCount: 0,
 			matchCounts: {},
 		});
-		return {
-			context,
-			diagnostics,
-			matches,
-		};
+		return results;
 	}
 
 	const queriedKeys = new Set<string>();
@@ -394,11 +275,7 @@ export async function runVaultQuery(
 		matchCounts,
 	});
 
-	return {
-		context,
-		diagnostics,
-		matches,
-	};
+	return results;
 }
 
 /**

@@ -384,39 +384,12 @@ describe('runVaultQuery', () => {
 		expect(getMarkdownFilesSpy).toHaveBeenCalledTimes(1);
 		expect(getFileCacheSpy).toHaveBeenCalledTimes(2);
 
-		expect(res.context).toEqual({
-			timeZone: 'UTC',
-			referenceTimeMs,
-			propertyTypes: {
-				priority: 'number',
-				due: 'date',
-				done: 'checkbox',
-			},
-			normalizationFingerprint: JSON.stringify({
-				tz: 'UTC',
-				types: [
-					['done', 'checkbox'],
-					['due', 'date'],
-					['priority', 'number'],
-				],
-			}),
-		});
-		expect(Object.isFrozen(res.context)).toBe(true);
-		expect(Object.isFrozen(res.context.propertyTypes)).toBe(true);
-		expect(res.diagnostics).toEqual({
-			executable: true,
-			findings: [],
-			queries: {
-				urgentRoadmap: { executable: true, findings: [] },
-				allWork: { executable: true, findings: [] },
-			},
-		});
-		expect(Object.keys(res.matches)).toEqual(['urgentRoadmap', 'allWork']);
-		expect(res.matches['urgentRoadmap']).toHaveLength(1);
-		expect(res.matches['allWork']).toHaveLength(2);
+		expect(Object.keys(res)).toEqual(['urgentRoadmap', 'allWork']);
+		expect(res['urgentRoadmap']).toHaveLength(1);
+		expect(res['allWork']).toHaveLength(2);
 
-		const match = res.matches['urgentRoadmap']![0]!;
-		expect(match).toBe(res.matches['allWork']![0]);
+		const match = res['urgentRoadmap']![0]!;
+		expect(match).toBe(res['allWork']![0]);
 		expect(match.file.path).toBe('tasks/task-1.md');
 		expect(match.links[0]?.resolvedPath).toBe('projects/roadmap.md');
 		expect(match.links[0]?.origin).toBe('[[tasks/task-1.md|task-1]]');
@@ -444,11 +417,14 @@ describe('runVaultQuery', () => {
 		expect('diagnostics' in match).toBe(false);
 		expect(Object.isFrozen(match)).toBe(false);
 		expect(Object.isFrozen(match.file)).toBe(false);
+		expect('context' in res).toBe(false);
+		expect('diagnostics' in res).toBe(false);
+		expect('matches' in res).toBe(false);
 		expect('paths' in res).toBe(false);
 		expect('propertyDiagnostics' in res).toBe(false);
 	});
 
-	it('executes valid queries and omits failed queries from matches when a batch has partial failures', async () => {
+	it('executes valid queries and omits failed queries from the result when a batch has partial failures', async () => {
 		const app = makeMockApp({
 			typesJson: JSON.stringify({ types: { priority: 'number' } }),
 			notes: [
@@ -468,17 +444,9 @@ describe('runVaultQuery', () => {
 			{ timeZone: 'UTC', referenceTimeMs: 1700000000000 },
 		);
 
-		expect(res.diagnostics.executable).toBe(false);
-		expect(res.diagnostics.findings).toEqual([]);
-		expect(res.diagnostics.queries['validQuery']).toEqual({
-			executable: true,
-			findings: [],
-		});
-		expect(res.diagnostics.queries['brokenQuery']?.executable).toBe(false);
-		expect(res.diagnostics.queries['brokenQuery']?.findings.length).toBeGreaterThan(0);
-		expect(Object.keys(res.matches)).toEqual(['validQuery']);
-		expect('brokenQuery' in res.matches).toBe(false);
-		expect(res.matches['validQuery']?.map((m) => m.file.path)).toEqual(['tasks/task-1.md']);
+		expect(Object.keys(res)).toEqual(['validQuery']);
+		expect('brokenQuery' in res).toBe(false);
+		expect(res['validQuery']?.map((m) => m.file.path)).toEqual(['tasks/task-1.md']);
 	});
 
 	it('skips files marked deleted: true in both runVaultQuery and diagnoseVaultQuery', async () => {
@@ -501,7 +469,7 @@ describe('runVaultQuery', () => {
 			{ active: '[status: active]' },
 			{ timeZone: 'UTC' },
 		);
-		expect(runRes.matches['active']?.map((m) => m.file.path)).toEqual(['notes/active.md']);
+		expect(runRes['active']?.map((m) => m.file.path)).toEqual(['notes/active.md']);
 
 		const diagRes = await diagnoseVaultQuery(app, '[status: active]', { timeZone: 'UTC' });
 		expect(diagRes.paths).toEqual(['notes/active.md']);
@@ -530,9 +498,7 @@ describe('runVaultQuery', () => {
 			},
 		);
 
-		expect(res.diagnostics.executable).toBe(true);
-		expect(res.context.propertyTypes).toEqual({ due: 'date' });
-		expect(res.matches['today']?.map((doc) => doc.file.path)).toEqual(['journal/today.md']);
+		expect(res['today']?.map((doc) => doc.file.path)).toEqual(['journal/today.md']);
 	});
 
 	it('short-circuits before scanning the vault when all queries fail or an empty query map is passed', async () => {
@@ -550,12 +516,7 @@ describe('runVaultQuery', () => {
 				referenceTimeMs: 1700000000000,
 			},
 		);
-		expect(emptyRes.diagnostics).toEqual({
-			executable: true,
-			findings: [],
-			queries: {},
-		});
-		expect(emptyRes.matches).toEqual({});
+		expect(emptyRes).toEqual({});
 		expect(getMarkdownFilesSpy).not.toHaveBeenCalled();
 
 		const failedRes = await runVaultQuery(
@@ -567,24 +528,11 @@ describe('runVaultQuery', () => {
 			},
 		);
 
-		expect(failedRes.diagnostics.executable).toBe(false);
-		expect(failedRes.diagnostics.findings).toEqual([]);
-		expect(failedRes.diagnostics.queries['bad']?.executable).toBe(false);
-		expect(failedRes.diagnostics.queries['bad']?.findings[0]?.severity).toBe('error');
-		expect(failedRes.matches).toEqual({});
-		expect(failedRes.context).toEqual({
-			timeZone: 'UTC',
-			referenceTimeMs: 1700000000000,
-			propertyTypes: { priority: 'number' },
-			normalizationFingerprint: JSON.stringify({
-				tz: 'UTC',
-				types: [['priority', 'number']],
-			}),
-		});
+		expect(failedRes).toEqual({});
 		expect(getMarkdownFilesSpy).not.toHaveBeenCalled();
 	});
 
-	it('returns frozen JSON-safe fallback context when config or referenceTimeMs is invalid', async () => {
+	it('returns an empty JSON-safe object when config or referenceTimeMs is invalid', async () => {
 		const app = makeMockApp({
 			typesJson: JSON.stringify({ types: { priority: 'number' } }),
 		});
@@ -598,20 +546,7 @@ describe('runVaultQuery', () => {
 			},
 		);
 
-		expect(badConfigRes.diagnostics.executable).toBe(false);
-		expect(badConfigRes.diagnostics.findings[0]?.code).toBe('ERROR_INVALID_CONFIG');
-		expect(badConfigRes.diagnostics.queries).toEqual({
-			q1: { executable: false, findings: [] },
-		});
-		expect(badConfigRes.matches).toEqual({});
-		expect(badConfigRes.context).toEqual({
-			timeZone: 'Invalid/Time_Zone_Name',
-			referenceTimeMs: null,
-			propertyTypes: { priority: 'number' },
-			normalizationFingerprint: null,
-		});
-		expect(Object.isFrozen(badConfigRes.context)).toBe(true);
-		expect(Object.isFrozen(badConfigRes.context.propertyTypes)).toBe(true);
+		expect(badConfigRes).toEqual({});
 		expect(JSON.parse(JSON.stringify(badConfigRes))).toEqual(badConfigRes);
 	});
 

@@ -323,80 +323,51 @@ describe('Vault Query Runner Property Invariants', () => {
 						(k) =>
 							!FORBIDDEN_KEYS.has(k) && !FORBIDDEN_KEYS.has(k.trim().toLowerCase()),
 					);
-					expect(Object.keys(runRes.diagnostics.queries)).toEqual(expectedKeys);
-
-					const configOk = runRes.diagnostics.findings.length === 0;
-					expect(runRes.diagnostics.executable).toBe(
-						configOk &&
-							Object.values(runRes.diagnostics.queries).every((q) => q.executable),
-					);
-
-					if (!configOk) {
-						expect(runRes.context.normalizationFingerprint).toBeNull();
-						expect(runRes.matches).toEqual({});
-						for (const k of expectedKeys) {
-							expect(runRes.diagnostics.queries[k]).toEqual({
-								executable: false,
-								findings: [],
-							});
-						}
-					} else {
-						expect(typeof runRes.context.normalizationFingerprint).toBe('string');
-						for (const k of expectedKeys) {
-							const { app: appDiag, getFileCacheSpy: diagCacheSpy } = makeSpyMockApp({
-								notes,
-								typesJson,
-							});
-							const diagRes = await diagnoseVaultQuery(appDiag, queryMap[k], options);
-							const qDiag = runRes.diagnostics.queries[k]!;
-
-							expect(qDiag).toEqual({
-								executable: diagRes.executable,
-								findings: diagRes.diagnostics,
-							});
-
-							if (qDiag.executable) {
-								expect(
-									Object.prototype.hasOwnProperty.call(runRes.matches, k),
-								).toBe(true);
-								const bucket = runRes.matches[k]!;
-								expect(bucket).toEqual(diagRes.matches.map(toVaultQueryMatch));
-								expect(diagRes.paths).toEqual(bucket.map((m) => m.file.path));
-
-								for (const m of bucket) {
-									expect(Object.keys(m)).toEqual([
-										'file',
-										'aliases',
-										'tags',
-										'tagLocations',
-										'headings',
-										'links',
-										'embeds',
-										'blocks',
-										'properties',
-									]);
-									expect('normalizationFingerprint' in m).toBe(false);
-									expect('propertyOccurrences' in m).toBe(false);
-									expect('propertyKeys' in m).toBe(false);
-									expect('diagnostics' in m).toBe(false);
-									expect(Object.isFrozen(m)).toBe(false);
-									expect(Object.isFrozen(m.file)).toBe(false);
-								}
-							} else {
-								expect(
-									Object.prototype.hasOwnProperty.call(runRes.matches, k),
-								).toBe(false);
-							}
-
-							for (const call of diagCacheSpy.mock.calls) {
-								const arg = call[0] as { deleted?: boolean };
-								expect(arg.deleted).toBe(false);
-							}
-						}
+					for (const key of Object.keys(runRes)) {
+						expect(expectedKeys).toContain(key);
 					}
 
-					expect('paths' in runRes).toBe(false);
-					expect('propertyDiagnostics' in runRes).toBe(false);
+					for (const k of expectedKeys) {
+						const { app: appDiag, getFileCacheSpy: diagCacheSpy } = makeSpyMockApp({
+							notes,
+							typesJson,
+						});
+						const diagRes = await diagnoseVaultQuery(appDiag, queryMap[k], options);
+
+						if (diagRes.executable) {
+							expect(Object.prototype.hasOwnProperty.call(runRes, k)).toBe(true);
+							const bucket = runRes[k]!;
+							expect(bucket).toEqual(diagRes.matches.map(toVaultQueryMatch));
+							expect(diagRes.paths).toEqual(bucket.map((m) => m.file.path));
+
+							for (const m of bucket) {
+								expect(Object.keys(m)).toEqual([
+									'file',
+									'aliases',
+									'tags',
+									'tagLocations',
+									'headings',
+									'links',
+									'embeds',
+									'blocks',
+									'properties',
+								]);
+								expect('normalizationFingerprint' in m).toBe(false);
+								expect('propertyOccurrences' in m).toBe(false);
+								expect('propertyKeys' in m).toBe(false);
+								expect('diagnostics' in m).toBe(false);
+								expect(Object.isFrozen(m)).toBe(false);
+								expect(Object.isFrozen(m.file)).toBe(false);
+							}
+						} else {
+							expect(Object.prototype.hasOwnProperty.call(runRes, k)).toBe(false);
+						}
+
+						for (const call of diagCacheSpy.mock.calls) {
+							const arg = call[0] as { deleted?: boolean };
+							expect(arg.deleted).toBe(false);
+						}
+					}
 
 					for (const call of runCacheSpy.mock.calls) {
 						const arg = call[0] as { deleted?: boolean };
@@ -442,7 +413,7 @@ describe('Vault Query Runner Property Invariants', () => {
 						referenceTimeMs: PINNED_REF_MS,
 					});
 
-					const executableBuckets = Object.values(runRes.matches);
+					const executableBuckets = Object.values(runRes);
 					expect(executableBuckets.length).toBeGreaterThanOrEqual(1);
 
 					const nonDeletedCount = notes.filter((n) => !n.deleted).length;
@@ -492,26 +463,7 @@ describe('Vault Query Runner Property Invariants', () => {
 
 					const runRes = await runVaultQuery(app, queryMap, options);
 
-					for (const [k, qDiag] of Object.entries(runRes.diagnostics.queries)) {
-						const hasError = qDiag.findings.some((d) => d.severity === 'error');
-						if (runRes.diagnostics.findings.length === 0) {
-							expect(qDiag.executable).toBe(!hasError);
-						} else {
-							expect(qDiag.executable).toBe(false);
-						}
-
-						if (qDiag.executable) {
-							expect(Object.prototype.hasOwnProperty.call(runRes.matches, k)).toBe(
-								true,
-							);
-						} else {
-							expect(Object.prototype.hasOwnProperty.call(runRes.matches, k)).toBe(
-								false,
-							);
-						}
-					}
-
-					const executableCount = Object.keys(runRes.matches).length;
+					const executableCount = Object.keys(runRes).length;
 					const nonDeletedCount = notes.filter((n) => !n.deleted).length;
 					if (executableCount === 0) {
 						expect(getMarkdownFilesSpy).not.toHaveBeenCalled();
@@ -564,14 +516,8 @@ describe('Vault Query Runner Property Invariants', () => {
 						},
 					);
 
-					expect(runRes.diagnostics.executable).toBe(false);
-					expect(runRes.diagnostics.findings).toEqual([]);
-					expect(runRes.diagnostics.queries['validKey']?.executable).toBe(true);
-					expect(runRes.diagnostics.queries['invalidKey']?.executable).toBe(false);
-					expect(Object.keys(runRes.matches)).toEqual(['validKey']);
-					expect(Object.prototype.hasOwnProperty.call(runRes.matches, 'invalidKey')).toBe(
-						false,
-					);
+					expect(Object.keys(runRes)).toEqual(['validKey']);
+					expect(Object.prototype.hasOwnProperty.call(runRes, 'invalidKey')).toBe(false);
 					expect(getMarkdownFilesSpy).toHaveBeenCalledTimes(1);
 					expect(getFileCacheSpy).toHaveBeenCalledTimes(
 						notes.filter((n) => !n.deleted).length,
@@ -581,7 +527,7 @@ describe('Vault Query Runner Property Invariants', () => {
 		);
 	});
 
-	it('Invariant 4: Shared Frozen Context, Fingerprint & Zero Temporal Tear Across Sibling Queries', async () => {
+	it('Invariant 4: Shared Config, Fingerprint & Zero Temporal Tear Across Sibling Queries', async () => {
 		const validKeyArb = fc.constantFrom('priority', 'status', 'done', 'score');
 		const validPropTypeArb = fc.constantFrom(...VALID_PROPERTY_TYPES);
 		const dueDateNoteArb: fc.Arbitrary<MockNoteSpec> = fc.record({
@@ -662,29 +608,27 @@ describe('Vault Query Runner Property Invariants', () => {
 						}),
 					]);
 
-					expect(res.diagnostics.executable).toBe(true);
-					expect(res.context.timeZone).toBe(rawTz.trim());
-					expect(res.context.referenceTimeMs).toBe(PINNED_REF_MS);
-					expect(res.context.propertyTypes[baseKey]).toBe(overrideType);
-
-					const sortedTypePairs = Object.keys(res.context.propertyTypes)
+					const effectiveTypes: Record<string, string> = {
+						[baseKey]: overrideType,
+						due: 'date',
+					};
+					const sortedTypePairs = Object.keys(effectiveTypes)
 						.sort()
-						.map((k) => [k, res.context.propertyTypes[k]!]);
+						.map((k) => [k, effectiveTypes[k]!]);
 					const expectedFingerprint = JSON.stringify({
-						tz: res.context.timeZone,
+						tz: rawTz.trim(),
 						types: sortedTypePairs,
 					});
-					expect(res.context.normalizationFingerprint).toBe(expectedFingerprint);
 
 					for (const doc of diagRes.matches) {
 						expect(doc.normalizationFingerprint).toBe(expectedFingerprint);
 					}
 
 					// Zero temporal tear: lt, eq, gt strictly partition all notes with a valid single due date (`hasDue`)
-					const ltPaths = res.matches['lt']!.map((m) => m.file.path);
-					const eqPaths = res.matches['eq']!.map((m) => m.file.path);
-					const gtPaths = res.matches['gt']!.map((m) => m.file.path);
-					const hasDuePaths = res.matches['hasDue']!.map((m) => m.file.path);
+					const ltPaths = res['lt']!.map((m) => m.file.path);
+					const eqPaths = res['eq']!.map((m) => m.file.path);
+					const gtPaths = res['gt']!.map((m) => m.file.path);
+					const hasDuePaths = res['hasDue']!.map((m) => m.file.path);
 
 					const combined = [...ltPaths, ...eqPaths, ...gtPaths];
 					expect(new Set(combined).size).toBe(combined.length);
@@ -704,14 +648,7 @@ describe('Vault Query Runner Property Invariants', () => {
 								},
 							},
 						);
-						expect(conflictRes.diagnostics.executable).toBe(false);
-						expect(conflictRes.context.normalizationFingerprint).toBeNull();
-						expect(conflictRes.matches).toEqual({});
-						expect(
-							conflictRes.diagnostics.findings.some(
-								(d) => d.code === 'ERROR_INVALID_CONFIG',
-							),
-						).toBe(true);
+						expect(conflictRes).toEqual({});
 					}
 				},
 			),
@@ -736,26 +673,8 @@ describe('Vault Query Runner Property Invariants', () => {
 						diagnoseVaultQuery(appDiag, singleQuery, options),
 					]);
 
-					expect(Object.isFrozen(runRes.context)).toBe(true);
-					expect(Object.isFrozen(runRes.context.propertyTypes)).toBe(true);
-
 					for (const forbidden of FORBIDDEN_KEYS) {
-						expect(
-							Object.prototype.hasOwnProperty.call(
-								runRes.diagnostics.queries,
-								forbidden,
-							),
-						).toBe(false);
-						expect(
-							Object.prototype.hasOwnProperty.call(runRes.matches, forbidden),
-						).toBe(false);
-					}
-
-					if (runRes.context.referenceTimeMs !== null) {
-						expect(Number.isSafeInteger(runRes.context.referenceTimeMs)).toBe(true);
-						expect(Math.abs(runRes.context.referenceTimeMs)).toBeLessThanOrEqual(
-							MAX_SAFE_EPOCH_MS,
-						);
+						expect(Object.prototype.hasOwnProperty.call(runRes, forbidden)).toBe(false);
 					}
 
 					expect(JSON.parse(JSON.stringify(runRes))).toEqual(runRes);
