@@ -153,21 +153,62 @@ describe('ObsidianLoggerAdapter', () => {
 			0,
 		);
 
-		logger.log('debug', 'first segment line', { source: 'test' });
+		// Each log row includes both Description and ‼️Description‼️ (~2x message length)
+		logger.log('debug', 'x'.repeat(200 * 1024), { source: 'test' });
 		await logger.flush();
 
 		const firstPath = logger.currentLogPath!;
-		adapter.files.set(firstPath, 'x'.repeat(SEGMENT_CAP_BYTES));
+		const firstLength = adapter.files.get(firstPath)?.length ?? 0;
+		expect(firstLength).toBeGreaterThan(400 * 1024);
+		expect(firstLength).toBeLessThanOrEqual(SEGMENT_CAP_BYTES);
 
-		logger.log('debug', 'second segment line', { source: 'test' });
+		logger.log('debug', `second segment line ${'y'.repeat(100 * 1024)}`, { source: 'test' });
 		await logger.flush();
 
 		const secondPath = logger.currentLogPath!;
 		expect(secondPath).not.toBe(firstPath);
-		expect(adapter.files.get(firstPath)?.length).toBe(SEGMENT_CAP_BYTES);
+		expect(adapter.files.get(firstPath)?.length).toBe(firstLength);
 		const secondContent = adapter.files.get(secondPath) ?? '';
 		expect(secondContent.startsWith(LOG_FILE_HEADER)).toBe(true);
 		expect(secondContent).toContain('second segment line');
+	});
+
+	it('seals the active segment and rolls over to a new <epoch>.md file if the user edits it (e.g. deleting the ‼️Description‼️ column)', async () => {
+		const adapter = createInMemoryDataAdapter();
+		const logger = new ObsidianLoggerAdapter(
+			createApp(adapter),
+			() => ({
+				loggingEnabled: true,
+				logLevel: 'debug',
+			}),
+			TEST_PLUGIN_NAME,
+			0,
+		);
+
+		logger.log('debug', 'First entry ‼️secret1‼️', { source: 'test' });
+		await logger.flush();
+
+		const firstPath = logger.currentLogPath!;
+		const originalContent = adapter.files.get(firstPath) ?? '';
+		// Simulate the user deleting the 7th (‼️Description‼️) column in Obsidian
+		const redactedByUser = originalContent
+			.split('\n')
+			.map((line) => (line.startsWith('|') ? line.replace(/\s*\|[^|]*\|\s*$/, ' |') : line))
+			.join('\n');
+		adapter.files.set(firstPath, redactedByUser);
+
+		logger.log('debug', 'Second entry ‼️secret2‼️', { source: 'test' });
+		await logger.flush();
+
+		const secondPath = logger.currentLogPath!;
+		expect(secondPath).not.toBe(firstPath);
+		// The user-edited file must remain untouched with no new sensitive rows appended
+		expect(adapter.files.get(firstPath)).toBe(redactedByUser);
+		expect(adapter.files.get(firstPath)).not.toContain('secret2');
+
+		const secondContent = adapter.files.get(secondPath) ?? '';
+		expect(secondContent.startsWith(LOG_FILE_HEADER)).toBe(true);
+		expect(secondContent).toContain('Second entry ‼️secret2‼️');
 	});
 
 	it('clearLogs deletes <epoch>.md segment files in ◊Rhizome/logs while preserving non-segment files', async () => {

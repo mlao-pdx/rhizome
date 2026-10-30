@@ -8,7 +8,8 @@ export const SEGMENT_CAP_BYTES = 512 * 1024;
 /** Debounce interval, in milliseconds, used to coalesce bursts of `log()` calls into one disk write. */
 export const FLUSH_DEBOUNCE_MS = 50;
 
-const HEADER_BYTES = new TextEncoder().encode(LOG_FILE_HEADER).byteLength;
+const UTF8_ENCODER = new TextEncoder();
+const HEADER_BYTES = UTF8_ENCODER.encode(LOG_FILE_HEADER).byteLength;
 const SEGMENT_FILE_RE = /(?:^|\/)\d+\.md$/;
 
 interface NotebookNavigatorNavigationApi {
@@ -33,7 +34,7 @@ export interface ObsidianLoggerSettings {
 }
 
 function byteLength(str: string): number {
-	return new TextEncoder().encode(str).byteLength;
+	return UTF8_ENCODER.encode(str).byteLength;
 }
 
 /**
@@ -65,6 +66,7 @@ export class ObsidianLoggerAdapter implements LoggerPort {
 	private flushTimer: ReturnType<typeof setTimeout> | undefined;
 	private writeQueue: Promise<void> = Promise.resolve();
 	private activeSegmentPath: string | undefined;
+	private activeSegmentBytes = 0;
 	private lastSegmentEpoch = 0;
 
 	constructor(
@@ -171,14 +173,19 @@ export class ObsidianLoggerAdapter implements LoggerPort {
 			const stat = (await adapter.exists(this.activeSegmentPath))
 				? await adapter.stat(this.activeSegmentPath)
 				: null;
-			if (!stat) {
+			// Seal the active segment and roll over to a new file if it was
+			// removed or modified externally (e.g. user deleted the
+			// ‼️Description‼️ column while logging is still enabled).
+			if (!stat || stat.size !== this.activeSegmentBytes) {
 				this.activeSegmentPath = undefined;
+				this.activeSegmentBytes = 0;
 			} else {
 				currentSize = stat.size;
 			}
 		}
 
 		let chunk = '';
+		let chunkBytes = 0;
 
 		const flushChunk = async (): Promise<void> => {
 			if (chunk.length === 0) {
@@ -187,10 +194,13 @@ export class ObsidianLoggerAdapter implements LoggerPort {
 			if (isNewSegment || this.activeSegmentPath === undefined) {
 				this.activeSegmentPath = await this.nextSegmentPath();
 				await adapter.write(this.activeSegmentPath, `${LOG_FILE_HEADER}${chunk}`);
+				this.activeSegmentBytes = HEADER_BYTES + chunkBytes;
 			} else {
 				await adapter.append(this.activeSegmentPath, chunk);
+				this.activeSegmentBytes += chunkBytes;
 			}
 			chunk = '';
+			chunkBytes = 0;
 			isNewSegment = false;
 		};
 
@@ -208,6 +218,7 @@ export class ObsidianLoggerAdapter implements LoggerPort {
 			}
 
 			chunk += line;
+			chunkBytes += lineBytes;
 			currentSize += lineBytes;
 		}
 
@@ -225,6 +236,7 @@ export class ObsidianLoggerAdapter implements LoggerPort {
 		const task = this.writeQueue.then(async () => {
 			const adapter = this.app.vault.adapter;
 			this.activeSegmentPath = undefined;
+			this.activeSegmentBytes = 0;
 			if (!(await adapter.exists(this.logsFolderPath))) {
 				return;
 			}

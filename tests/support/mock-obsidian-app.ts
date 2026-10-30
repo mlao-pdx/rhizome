@@ -311,6 +311,12 @@ export function normalizePath(path: string): string {
 
 export class App {}
 
+export class TAbstractFile {
+	path = '';
+}
+
+export class TFile extends TAbstractFile {}
+
 /**
  * Minimal stand-in for Obsidian's `FileSystemAdapter`. `RhizomePlugin` is
  * desktop-only, so `onload()` narrows `vault.adapter` to this class via
@@ -354,6 +360,13 @@ function createEventBus() {
 export function createMockApp(): unknown {
 	const vaultEvents = createEventBus();
 	const metadataEvents = createEventBus();
+	const metadataCache = {
+		getFileCache: (_file: unknown): unknown => null,
+		getCache: (path: string): unknown => metadataCache.getFileCache({ path }),
+		getFirstLinkpathDest: () => null,
+		on: metadataEvents.on,
+		trigger: metadataEvents.trigger,
+	};
 	return {
 		vault: {
 			configDir: 'mock-config',
@@ -362,12 +375,7 @@ export function createMockApp(): unknown {
 			on: vaultEvents.on,
 			trigger: vaultEvents.trigger,
 		},
-		metadataCache: {
-			getFileCache: () => null,
-			getFirstLinkpathDest: () => null,
-			on: metadataEvents.on,
-			trigger: metadataEvents.trigger,
-		},
+		metadataCache,
 		workspace: {
 			onLayoutReady: (cb: () => unknown) => {
 				cb();

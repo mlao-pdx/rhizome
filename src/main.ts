@@ -1,4 +1,12 @@
-import { FileSystemAdapter, Plugin } from 'obsidian';
+import {
+	type App,
+	type CachedMetadata,
+	FileSystemAdapter,
+	Plugin,
+	type TAbstractFile,
+	TFile,
+} from 'obsidian';
+import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
 import { ActiveQueryRoster } from './adapters/active-query-roster';
 import { createRhizomeEditorExtension } from './adapters/codemirror/rhizome-editor-extension';
 import { DexiePersistenceAdapter } from './adapters/dexie-persistence-adapter';
@@ -23,6 +31,26 @@ const REACTIVE_QUERY_DEBOUNCE_MS = 500;
 
 function isMarkdownPath(path: unknown): boolean {
 	return typeof path === 'string' && path.toLowerCase().endsWith('.md');
+}
+
+function isDoNotIndexFrontmatter(cache: CachedMetadata | null | undefined): boolean {
+	return hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY);
+}
+
+function getAbstractFileCache(
+	app: App,
+	file: TAbstractFile | null | undefined,
+): CachedMetadata | null {
+	if (!file) {
+		return null;
+	}
+	if (file instanceof TFile) {
+		return app.metadataCache.getFileCache(file);
+	}
+	if (typeof file.path === 'string' && typeof app.metadataCache.getCache === 'function') {
+		return app.metadataCache.getCache(file.path);
+	}
+	return null;
 }
 
 export default class RhizomePlugin extends Plugin {
@@ -99,23 +127,40 @@ export default class RhizomePlugin extends Plugin {
 			}
 		});
 
+		// Notes with ◊InternalRhizome code "001" (DO_NOT_INDEX_OR_QUERY) are
+		// ignored across metadataCache/vault events so internal notes (such as
+		// diagnostic log segments) never trigger reactive query nudges. If a
+		// user adds "001" to an already-indexed note that matched an active
+		// query, suppressing `changed` means that note stays in the subscriber's
+		// result until the query is deregistered and re-registered (or another
+		// note change triggers a nudge) — an accepted trade-off over extra
+		// state-tracking complexity.
 		this.registerEvent(
-			this.app.metadataCache.on('changed', (file) => {
-				if (isMarkdownPath(file?.path)) {
+			this.app.metadataCache.on('changed', (file, _data, cache) => {
+				if (
+					isMarkdownPath(file?.path) &&
+					!isDoNotIndexFrontmatter(cache ?? this.app.metadataCache.getFileCache(file))
+				) {
 					scheduleReactiveQueryNudge();
 				}
 			}),
 		);
 		this.registerEvent(
-			this.app.vault.on('delete', (file) => {
-				if (isMarkdownPath(file?.path)) {
+			this.app.metadataCache.on('deleted', (file, prevCache) => {
+				if (
+					isMarkdownPath(file?.path) &&
+					!isDoNotIndexFrontmatter(prevCache ?? this.app.metadataCache.getFileCache(file))
+				) {
 					scheduleReactiveQueryNudge();
 				}
 			}),
 		);
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
-				if (isMarkdownPath(file?.path) || isMarkdownPath(oldPath)) {
+				if (
+					(isMarkdownPath(file?.path) || isMarkdownPath(oldPath)) &&
+					!isDoNotIndexFrontmatter(getAbstractFileCache(this.app, file))
+				) {
 					scheduleReactiveQueryNudge();
 				}
 			}),

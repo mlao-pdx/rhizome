@@ -155,7 +155,7 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		expect(defaultExplainMd).toContain('# Query Explain Plan');
 	});
 
-	it('debounces reactive query nudges by 500 ms on .md metadataCache.changed, vault.delete, and vault.rename events', async () => {
+	it('debounces reactive query nudges by 500 ms on .md metadataCache.changed, metadataCache.deleted, and vault.rename events', async () => {
 		vi.useFakeTimers();
 		try {
 			const app = createMockApp() as App & {
@@ -194,7 +194,7 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 
 			// Non-markdown events are ignored
 			app.metadataCache.trigger('changed', { path: 'assets/image.png' });
-			app.vault.trigger('delete', { path: 'docs/manual.pdf' });
+			app.metadataCache.trigger('deleted', { path: 'docs/manual.pdf' });
 			app.vault.trigger('rename', { path: 'assets/new.png' }, 'assets/old.png');
 			await vi.advanceTimersByTimeAsync(600);
 			expect(nudgeSpy).not.toHaveBeenCalled();
@@ -215,7 +215,7 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 			await vi.advanceTimersByTimeAsync(200);
 			app.vault.trigger('rename', { path: 'notes/beta.md' }, 'notes/draft.md');
 			await vi.advanceTimersByTimeAsync(200);
-			app.vault.trigger('delete', { path: 'notes/temp.md' });
+			app.metadataCache.trigger('deleted', { path: 'notes/temp.md' });
 
 			// Only 400 ms since first, 0 ms since last -> not fired yet
 			expect(nudgeSpy).not.toHaveBeenCalled();
@@ -223,6 +223,40 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 			await vi.advanceTimersByTimeAsync(500);
 			expect(nudgeSpy).toHaveBeenCalledTimes(1);
 			expect(updates).toHaveLength(1);
+
+			// Notes with ◊InternalRhizome: { "001": ... } (DO_NOT_INDEX_OR_QUERY) are ignored
+			nudgeSpy.mockClear();
+			const doNotIndexCache = {
+				frontmatter: {
+					'◊InternalRhizome': {
+						'001': 'Do not index or query.',
+					},
+				},
+			};
+			app.metadataCache.getFileCache = (file) =>
+				file?.path?.startsWith('◊Rhizome/logs/')
+					? doNotIndexCache
+					: { tags: [{ tag: '#project', position: {} as never }] };
+
+			app.metadataCache.trigger(
+				'changed',
+				{ path: '◊Rhizome/logs/1700000000000.md' },
+				'',
+				doNotIndexCache,
+			);
+			app.metadataCache.trigger('changed', { path: '◊Rhizome/logs/1700000000001.md' });
+			app.metadataCache.trigger(
+				'deleted',
+				{ path: '◊Rhizome/logs/1700000000000.md' },
+				doNotIndexCache,
+			);
+			app.vault.trigger(
+				'rename',
+				{ path: '◊Rhizome/logs/1700000000002.md' },
+				'◊Rhizome/logs/1700000000001.md',
+			);
+			await vi.advanceTimersByTimeAsync(600);
+			expect(nudgeSpy).not.toHaveBeenCalled();
 		} finally {
 			vi.useRealTimers();
 		}
