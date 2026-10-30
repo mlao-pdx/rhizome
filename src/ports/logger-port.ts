@@ -56,7 +56,7 @@ export interface LogEntryMeta {
 	/**
 	 * Mandatory dotted `<domain>.<routine>` identifier (or top-level subsystem
 	 * such as `'lifecycle'` or `'datastore'`), e.g. `'query.compile'`,
-	 * `'query.run'`, `'query.diagnose'`, `'query.explain'`, `'db.bootstrap'`.
+	 * `'query.run'`, `'query.explain'`, `'db.bootstrap'`.
 	 */
 	readonly source: string;
 	/**

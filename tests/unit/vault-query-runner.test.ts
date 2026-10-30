@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 
 import {
-	diagnoseVaultQuery,
 	explainVaultQuery,
 	parseObsidianTypesJson,
 	runVaultQuery,
@@ -161,163 +160,6 @@ describe('parseObsidianTypesJson', () => {
 	});
 });
 
-describe('diagnoseVaultQuery', () => {
-	it('evaluates queries across frontmatter, tags, links, and types.json definitions', async () => {
-		const app = makeMockApp({
-			typesJson: JSON.stringify({
-				types: {
-					aliases: 'aliases',
-					tags: 'tags',
-					priority: 'number',
-					due: 'date',
-					done: 'checkbox',
-				},
-			}),
-			linkMap: {
-				Roadmap: 'projects/roadmap.md',
-			},
-			notes: [
-				{
-					path: 'tasks/task-1.md',
-					cache: {
-						frontmatter: {
-							priority: 1,
-							due: '2026-10-20',
-							done: false,
-						},
-						tags: [{ tag: '#work', position: {} as never }],
-						links: [
-							{
-								link: 'Roadmap#Q4',
-								original: '[[Roadmap#Q4]]',
-								position: {} as never,
-							},
-						],
-					},
-				},
-				{
-					path: 'tasks/task-2.md',
-					cache: {
-						frontmatter: {
-							priority: 5,
-							due: '2026-11-15',
-							done: true,
-						},
-						tags: [{ tag: '#work', position: {} as never }],
-					},
-				},
-			],
-		});
-
-		const res = await diagnoseVaultQuery(
-			app,
-			'#work [priority: < 3] [due: <= 2026-10-25] [done: = false] link:"projects/roadmap.md"',
-			{ timeZone: 'UTC' },
-		);
-
-		expect(res.executable).toBe(true);
-		expect(res.paths).toEqual(['tasks/task-1.md']);
-		expect(res.matches).toHaveLength(1);
-		expect(res.matches[0]?.links[0]?.resolvedPath).toBe('projects/roadmap.md');
-		expect(res.diagnostics).toEqual([]);
-		expect(res.propertyDiagnostics).toEqual([]);
-	});
-
-	it('falls back gracefully when types.json does not exist in configDir', async () => {
-		const app = makeMockApp({
-			notes: [
-				{
-					path: 'inbox/idea.md',
-					cache: {
-						frontmatter: { category: 'research' },
-					},
-				},
-			],
-		});
-
-		const res = await diagnoseVaultQuery(app, '[category: research]');
-		expect(res.executable).toBe(true);
-		expect(res.paths).toEqual(['inbox/idea.md']);
-	});
-
-	it('short-circuits before scanning the vault when query compilation fails', async () => {
-		const getMarkdownFilesSpy = vi.fn(() => []);
-		const app = makeMockApp({
-			typesJson: JSON.stringify({ types: { priority: 'number' } }),
-		});
-		app.vault.getMarkdownFiles = getMarkdownFilesSpy;
-
-		const res = await diagnoseVaultQuery(app, '[priority: = "not-a-number"]');
-		expect(res.executable).toBe(false);
-		expect(res.paths).toEqual([]);
-		expect(res.matches).toEqual([]);
-		expect(res.diagnostics.length).toBeGreaterThan(0);
-		expect(res.diagnostics[0]?.severity).toBe('error');
-		expect(getMarkdownFilesSpy).not.toHaveBeenCalled();
-	});
-
-	it('surfaces propertyDiagnostics when a queried property has an invalid value on a note', async () => {
-		const app = makeMockApp({
-			typesJson: JSON.stringify({ types: { priority: 'number' } }),
-			notes: [
-				{
-					path: 'notes/valid.md',
-					cache: { frontmatter: { priority: 2 } },
-				},
-				{
-					path: 'notes/broken.md',
-					cache: { frontmatter: { priority: 'urgent' } },
-				},
-			],
-		});
-
-		const res = await diagnoseVaultQuery(app, '[priority: > 1]');
-		expect(res.executable).toBe(true);
-		expect(res.paths).toEqual(['notes/valid.md']);
-		expect(res.propertyDiagnostics).toHaveLength(1);
-		expect(res.propertyDiagnostics[0]).toMatchObject({
-			code: 'DOC_INVALID_PROPERTY_VALUE',
-			filePath: 'notes/broken.md',
-			propertyKey: 'priority',
-			rawValue: 'urgent',
-			expectedType: 'number',
-		});
-	});
-
-	it('supports VaultQueryOptions overrides (propertyTypes, timeZone, referenceTimeMs)', async () => {
-		const app = makeMockApp({
-			typesJson: JSON.stringify({ types: { due: 'text' } }),
-			notes: [
-				{
-					path: 'journal/today.md',
-					cache: { frontmatter: { due: '2026-10-25' } },
-				},
-			],
-		});
-
-		const referenceTimeMs = Date.UTC(2026, 9, 25, 12, 0, 0);
-		const res = await diagnoseVaultQuery(app, '[due: = @today]', {
-			timeZone: 'UTC',
-			propertyTypes: { due: 'date' },
-			referenceTimeMs,
-		});
-
-		expect(res.executable).toBe(true);
-		expect(res.paths).toEqual(['journal/today.md']);
-	});
-
-	it('returns config diagnostics when an invalid timeZone override is passed', async () => {
-		const app = makeMockApp({});
-		const res = await diagnoseVaultQuery(app, 'note', {
-			timeZone: 'Invalid/Time_Zone_Name',
-		});
-
-		expect(res.executable).toBe(false);
-		expect(res.paths).toEqual([]);
-		expect(res.diagnostics[0]?.code).toBe('ERROR_INVALID_CONFIG');
-	});
-});
-
 describe('runVaultQuery', () => {
 	it('evaluates multiple named queries in a single pass and shares === match references across queries', async () => {
 		const getMarkdownFilesSpy = vi.fn();
@@ -449,7 +291,23 @@ describe('runVaultQuery', () => {
 		expect(res['validQuery']?.map((m) => m.file.path)).toEqual(['tasks/task-1.md']);
 	});
 
-	it('skips files marked deleted: true in both runVaultQuery and diagnoseVaultQuery', async () => {
+	it('falls back gracefully when types.json does not exist in configDir', async () => {
+		const app = makeMockApp({
+			notes: [
+				{
+					path: 'inbox/idea.md',
+					cache: {
+						frontmatter: { category: 'research' },
+					},
+				},
+			],
+		});
+
+		const res = await runVaultQuery(app, { research: '[category: research]' });
+		expect(res['research']?.map((m) => m.file.path)).toEqual(['inbox/idea.md']);
+	});
+
+	it('skips files marked deleted: true', async () => {
 		const app = makeMockApp({
 			notes: [
 				{
@@ -470,13 +328,9 @@ describe('runVaultQuery', () => {
 			{ timeZone: 'UTC' },
 		);
 		expect(runRes['active']?.map((m) => m.file.path)).toEqual(['notes/active.md']);
-
-		const diagRes = await diagnoseVaultQuery(app, '[status: active]', { timeZone: 'UTC' });
-		expect(diagRes.paths).toEqual(['notes/active.md']);
-		expect(diagRes.matches.map((d) => d.file.path)).toEqual(['notes/active.md']);
 	});
 
-	it('skips notes carrying ◊InternalRhizome code "001" in both runVaultQuery and diagnoseVaultQuery', async () => {
+	it('skips notes carrying ◊InternalRhizome code "001"', async () => {
 		const app = makeMockApp({
 			notes: [
 				{
@@ -517,9 +371,6 @@ describe('runVaultQuery', () => {
 			'notes/user-note.md',
 			'notes/other-internal-code.md',
 		]);
-
-		const diagRes = await diagnoseVaultQuery(app, '[status: active]', { timeZone: 'UTC' });
-		expect(diagRes.paths).toEqual(['notes/user-note.md', 'notes/other-internal-code.md']);
 	});
 
 	it('overrides types.json entries case-insensitively via options.propertyTypes', async () => {
@@ -801,7 +652,7 @@ describe('runVaultQuery', () => {
 			expect(typeof summary?.meta?.['durationMs']).toBe('number');
 		});
 
-		it('diagnoseVaultQuery logs completion even when compilation fails and flushes property diagnostics when executable', async () => {
+		it('logs completion summary with executableCount: 0 when all queries fail compilation', async () => {
 			const failedSpy = createLoggerSpy();
 			const app = makeMockApp({
 				typesJson: JSON.stringify({ types: { priority: 'number' } }),
@@ -813,39 +664,27 @@ describe('runVaultQuery', () => {
 				],
 			});
 
-			await diagnoseVaultQuery(
+			await runVaultQuery(
 				app,
-				'[priority: = "nan"]',
+				{ broken: '[priority: = "nan"]' },
 				{ timeZone: 'UTC' },
 				failedSpy.logger,
 			);
 			const failedSummary = failedSpy.calls.find(
-				(c) => c.message === 'Completed diagnoseVaultQuery',
+				(c) => c.message === 'Completed vault query run',
 			);
 			expect(failedSummary?.level).toBe('debug');
 			expect(failedSummary?.meta).toMatchObject({
-				source: 'query.diagnose',
+				source: 'query.run',
 				count: 0,
 				queryCount: 1,
 				executableCount: 0,
 				notesScanned: 0,
+				uncachedNotes: 0,
+				docDiagnosticCount: 0,
+				matchCounts: {},
 			});
-
-			const execSpy = createLoggerSpy();
-			await diagnoseVaultQuery(app, '[priority: > 1]', { timeZone: 'UTC' }, execSpy.logger);
-			expect(
-				execSpy.calls.find(
-					(c) => c.message === 'Encountered invalid property values on queried keys',
-				),
-			).toMatchObject({
-				level: 'warn',
-				meta: {
-					source: 'query.diagnose',
-					count: 1,
-					keys: ['‼️priority‼️'],
-					sampleFiles: ['‼️notes/bad-priority.md‼️'],
-				},
-			});
+			expect(typeof failedSummary?.meta?.['durationMs']).toBe('number');
 		});
 
 		it('explainVaultQuery loads types.json and merges overrides without scanning any vault notes', async () => {

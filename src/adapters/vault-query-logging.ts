@@ -242,12 +242,12 @@ export class QueriedPropertyDiagnosticsAggregator {
 		}
 	}
 
-	flush(logger: LoggerPort | undefined, source: string = 'query.run'): void {
+	flush(logger: LoggerPort | undefined): void {
 		if (!logger || this.diagnosticCount === 0) {
 			return;
 		}
 		logger.log('warn', 'Encountered invalid property values on queried keys', {
-			source,
+			source: 'query.run',
 			count: this.diagnosticCount,
 			diagnosticCount: this.diagnosticCount,
 			affectedNotes: this.affectedNotes,

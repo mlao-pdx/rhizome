@@ -1,9 +1,7 @@
 import type { App } from 'obsidian';
 import {
 	compileQuery,
-	type DocumentDiagnostic,
 	evaluateDoc,
-	evaluateVault,
 	explainQuery,
 	FORBIDDEN_KEYS,
 	getExecutionPlan,
@@ -19,7 +17,6 @@ import {
 	type PreparedQuery,
 	type PropertyTypeRegistry,
 	type ResolveLinkPathFn,
-	type SearchDiagnostic,
 } from '@core/search';
 import type { LoggerPort } from '@ports/logger-port';
 import { markSensitive } from './logger-format';
@@ -34,7 +31,7 @@ import {
 export { parseObsidianTypesJson };
 
 /**
- * Options for running or diagnosing a vault query.
+ * Options for running or explaining a vault query.
  */
 export interface VaultQueryOptions {
 	/** Optional IANA timezone override (defaults to system timezone, falling back to 'UTC'). */
@@ -84,22 +81,6 @@ export function toVaultQueryMatch(doc: NormalizedDocument): VaultQueryMatch {
 		blocks: doc.blocks,
 		properties: doc.properties,
 	};
-}
-
-/**
- * Exhaustive query and document diagnostic result returned by `diagnoseVaultQuery` and `plugin.diagnoseQuery`.
- */
-export interface DiagnoseVaultQueryResult {
-	/** Whether the query compiled without errors and was evaluated against the vault. */
-	readonly executable: boolean;
-	/** Vault-relative paths of all matching Markdown notes, in vault evaluation order. */
-	readonly paths: string[];
-	/** Full normalized metadata (`NormalizedDocument`) for each matching Markdown note. */
-	readonly matches: NormalizedDocument[];
-	/** Query lexer, parser, validator, config, and linter diagnostics. */
-	readonly diagnostics: SearchDiagnostic[];
-	/** Document property diagnostics for non-virtual property keys referenced by the query. */
-	readonly propertyDiagnostics: DocumentDiagnostic[];
 }
 
 function resolveDefaultTimeZone(): string {
@@ -270,7 +251,7 @@ export async function runVaultQuery(
 		}
 	}
 
-	propDiagnosticsAggregator.flush(logger, 'query.run');
+	propDiagnosticsAggregator.flush(logger);
 
 	const matchCounts: Record<string, number> = {};
 	for (const entry of executableQueries) {
@@ -289,122 +270,6 @@ export async function runVaultQuery(
 	});
 
 	return results;
-}
-
-/**
- * Compiles a search query, evaluates it against the vault, and returns exhaustive query and document property diagnostics.
- */
-export async function diagnoseVaultQuery(
-	app: App,
-	input: string = '',
-	options?: VaultQueryOptions,
-	logger?: LoggerPort,
-): Promise<DiagnoseVaultQueryResult> {
-	const startedAt = Date.now();
-	const timeZone = options?.timeZone !== undefined ? options.timeZone : resolveDefaultTimeZone();
-	const vaultTypes = await loadVaultPropertyTypes(app, logger);
-	const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
-
-	const configResult = initEngineConfig({
-		timeZone,
-		propertyTypes: mergedTypes,
-	});
-	if (!configResult.ok) {
-		logEngineConfigFailure(logger, timeZone, configResult.diagnostics);
-		return {
-			executable: false,
-			paths: [],
-			matches: [],
-			diagnostics: [...configResult.diagnostics],
-			propertyDiagnostics: [],
-		};
-	}
-
-	const referenceTimeMs = options?.referenceTimeMs ?? Date.now();
-	const compileResult = compileQuery(input, configResult.config, referenceTimeMs);
-	logQueryCompilation(logger, 'diagnose', input, compileResult);
-	if (!compileResult.executable || !compileResult.prepared) {
-		logger?.log('debug', 'Completed diagnoseVaultQuery', {
-			source: 'query.diagnose',
-			durationMs: Math.max(0, Date.now() - startedAt),
-			count: 0,
-			queryCount: 1,
-			executableCount: 0,
-			notesScanned: 0,
-			uncachedNotes: 0,
-			docDiagnosticCount: 0,
-			matchCounts: {},
-		});
-		return {
-			executable: false,
-			paths: [],
-			matches: [],
-			diagnostics: compileResult.diagnostics,
-			propertyDiagnostics: [],
-		};
-	}
-
-	const queriedKeys = new Set<string>(getExecutionPlan(compileResult.prepared).queriedKeys);
-	const propDiagnosticsAggregator = new QueriedPropertyDiagnosticsAggregator(queriedKeys);
-
-	const resolveLinkPath: ResolveLinkPathFn = (rawTarget, sourcePath) =>
-		app.metadataCache.getFirstLinkpathDest(rawTarget, sourcePath)?.path ?? null;
-
-	const docs: NormalizedDocument[] = [];
-	let notesScanned = 0;
-	let uncachedNotes = 0;
-
-	for (const file of app.vault.getMarkdownFiles()) {
-		if ((file as { deleted?: boolean }).deleted) {
-			continue;
-		}
-		const cache = app.metadataCache.getFileCache(file);
-		if (
-			hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)
-		) {
-			continue;
-		}
-		notesScanned++;
-		if (cache === null) {
-			uncachedNotes++;
-		}
-		let doc: NormalizedDocument;
-		try {
-			doc = normalizeObsidianMetadata(file, cache, configResult.config, [], resolveLinkPath);
-		} catch (error) {
-			logger?.log('error', `Failed to normalize note ${markSensitive(file.path)}`, {
-				source: 'query.diagnose',
-				error: String(error),
-			});
-			throw error;
-		}
-		propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
-		docs.push(doc);
-	}
-
-	propDiagnosticsAggregator.flush(logger, 'query.diagnose');
-
-	const report = evaluateVault(docs, compileResult.prepared);
-
-	logger?.log('debug', 'Completed diagnoseVaultQuery', {
-		source: 'query.diagnose',
-		durationMs: Math.max(0, Date.now() - startedAt),
-		count: notesScanned,
-		queryCount: 1,
-		executableCount: 1,
-		notesScanned,
-		uncachedNotes,
-		docDiagnosticCount: report.propertyDiagnostics.length,
-		matchCounts: { [markSensitive('diagnose')]: report.matches.length },
-	});
-
-	return {
-		executable: true,
-		paths: report.matches.map((doc) => doc.file.path),
-		matches: report.matches,
-		diagnostics: compileResult.diagnostics,
-		propertyDiagnostics: report.propertyDiagnostics,
-	};
 }
 
 /**

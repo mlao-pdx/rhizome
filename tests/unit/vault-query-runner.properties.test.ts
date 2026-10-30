@@ -5,10 +5,9 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 
 import {
-	diagnoseVaultQuery,
+	explainVaultQuery,
 	parseObsidianTypesJson,
 	runVaultQuery,
-	toVaultQueryMatch,
 	type VaultQueryOptions,
 } from '../../src/adapters/vault-query-runner';
 import {
@@ -328,17 +327,20 @@ describe('Vault Query Runner Property Invariants', () => {
 					}
 
 					for (const k of expectedKeys) {
-						const { app: appDiag, getFileCacheSpy: diagCacheSpy } = makeSpyMockApp({
+						const { app: appSingle, getFileCacheSpy: singleCacheSpy } = makeSpyMockApp({
 							notes,
 							typesJson,
 						});
-						const diagRes = await diagnoseVaultQuery(appDiag, queryMap[k], options);
+						const singleRes = await runVaultQuery(
+							appSingle,
+							{ [k]: queryMap[k]! },
+							options,
+						);
 
-						if (diagRes.executable) {
+						if (Object.prototype.hasOwnProperty.call(singleRes, k)) {
 							expect(Object.prototype.hasOwnProperty.call(runRes, k)).toBe(true);
 							const bucket = runRes[k]!;
-							expect(bucket).toEqual(diagRes.matches.map(toVaultQueryMatch));
-							expect(diagRes.paths).toEqual(bucket.map((m) => m.file.path));
+							expect(bucket).toEqual(singleRes[k]);
 
 							for (const m of bucket) {
 								expect(Object.keys(m)).toEqual([
@@ -363,7 +365,7 @@ describe('Vault Query Runner Property Invariants', () => {
 							expect(Object.prototype.hasOwnProperty.call(runRes, k)).toBe(false);
 						}
 
-						for (const call of diagCacheSpy.mock.calls) {
+						for (const call of singleCacheSpy.mock.calls) {
 							const arg = call[0] as { deleted?: boolean };
 							expect(arg.deleted).toBe(false);
 						}
@@ -577,52 +579,25 @@ describe('Vault Query Runner Property Invariants', () => {
 						},
 					});
 					const { app: appRun } = makeSpyMockApp({ notes, typesJson });
-					const { app: appDiag } = makeSpyMockApp({ notes, typesJson });
 
-					const [res, diagRes] = await Promise.all([
-						runVaultQuery(
-							appRun,
-							{
-								all: '',
-								lt: '[due: < @today]',
-								eq: '[due: = @today]',
-								gt: '[due: > @today]',
-								hasDue: '[due: <= @today] OR [due: > @today]',
-							},
-							{
-								timeZone: rawTz,
-								referenceTimeMs: PINNED_REF_MS,
-								propertyTypes: {
-									[variantKey]: overrideType,
-									due: 'date',
-								},
-							},
-						),
-						diagnoseVaultQuery(appDiag, '', {
+					const res = await runVaultQuery(
+						appRun,
+						{
+							all: '',
+							lt: '[due: < @today]',
+							eq: '[due: = @today]',
+							gt: '[due: > @today]',
+							hasDue: '[due: <= @today] OR [due: > @today]',
+						},
+						{
 							timeZone: rawTz,
 							referenceTimeMs: PINNED_REF_MS,
 							propertyTypes: {
 								[variantKey]: overrideType,
 								due: 'date',
 							},
-						}),
-					]);
-
-					const effectiveTypes: Record<string, string> = {
-						[baseKey]: overrideType,
-						due: 'date',
-					};
-					const sortedTypePairs = Object.keys(effectiveTypes)
-						.sort()
-						.map((k) => [k, effectiveTypes[k]!]);
-					const expectedFingerprint = JSON.stringify({
-						tz: rawTz.trim(),
-						types: sortedTypePairs,
-					});
-
-					for (const doc of diagRes.matches) {
-						expect(doc.normalizationFingerprint).toBe(expectedFingerprint);
-					}
+						},
+					);
 
 					// Zero temporal tear: lt, eq, gt strictly partition all notes with a valid single due date (`hasDue`)
 					const ltPaths = res['lt']!.map((m) => m.file.path);
@@ -666,11 +641,11 @@ describe('Vault Query Runner Property Invariants', () => {
 				optionsFuzzArb,
 				async (notes, typesJson, queryMap, singleQuery, options) => {
 					const { app: appRun } = makeSpyMockApp({ notes, typesJson });
-					const { app: appDiag } = makeSpyMockApp({ notes, typesJson });
+					const { app: appExplain } = makeSpyMockApp({ notes, typesJson });
 
-					const [runRes, diagRes] = await Promise.all([
+					const [runRes, explainMd] = await Promise.all([
 						runVaultQuery(appRun, queryMap, options),
-						diagnoseVaultQuery(appDiag, singleQuery, options),
+						explainVaultQuery(appExplain, singleQuery, options),
 					]);
 
 					for (const forbidden of FORBIDDEN_KEYS) {
@@ -678,7 +653,8 @@ describe('Vault Query Runner Property Invariants', () => {
 					}
 
 					expect(JSON.parse(JSON.stringify(runRes))).toEqual(runRes);
-					expect(JSON.parse(JSON.stringify(diagRes))).toEqual(diagRes);
+					expect(typeof explainMd).toBe('string');
+					expect(explainMd.length).toBeGreaterThan(0);
 				},
 			),
 		);

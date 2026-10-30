@@ -138,37 +138,9 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		expect(emptyResult).toEqual({});
 	});
 
-	it('diagnoseQuery() evaluates against the vault and returns matches, paths, and propertyDiagnostics', async () => {
-		const app = createMockApp() as App;
-		const mockFile = {
-			path: 'notes/alpha.md',
-			name: 'alpha.md',
-			basename: 'alpha',
-			extension: 'md',
-			parent: { path: 'notes' },
-			stat: { ctime: 1700000000000, mtime: 1700000000000, size: 120 },
-		};
-		app.vault.getMarkdownFiles = () => [mockFile as never];
-		app.metadataCache.getFileCache = () => ({
-			frontmatter: { status: 'active' },
-			tags: [{ tag: '#project', position: {} as never }],
-		});
-
-		const manifest = createMockManifest() as PluginManifest;
-		const plugin = new RhizomePlugin(app, manifest);
+	it('explainQuery() generates a Markdown explanation plan without scanning vault notes', async () => {
+		const plugin = createPlugin();
 		await plugin.onload();
-
-		const result = await plugin.diagnoseQuery('#project [status: active]');
-		expect(result.executable).toBe(true);
-		expect(result.paths).toEqual(['notes/alpha.md']);
-		expect(result.matches).toHaveLength(1);
-		expect(result.matches[0]?.file.path).toBe('notes/alpha.md');
-		expect(result.diagnostics).toEqual([]);
-		expect(result.propertyDiagnostics).toEqual([]);
-
-		const matchAllResult = await plugin.diagnoseQuery();
-		expect(matchAllResult.executable).toBe(true);
-		expect(matchAllResult.paths).toEqual(['notes/alpha.md']);
 
 		const explainMd = await plugin.explainQuery('#project [status: active]', {
 			timeZone: 'UTC',
@@ -178,5 +150,8 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		expect(explainMd).toContain('## Logic Breakdown');
 		expect(explainMd).toContain('## Diagnostics');
 		expect(explainMd).toContain('## Concept Reference');
+
+		const defaultExplainMd = await plugin.explainQuery();
+		expect(defaultExplainMd).toContain('# Query Explain Plan');
 	});
 });
