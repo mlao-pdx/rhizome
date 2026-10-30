@@ -125,6 +125,16 @@ export function createRhizomeLiquidInstance(
 }
 
 /**
+ * Parsed LiquidJS template state produced by Pass 1 (`parseRhizomeTemplatePass1`),
+ * ready for one or more Pass 2 renders via `renderParsedRhizomeTemplate`.
+ */
+export interface ParsedRhizomeTemplate {
+	readonly liquid: Liquid;
+	readonly env: QueryTagEnvironment;
+	readonly templates: Template[] | null;
+}
+
+/**
  * Runs Pass 1 (static Liquid parse and `{% query %}` block extraction) without executing
  * any vault queries.
  */
@@ -132,11 +142,7 @@ export function parseRhizomeTemplatePass1(
 	source: string,
 	folders?: TemplateFolderConfig,
 	readTemplateFile?: (vaultRelativePath: string) => Promise<string | null>,
-): {
-	readonly liquid: Liquid;
-	readonly env: QueryTagEnvironment;
-	readonly templates: Template[] | null;
-} {
+): ParsedRhizomeTemplate {
 	const env = createQueryTagEnvironment();
 	const liquid = createRhizomeLiquidInstance(env, source, folders, readTemplateFile);
 	let templates: Template[] | null = null;
@@ -157,6 +163,77 @@ export function parseRhizomeTemplatePass1(
 	return { liquid, env, templates };
 }
 
+const parsedTemplateRenderChains = new WeakMap<ParsedRhizomeTemplate, Promise<unknown>>();
+
+/**
+ * Runs Pass 2 (Liquid template rendering against a pre-fetched query `payload`) using
+ * the AST and environment produced by `parseRhizomeTemplatePass1`.
+ *
+ * @remarks
+ * (bugfix, 2026-10-30) Serializes concurrent Pass 2 renders on the same
+ * `ParsedRhizomeTemplate` instance via a `WeakMap` promise chain so overlapping
+ * async renders cannot clobber `parsed.env.payload` or `parsed.env.explainQuery`
+ * while awaiting partials, layouts, or `explainQuery`.
+ */
+export async function renderParsedRhizomeTemplate(
+	source: string,
+	parsed: ParsedRhizomeTemplate,
+	payload: Readonly<Record<string, unknown[]>>,
+	explainQuery: (query: string, heading: string) => Promise<string>,
+): Promise<TemplateRenderResult> {
+	const queries: readonly ExtractedQueryBlock[] = Object.freeze([...parsed.env.queries]);
+
+	if (parsed.env.diagnostics.length > 0 || parsed.templates === null) {
+		const frozenDiags = Object.freeze([...parsed.env.diagnostics]);
+		return Object.freeze({
+			ok: false,
+			markdown: formatTemplateDiagnosticsMarkdown(source, frozenDiags),
+			queries,
+			diagnostics: frozenDiags,
+		});
+	}
+
+	const templates = parsed.templates;
+	const previousRender = parsedTemplateRenderChains.get(parsed) ?? Promise.resolve();
+
+	const executePass2 = async (): Promise<TemplateRenderResult> => {
+		try {
+			const safePayload: Readonly<Record<string, unknown[]>> =
+				payload && typeof payload === 'object' ? payload : Object.freeze({});
+			parsed.env.payload = safePayload;
+			parsed.env.explainQuery = explainQuery;
+
+			const renderedRaw: unknown = await parsed.liquid.render(templates, safePayload);
+			const markdown = typeof renderedRaw === 'string' ? renderedRaw : '';
+
+			return Object.freeze({
+				ok: true,
+				markdown,
+				queries,
+				diagnostics: Object.freeze([]),
+			});
+		} catch (err: unknown) {
+			const renderDiag = extractLiquidErrorDiagnostic(
+				source,
+				err,
+				'TEMPLATE_RENDER_ERROR',
+				'Verify the template expressions and filter arguments inside this codeblock.',
+			);
+			const frozenDiags = Object.freeze([renderDiag]);
+			return Object.freeze({
+				ok: false,
+				markdown: formatTemplateDiagnosticsMarkdown(source, frozenDiags),
+				queries,
+				diagnostics: frozenDiags,
+			});
+		}
+	};
+
+	const currentRender = previousRender.then(executePass2, executePass2);
+	parsedTemplateRenderChains.set(parsed, currentRender);
+	return currentRender;
+}
+
 /**
  * Executes a `rhizome` LiquidJS template in two passes:
  * 1. **Pass 1 (Static Parse & Extract):** Parses the Liquid AST, validates `{% query <name> [explain] %}`
@@ -168,15 +245,11 @@ export async function renderRhizomeTemplate(
 	source: string,
 	callbacks: TemplateExecutionCallbacks,
 ): Promise<TemplateRenderResult> {
-	const { liquid, env, templates } = parseRhizomeTemplatePass1(
-		source,
-		callbacks.folders,
-		callbacks.readTemplateFile,
-	);
-	const queries: readonly ExtractedQueryBlock[] = Object.freeze([...env.queries]);
+	const parsed = parseRhizomeTemplatePass1(source, callbacks.folders, callbacks.readTemplateFile);
+	const queries: readonly ExtractedQueryBlock[] = Object.freeze([...parsed.env.queries]);
 
-	if (env.diagnostics.length > 0 || templates === null) {
-		const frozenDiags = Object.freeze([...env.diagnostics]);
+	if (parsed.env.diagnostics.length > 0 || parsed.templates === null) {
+		const frozenDiags = Object.freeze([...parsed.env.diagnostics]);
 		return Object.freeze({
 			ok: false,
 			markdown: formatTemplateDiagnosticsMarkdown(source, frozenDiags),
@@ -198,18 +271,9 @@ export async function renderRhizomeTemplate(
 			}
 		}
 
-		env.payload = payload;
-		env.explainQuery = (q, heading) => callbacks.explainQuery(q, heading);
-
-		const renderedRaw: unknown = await liquid.render(templates, payload);
-		const markdown = typeof renderedRaw === 'string' ? renderedRaw : '';
-
-		return Object.freeze({
-			ok: true,
-			markdown,
-			queries,
-			diagnostics: Object.freeze([]),
-		});
+		return await renderParsedRhizomeTemplate(source, parsed, payload, (q, heading) =>
+			callbacks.explainQuery(q, heading),
+		);
 	} catch (err: unknown) {
 		const renderDiag = extractLiquidErrorDiagnostic(
 			source,

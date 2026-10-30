@@ -1,4 +1,5 @@
 import { FileSystemAdapter, Plugin } from 'obsidian';
+import { ActiveQueryRoster } from './adapters/active-query-roster';
 import { createRhizomeEditorExtension } from './adapters/codemirror/rhizome-editor-extension';
 import { DexiePersistenceAdapter } from './adapters/dexie-persistence-adapter';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
@@ -7,6 +8,7 @@ import { processRhizomeCodeBlock } from './adapters/rhizome-codeblock';
 import {
 	explainVaultQuery,
 	runVaultQuery,
+	type VaultQueryCallback,
 	type VaultQueryOptions,
 	type VaultQueryResult,
 } from './adapters/vault-query-runner';
@@ -17,11 +19,18 @@ import {
 	RhizomeSettingTab,
 } from './settings';
 
+const REACTIVE_QUERY_DEBOUNCE_MS = 500;
+
+function isMarkdownPath(path: unknown): boolean {
+	return typeof path === 'string' && path.toLowerCase().endsWith('.md');
+}
+
 export default class RhizomePlugin extends Plugin {
 	declare settings: RhizomeSettings;
 	loggerAdapter!: ObsidianLoggerAdapter;
 	dataStore!: PluginDataStore;
 	persistence!: DexiePersistenceAdapter;
+	activeQueryRoster!: ActiveQueryRoster;
 
 	override async onload() {
 		this.settings = { ...DEFAULT_SETTINGS };
@@ -67,6 +76,51 @@ export default class RhizomePlugin extends Plugin {
 		);
 		this.register(() => this.persistence.close());
 
+		this.activeQueryRoster = new ActiveQueryRoster(this.app, this.loggerAdapter);
+		this.register(() => this.activeQueryRoster.clear());
+
+		let nudgeTimer: ReturnType<typeof setTimeout> | null = null;
+		const scheduleReactiveQueryNudge = (): void => {
+			if (this.activeQueryRoster.size === 0) {
+				return;
+			}
+			if (nudgeTimer !== null) {
+				clearTimeout(nudgeTimer);
+			}
+			nudgeTimer = setTimeout(() => {
+				nudgeTimer = null;
+				void this.activeQueryRoster.nudge();
+			}, REACTIVE_QUERY_DEBOUNCE_MS);
+		};
+		this.register(() => {
+			if (nudgeTimer !== null) {
+				clearTimeout(nudgeTimer);
+				nudgeTimer = null;
+			}
+		});
+
+		this.registerEvent(
+			this.app.metadataCache.on('changed', (file) => {
+				if (isMarkdownPath(file?.path)) {
+					scheduleReactiveQueryNudge();
+				}
+			}),
+		);
+		this.registerEvent(
+			this.app.vault.on('delete', (file) => {
+				if (isMarkdownPath(file?.path)) {
+					scheduleReactiveQueryNudge();
+				}
+			}),
+		);
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				if (isMarkdownPath(file?.path) || isMarkdownPath(oldPath)) {
+					scheduleReactiveQueryNudge();
+				}
+			}),
+		);
+
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new RhizomeSettingTab(this.app, this));
 
@@ -100,8 +154,13 @@ export default class RhizomePlugin extends Plugin {
 	async query(
 		queries: Readonly<Record<string, string>> = {},
 		options?: VaultQueryOptions,
+		onUpdate?: VaultQueryCallback,
 	): Promise<VaultQueryResult> {
-		return runVaultQuery(this.app, queries, options, this.loggerAdapter);
+		const result = await runVaultQuery(this.app, queries, options, this.loggerAdapter);
+		if (onUpdate) {
+			this.activeQueryRoster?.register(queries, options, result, onUpdate);
+		}
+		return result;
 	}
 
 	async explainQuery(input: string = '', options?: VaultQueryOptions): Promise<string> {

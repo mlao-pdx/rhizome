@@ -20,6 +20,7 @@ export class Plugin {
 	app: unknown;
 	manifest: unknown;
 	readonly registeredCleanups: Array<() => unknown> = [];
+	readonly registeredEvents: unknown[] = [];
 
 	constructor(app: unknown, manifest: unknown) {
 		this.app = app;
@@ -30,6 +31,10 @@ export class Plugin {
 
 	register(callback: () => unknown): void {
 		this.registeredCleanups.push(callback);
+	}
+
+	registerEvent(eventRef: unknown): void {
+		this.registeredEvents.push(eventRef);
 	}
 
 	registerMarkdownCodeBlockProcessor(
@@ -48,9 +53,48 @@ export class Plugin {
 
 export class MarkdownRenderChild {
 	containerEl: unknown;
+	readonly cleanups: Array<() => unknown> = [];
+	readonly children: MarkdownRenderChild[] = [];
+	unloaded = false;
 
 	constructor(containerEl: unknown) {
 		this.containerEl = containerEl;
+	}
+
+	register(cb: () => unknown): void {
+		this.cleanups.push(cb);
+	}
+
+	addChild<T extends MarkdownRenderChild>(child: T): T {
+		this.children.push(child);
+		return child;
+	}
+
+	removeChild<T extends MarkdownRenderChild>(child: T): T {
+		const idx = this.children.indexOf(child);
+		if (idx !== -1) {
+			this.children.splice(idx, 1);
+		}
+		child.unload();
+		return child;
+	}
+
+	onunload(): void {}
+
+	unload(): void {
+		if (this.unloaded) {
+			return;
+		}
+		this.unloaded = true;
+		for (const child of [...this.children]) {
+			child.unload();
+		}
+		this.children.length = 0;
+		for (const cb of [...this.cleanups]) {
+			cb();
+		}
+		this.cleanups.length = 0;
+		this.onunload();
 	}
 }
 
@@ -286,17 +330,43 @@ export class FileSystemAdapter {
 	}
 }
 
+function createEventBus() {
+	const listeners = new Map<string, Array<(...args: unknown[]) => unknown>>();
+	return {
+		on: (event: string, callback: (...args: unknown[]) => unknown) => {
+			let list = listeners.get(event);
+			if (!list) {
+				list = [];
+				listeners.set(event, list);
+			}
+			list.push(callback);
+			return { event, callback };
+		},
+		trigger: (event: string, ...args: unknown[]) => {
+			for (const cb of listeners.get(event) ?? []) {
+				cb(...args);
+			}
+		},
+	};
+}
+
 /** A minimal `app` value sufficient for `RhizomePlugin`'s current `onload()` and `query()`. */
 export function createMockApp(): unknown {
+	const vaultEvents = createEventBus();
+	const metadataEvents = createEventBus();
 	return {
 		vault: {
 			configDir: 'mock-config',
 			adapter: new FileSystemAdapter(),
 			getMarkdownFiles: () => [],
+			on: vaultEvents.on,
+			trigger: vaultEvents.trigger,
 		},
 		metadataCache: {
 			getFileCache: () => null,
 			getFirstLinkpathDest: () => null,
+			on: metadataEvents.on,
+			trigger: metadataEvents.trigger,
 		},
 		workspace: {
 			onLayoutReady: (cb: () => unknown) => {

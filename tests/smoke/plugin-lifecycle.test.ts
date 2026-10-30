@@ -154,4 +154,77 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		const defaultExplainMd = await plugin.explainQuery();
 		expect(defaultExplainMd).toContain('# Query Explain Plan');
 	});
+
+	it('debounces reactive query nudges by 500 ms on .md metadataCache.changed, vault.delete, and vault.rename events', async () => {
+		vi.useFakeTimers();
+		try {
+			const app = createMockApp() as App & {
+				vault: { trigger: (event: string, ...args: unknown[]) => void };
+				metadataCache: { trigger: (event: string, ...args: unknown[]) => void };
+			};
+			let notes = [
+				{
+					path: 'notes/alpha.md',
+					name: 'alpha.md',
+					basename: 'alpha',
+					extension: 'md',
+					parent: { path: 'notes' },
+					stat: { ctime: 1700000000000, mtime: 1700000000000, size: 120 },
+				},
+			];
+			app.vault.getMarkdownFiles = () => notes as never;
+			app.metadataCache.getFileCache = () => ({
+				tags: [{ tag: '#project', position: {} as never }],
+			});
+
+			const plugin = new RhizomePlugin(app, createMockManifest() as PluginManifest);
+			await plugin.onload();
+
+			const updates: unknown[] = [];
+			await plugin.query(
+				{ projects: '#project' },
+				{ timeZone: 'UTC', referenceTimeMs: 1700000000000 },
+				(next) => {
+					updates.push(next);
+				},
+			);
+			expect(plugin.activeQueryRoster.size).toBe(1);
+
+			const nudgeSpy = vi.spyOn(plugin.activeQueryRoster, 'nudge');
+
+			// Non-markdown events are ignored
+			app.metadataCache.trigger('changed', { path: 'assets/image.png' });
+			app.vault.trigger('delete', { path: 'docs/manual.pdf' });
+			app.vault.trigger('rename', { path: 'assets/new.png' }, 'assets/old.png');
+			await vi.advanceTimersByTimeAsync(600);
+			expect(nudgeSpy).not.toHaveBeenCalled();
+
+			// Rapid burst of .md events coalesces into a single 500 ms trailing nudge
+			notes = [
+				...notes,
+				{
+					path: 'notes/beta.md',
+					name: 'beta.md',
+					basename: 'beta',
+					extension: 'md',
+					parent: { path: 'notes' },
+					stat: { ctime: 1700000000000, mtime: 1700000000000, size: 120 },
+				},
+			];
+			app.metadataCache.trigger('changed', { path: 'notes/beta.md' });
+			await vi.advanceTimersByTimeAsync(200);
+			app.vault.trigger('rename', { path: 'notes/beta.md' }, 'notes/draft.md');
+			await vi.advanceTimersByTimeAsync(200);
+			app.vault.trigger('delete', { path: 'notes/temp.md' });
+
+			// Only 400 ms since first, 0 ms since last -> not fired yet
+			expect(nudgeSpy).not.toHaveBeenCalled();
+
+			await vi.advanceTimersByTimeAsync(500);
+			expect(nudgeSpy).toHaveBeenCalledTimes(1);
+			expect(updates).toHaveLength(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

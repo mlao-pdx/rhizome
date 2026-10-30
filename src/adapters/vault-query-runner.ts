@@ -42,7 +42,14 @@ export interface VaultQueryOptions {
 	readonly referenceTimeMs?: number | undefined;
 	/** Optional alternate level-1 Markdown heading for `explainQuery` / `explainVaultQuery` (defaults to `'Query Explain Plan'`). */
 	readonly heading?: string | undefined;
+	/** Optional AbortSignal to unregister a reactive `onUpdate` callback when the caller unloads. */
+	readonly signal?: AbortSignal | undefined;
 }
+
+/**
+ * Callback invoked by `ActiveQueryRoster` when a reactive query's matched payload changes.
+ */
+export type VaultQueryCallback = (result: VaultQueryResult) => void | Promise<void>;
 
 /**
  * User-facing matched note metadata returned in `VaultQueryResult`.
@@ -83,7 +90,10 @@ export function toVaultQueryMatch(doc: NormalizedDocument): VaultQueryMatch {
 	};
 }
 
-function resolveDefaultTimeZone(): string {
+/**
+ * Resolves the host's default IANA timezone identifier, falling back to `'UTC'`.
+ */
+export function resolveDefaultTimeZone(): string {
 	try {
 		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 		return typeof tz === 'string' && tz.trim() ? tz.trim() : 'UTC';
@@ -125,7 +135,11 @@ function mergePropertyTypes(
 	return merged;
 }
 
-function sanitizeQueryEntries(queries: unknown): Array<[string, string]> {
+/**
+ * Sanitizes an unknown query map into safe `[name, rawQuery]` pairs, filtering out
+ * prototype-pollution keys.
+ */
+export function sanitizeQueryEntries(queries: unknown): Array<[string, string]> {
 	if (typeof queries !== 'object' || queries === null || Array.isArray(queries)) {
 		return [];
 	}
