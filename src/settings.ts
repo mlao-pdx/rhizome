@@ -1,9 +1,21 @@
 import { App, Modal, PluginSettingTab, Setting } from 'obsidian';
+import {
+	DEFAULT_LAYOUTS_FOLDER,
+	DEFAULT_PARTIALS_FOLDER,
+	DEFAULT_TEMPLATES_FOLDER,
+	normalizeTemplateFolderPath,
+} from '@core/templates';
 import type { LogLevel } from '@ports/logger-port';
 import { LEVEL_ORDER } from './adapters/logger-format';
 import RhizomePlugin from './main';
 
 export interface RhizomeSettings {
+	/** Vault-relative folder path for LiquidJS top-level templates (`root`). */
+	templatesFolder: string;
+	/** Vault-relative folder path for LiquidJS partials (`{% render %}` and `{% include %}`). */
+	partialsFolder: string;
+	/** Vault-relative folder path for LiquidJS layouts (`{% layout %}`). */
+	layoutsFolder: string;
 	/** Diagnostics: write logs to the vault. Off by default. */
 	loggingEnabled: boolean;
 	/** Diagnostics: minimum severity written once logging is enabled. */
@@ -11,6 +23,9 @@ export interface RhizomeSettings {
 }
 
 export const DEFAULT_SETTINGS: RhizomeSettings = {
+	templatesFolder: DEFAULT_TEMPLATES_FOLDER,
+	partialsFolder: DEFAULT_PARTIALS_FOLDER,
+	layoutsFolder: DEFAULT_LAYOUTS_FOLDER,
 	loggingEnabled: false,
 	logLevel: 'warn',
 };
@@ -95,7 +110,74 @@ export class RhizomeSettingTab extends PluginSettingTab {
 
 		containerEl.empty();
 
+		this.displayTemplates(containerEl);
 		this.displayDiagnostics(containerEl);
+	}
+
+	private displayTemplates(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName('Templates').setHeading();
+
+		new Setting(containerEl)
+			.setName('Templates folder')
+			.setDesc('Vault-relative folder where LiquidJS top-level templates are stored.')
+			.addText((text) => {
+				const t = text as {
+					setPlaceholder?: (p: string) => unknown;
+					setValue?: (v: string) => unknown;
+					onChange?: (cb: (v: string) => unknown) => unknown;
+				};
+				t.setPlaceholder?.(DEFAULT_TEMPLATES_FOLDER);
+				t.setValue?.(this.plugin.settings.templatesFolder);
+				t.onChange?.(async (value) => {
+					this.plugin.settings.templatesFolder = normalizeTemplateFolderPath(
+						value,
+						DEFAULT_TEMPLATES_FOLDER,
+					);
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName('Partials folder')
+			.setDesc(
+				'Vault-relative folder where LiquidJS partials (`{% render %}` and `{% include %}`) are stored.',
+			)
+			.addText((text) => {
+				const t = text as {
+					setPlaceholder?: (p: string) => unknown;
+					setValue?: (v: string) => unknown;
+					onChange?: (cb: (v: string) => unknown) => unknown;
+				};
+				t.setPlaceholder?.(DEFAULT_PARTIALS_FOLDER);
+				t.setValue?.(this.plugin.settings.partialsFolder);
+				t.onChange?.(async (value) => {
+					this.plugin.settings.partialsFolder = normalizeTemplateFolderPath(
+						value,
+						DEFAULT_PARTIALS_FOLDER,
+					);
+					await this.plugin.saveSettings();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName('Layouts folder')
+			.setDesc('Vault-relative folder where LiquidJS layouts (`{% layout %}`) are stored.')
+			.addText((text) => {
+				const t = text as {
+					setPlaceholder?: (p: string) => unknown;
+					setValue?: (v: string) => unknown;
+					onChange?: (cb: (v: string) => unknown) => unknown;
+				};
+				t.setPlaceholder?.(DEFAULT_LAYOUTS_FOLDER);
+				t.setValue?.(this.plugin.settings.layoutsFolder);
+				t.onChange?.(async (value) => {
+					this.plugin.settings.layoutsFolder = normalizeTemplateFolderPath(
+						value,
+						DEFAULT_LAYOUTS_FOLDER,
+					);
+					await this.plugin.saveSettings();
+				});
+			});
 	}
 
 	/**

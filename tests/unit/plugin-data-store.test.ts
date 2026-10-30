@@ -5,6 +5,9 @@ import { PluginDataStore, type PluginData } from '../../src/adapters/plugin-data
 import { createInMemoryPluginData } from '../support/plugin-data-fake';
 
 const DEFAULTS: RhizomeSettings = {
+	templatesFolder: '◊Rhizome/templates',
+	partialsFolder: '◊Rhizome/partials',
+	layoutsFolder: '◊Rhizome/layouts',
 	loggingEnabled: false,
 	logLevel: 'warn',
 };
@@ -52,6 +55,22 @@ describe('PluginDataStore.loadSettings', () => {
 	it('treats garbage as defaults rather than throwing', async () => {
 		const { store } = createStore('not-an-object');
 		expect(await store.loadSettings()).toEqual(DEFAULTS);
+	});
+
+	it('normalizes valid template folders and falls back to defaults for unsafe folder paths', async () => {
+		const { store } = createStore({
+			settings: {
+				templatesFolder: '  /Custom/Templates/ ',
+				partialsFolder: '../escape',
+				layoutsFolder: '◊Rhizome/logs/layouts',
+			},
+		});
+		expect(await store.loadSettings()).toEqual({
+			...DEFAULTS,
+			templatesFolder: 'Custom/Templates',
+			partialsFolder: '◊Rhizome/partials',
+			layoutsFolder: '◊Rhizome/layouts',
+		});
 	});
 });
 

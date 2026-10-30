@@ -1,8 +1,139 @@
 /*
+ * Scoped CodeMirror 6 syntax highlighting, diagnostic underlines, and hover tooltips
+ * for fenced `rhizome` codeblocks.
+ */
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+.cm-rhizome-tok-liquid-delimiter {
+	color: var(--code-punctuation, var(--text-muted));
+	font-weight: 600;
+}
 
-If your plugin does not need CSS, delete this file.
+.cm-rhizome-tok-liquid-keyword,
+.cm-rhizome-tok-query-keyword {
+	color: var(--code-keyword, var(--text-accent));
+	font-weight: 600;
+}
 
-*/
+.cm-rhizome-tok-liquid-filter,
+.cm-rhizome-tok-query-scope {
+	color: var(--code-function, var(--color-blue));
+}
+
+.cm-rhizome-tok-liquid-variable,
+.cm-rhizome-tok-query-property {
+	color: var(--code-property, var(--color-cyan));
+}
+
+.cm-rhizome-tok-liquid-string,
+.cm-rhizome-tok-query-string {
+	color: var(--code-string, var(--color-green));
+}
+
+.cm-rhizome-tok-liquid-number,
+.cm-rhizome-tok-query-date {
+	color: var(--code-value, var(--color-orange));
+}
+
+.cm-rhizome-tok-query-regex {
+	color: var(--code-important, var(--color-red));
+}
+
+.cm-rhizome-tok-query-operator,
+.cm-rhizome-tok-query-paren {
+	color: var(--code-operator, var(--text-normal));
+}
+
+.cm-rhizome-tok-query-tag {
+	color: var(--tag-color, var(--text-accent));
+}
+
+.cm-rhizome-tok-query-wikilink {
+	color: var(--link-color, var(--text-accent));
+}
+
+.cm-rhizome-tok-query-identifier {
+	color: var(--code-normal, var(--text-normal));
+}
+
+.cm-rhizome-tok-comment {
+	color: var(--code-comment, var(--text-faint));
+	font-style: italic;
+}
+
+.cm-rhizome-diag-error {
+	text-decoration: underline wavy var(--text-error);
+	text-underline-offset: 3px;
+}
+
+.cm-rhizome-diag-warning {
+	text-decoration: underline wavy var(--text-warning);
+	text-underline-offset: 3px;
+}
+
+.cm-rhizome-diag-hint {
+	text-decoration: underline dotted var(--text-accent);
+	text-underline-offset: 3px;
+}
+
+.cm-rhizome-tooltip {
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 6px);
+	box-shadow: var(--shadow-s);
+	color: var(--text-normal);
+	font-family: var(--font-interface);
+	font-size: var(--font-ui-small, 13px);
+	max-width: 440px;
+	padding: 8px 10px;
+}
+
+.cm-rhizome-tooltip-item + .cm-rhizome-tooltip-item {
+	border-top: 1px solid var(--background-modifier-border);
+	margin-top: 6px;
+	padding-top: 6px;
+}
+
+.cm-rhizome-tooltip-header {
+	align-items: center;
+	display: flex;
+	gap: 6px;
+	margin-bottom: 4px;
+}
+
+.cm-rhizome-tooltip-badge {
+	border-radius: var(--radius-s, 4px);
+	font-size: 11px;
+	font-weight: 700;
+	padding: 1px 5px;
+}
+
+.cm-rhizome-tooltip-badge-error {
+	background-color: var(--background-modifier-error);
+	color: var(--text-on-accent, #ffffff);
+}
+
+.cm-rhizome-tooltip-badge-warning {
+	background-color: var(--text-warning);
+	color: var(--background-primary);
+}
+
+.cm-rhizome-tooltip-badge-hint {
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent, #ffffff);
+}
+
+.cm-rhizome-tooltip-code {
+	font-family: var(--font-monospace);
+	font-size: 11px;
+}
+
+.cm-rhizome-tooltip-issue {
+	line-height: 1.4;
+}
+
+.cm-rhizome-tooltip-hint {
+	color: var(--text-muted);
+	font-style: italic;
+	line-height: 1.35;
+	margin-top: 4px;
+}

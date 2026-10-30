@@ -6,6 +6,34 @@ export const WhiteSpace = createToken({
 	group: Lexer.SKIPPED,
 });
 
+export const LIQUID_INLINE_COMMENT_PATTERN =
+	/\{%-?[ \t]*#(?:(?!-?%\})[^\r\n])*(?:\r?\n[ \t]*(?:#(?:(?!-?%\})[^\r\n])*|(?=\r?\n|-?%\})))*-?%\}/;
+
+export const LIQUID_BLOCK_COMMENT_PATTERN =
+	/\{%-?\s*comment\s*-?%\}[\s\S]*?\{%-?\s*endcomment\s*-?%\}/;
+
+/**
+ * Matches single-line and multi-line LiquidJS inline comments (`{% # ... %}`)
+ * where every non-empty continuation line inside the tag starts with `#`.
+ */
+export const LiquidInlineComment = createToken({
+	name: 'LiquidInlineComment',
+	pattern: LIQUID_INLINE_COMMENT_PATTERN,
+	group: Lexer.SKIPPED,
+	line_breaks: true,
+});
+
+/**
+ * Matches LiquidJS block comments (`{% comment %} ... {% endcomment %}`)
+ * with optional whitespace-control hyphens.
+ */
+export const LiquidBlockComment = createToken({
+	name: 'LiquidBlockComment',
+	pattern: LIQUID_BLOCK_COMMENT_PATTERN,
+	group: Lexer.SKIPPED,
+	line_breaks: true,
+});
+
 export const WikiLinkValue = createToken({
 	name: 'WikiLinkValue',
 	pattern: /\[\[[^\]\r\n]+\]\]/,
@@ -64,12 +92,14 @@ export const TagLiteral = createToken({
 
 export const Identifier = createToken({
 	name: 'Identifier',
-	pattern: /[^\s()[\]:"'><=!]+/,
+	pattern: /[^\s()[\]{}:"'><=!]+/,
 	label: 'identifier',
 });
 
 export const ALL_TOKENS: TokenType[] = [
 	WhiteSpace,
+	LiquidInlineComment,
+	LiquidBlockComment,
 	WikiLinkValue,
 	LParen,
 	RParen,

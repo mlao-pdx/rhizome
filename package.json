@@ -42,6 +42,8 @@
     "*.{ts,tsx,js,mjs,mts,cts,json,md,yml,yaml,css}": "prettier --write"
   },
   "devDependencies": {
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.13",
     "@eslint/js": "9.39.4",
     "@types/node": "22.19.17",
     "@vitest/coverage-v8": "4.1.10",
@@ -66,6 +68,7 @@
   "dependencies": {
     "@js-temporal/polyfill": "0.5.1",
     "chevrotain": "13.2.0",
-    "dexie": "4.4.4"
+    "dexie": "4.4.4",
+    "liquidjs": "10.24.0"
   }
 }

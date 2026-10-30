@@ -498,6 +498,20 @@ export const WhiteSpace = createToken({
   group: Lexer.SKIPPED
 });
 
+export const LiquidInlineComment = createToken({
+  name: 'LiquidInlineComment',
+  pattern: /\{%-?[ \t]*#(?:(?!-?%\})[^\r\n])*(?:\r?\n[ \t]*(?:#(?:(?!-?%\})[^\r\n])*|(?=\r?\n|-?%\})))*-?%\}/,
+  group: Lexer.SKIPPED,
+  line_breaks: true
+});
+
+export const LiquidBlockComment = createToken({
+  name: 'LiquidBlockComment',
+  pattern: /\{%-?\s*comment\s*-?%\}[\s\S]*?\{%-?\s*endcomment\s*-?%\}/,
+  group: Lexer.SKIPPED,
+  line_breaks: true
+});
+
 export const WikiLinkValue = createToken({
   name: 'WikiLinkValue',
   pattern: /\[\[[^\]\r\n]+\]\]/,
@@ -554,12 +568,14 @@ export const TagLiteral = createToken({
 
 export const Identifier = createToken({
   name: 'Identifier',
-  pattern: /[^\s()\[\]:"'><=!]+/,
+  pattern: /[^\s()\[\]{}:"'><=!]+/,
   label: 'identifier'
 });
 
 export const ALL_TOKENS = [
   WhiteSpace,
+  LiquidInlineComment,
+  LiquidBlockComment,
   WikiLinkValue,
   LParen,
   RParen,

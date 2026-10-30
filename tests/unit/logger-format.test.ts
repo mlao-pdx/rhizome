@@ -73,6 +73,17 @@ describe('redactQuerySyntax', () => {
 			'[file.created: @today-9d..@today+99d]',
 		);
 	});
+
+	it('redacts sensitive letters and digits inside skipped Liquid inline and block comments while preserving query operators and built-in scopes', () => {
+		const raw =
+			'{% # SecretNote 42 %} tag:work AND {%- comment -%} Private 99 {%- endcomment -%} [file.modified: >= @today]';
+		expect(redactQuerySyntax(raw)).toBe(
+			'{% # XxxxxxXxxx 99 %} tag:xxxx AND {%- xxxxxxx -%} Xxxxxxx 99 {%- xxxxxxxxxx -%} [file.modified: >= @today]',
+		);
+
+		const commentOnly = '{% # OnlySecret 123 %}';
+		expect(redactQuerySyntax(commentOnly)).toBe('{% # XxxxXxxxxx 999 %}');
+	});
 });
 
 describe('escapeMarkdownTableCell', () => {

@@ -1,7 +1,9 @@
 import { FileSystemAdapter, Plugin } from 'obsidian';
+import { createRhizomeEditorExtension } from './adapters/codemirror/rhizome-editor-extension';
 import { DexiePersistenceAdapter } from './adapters/dexie-persistence-adapter';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
 import { PluginDataStore } from './adapters/plugin-data-store';
+import { processRhizomeCodeBlock } from './adapters/rhizome-codeblock';
 import {
 	explainVaultQuery,
 	runVaultQuery,
@@ -67,6 +69,11 @@ export default class RhizomePlugin extends Plugin {
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new RhizomeSettingTab(this.app, this));
+
+		this.registerMarkdownCodeBlockProcessor('rhizome', (source, el, ctx) =>
+			processRhizomeCodeBlock(source, el, ctx, this),
+		);
+		this.registerEditorExtension(createRhizomeEditorExtension(this.app, this.loggerAdapter));
 
 		this.app.workspace.onLayoutReady(() => {
 			if (this.settings.loggingEnabled) {

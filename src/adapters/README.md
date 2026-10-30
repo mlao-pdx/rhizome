@@ -13,11 +13,13 @@ See `docs/dev/tsdoc-conventions.md` for the doc-comment format (`@see`/
 
 ## Current adapters
 
-| Adapter                   | Implements        | Wraps                                                                                                                                                                     |
-| ------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ObsidianLoggerAdapter`   | `LoggerPort`      | `Vault.adapter` (`DataAdapter`), writing segmented Markdown tables under `◊Rhizome/logs/<epoch>.md`                                                                       |
-| `DexiePersistenceAdapter` | `PersistencePort` | Dexie over IndexedDB, at an address scoped to the plugin and vault location — see `docs/dev/indexeddb-database-identity.md`                                               |
-| `vault-query-runner.ts`   | —                 | `App.vault` (`getMarkdownFiles`, `adapter.read` on `types.json`) and `App.metadataCache` (`getFileCache`, `getFirstLinkpathDest`) to run search queries against the vault |
+| Adapter                                  | Implements        | Wraps                                                                                                                                                                     |
+| ---------------------------------------- | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ObsidianLoggerAdapter`                  | `LoggerPort`      | `Vault.adapter` (`DataAdapter`), writing segmented Markdown tables under `◊Rhizome/logs/<epoch>.md`                                                                       |
+| `DexiePersistenceAdapter`                | `PersistencePort` | Dexie over IndexedDB, at an address scoped to the plugin and vault location — see `docs/dev/indexeddb-database-identity.md`                                               |
+| `vault-query-runner.ts`                  | —                 | `App.vault` (`getMarkdownFiles`, `adapter.read` on `types.json`) and `App.metadataCache` (`getFileCache`, `getFirstLinkpathDest`) to run search queries against the vault |
+| `rhizome-codeblock.ts`                   | —                 | `MarkdownRenderer.render` and `MarkdownRenderChild` to execute `renderRhizomeTemplate` inside fenced `rhizome` Markdown codeblocks                                        |
+| `codemirror/rhizome-editor-extension.ts` | —                 | CodeMirror 6 `ViewPlugin` and `hoverTooltip` to highlight Liquid + query DSL syntax and render inline diagnostic tooltips inside fenced `rhizome` codeblocks              |
 
 ## Pure helpers
 

@@ -2,10 +2,12 @@ import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
 	collectReferencedPropertyKeys,
+	compileQuery,
 	decodeQuotedString,
 	deepFreezeAST,
 	initEngineConfig,
 	isVirtualFileKey,
+	MAX_QUERY_LENGTH,
 	normalizeAST,
 	parseQuery,
 	SearchLexer,
@@ -257,6 +259,101 @@ describe('Phase 4 parser, AST normalizer, literal decoder & fuzz invariants', ()
 					if (diagnostic.span) assertValidSpan(diagnostic.span, input.length);
 				}
 				expect(JSON.parse(JSON.stringify(res))).toEqual(res);
+			}),
+		);
+	});
+
+	it('Comment Injection Equivalence Invariant: injecting valid Liquid inline/block comments preserves normalizeAST and compileQuery executability while shifting token offsets', async () => {
+		const safeCommentBodyArb = fc
+			.string({ maxLength: 32 })
+			.map((s) => s.replace(/%\}|\r|\n/g, ' '));
+		const validLiquidCommentArb = fc.oneof(
+			safeCommentBodyArb.map((body) => `{% # ${body} %}`),
+			fc
+				.tuple(safeCommentBodyArb, safeCommentBodyArb)
+				.map(([l1, l2]) => `{%- # ${l1}\n  # ${l2} -%}`),
+			safeCommentBodyArb
+				.map((s) => s.replace(/endcomment/gi, 'end_comment'))
+				.map((body) => `{% comment %}${body}{% endcomment %}`),
+		);
+
+		await assertProperty(
+			'search/parser__liquid-comment-injection-equivalence',
+			fc.property(
+				printableAstArb,
+				validLiquidCommentArb,
+				validLiquidCommentArb,
+				(ast, prefixComment, suffixComment) => {
+					const printed = printAST(ast);
+					const withComments = `${prefixComment}\n${printed}\n${suffixComment}`;
+					fc.pre(withComments.length <= MAX_QUERY_LENGTH);
+
+					const baseParsed = parseQuery(printed);
+					const commentedParsed = parseQuery(withComments);
+
+					expect(baseParsed.ast).not.toBeNull();
+					expect(commentedParsed.ast).not.toBeNull();
+					expect(normalizeAST(commentedParsed.ast!)).toEqual(
+						normalizeAST(baseParsed.ast!),
+					);
+
+					const baseCompiled = compileQuery(printed, resolvedConfig, PINNED_REF_MS);
+					const commentedCompiled = compileQuery(
+						withComments,
+						resolvedConfig,
+						PINNED_REF_MS,
+					);
+					expect(commentedCompiled.executable).toBe(baseCompiled.executable);
+
+					const baseTokens = SearchLexer.tokenize(printed).tokens;
+					const commentedTokens = SearchLexer.tokenize(withComments).tokens;
+					expect(commentedTokens.length).toBe(baseTokens.length);
+
+					const offsetDelta = prefixComment.length + 1;
+					for (let i = 0; i < baseTokens.length; i++) {
+						expect(commentedTokens[i]!.image).toBe(baseTokens[i]!.image);
+						expect(commentedTokens[i]!.startOffset).toBe(
+							baseTokens[i]!.startOffset + offsetDelta,
+						);
+					}
+				},
+			),
+		);
+	});
+
+	it('Disallowed Liquid Syntax Rejection Invariant: unquoted {{ ... }}, non-comment {% ... %}, unclosed {% comment %}, or invalid multi-line {% # ... %} emits SYNTAX_ERROR', async () => {
+		const identArb = fc.stringMatching(/^[a-zA-Z][a-zA-Z0-9_]{0,12}$/);
+		const nonCommentTagKeywordArb = fc.constantFrom(
+			'if',
+			'for',
+			'assign',
+			'capture',
+			'unless',
+			'case',
+			'raw',
+			'render',
+		);
+		const disallowedSnippetArb = fc.oneof(
+			identArb.map((v) => `{{ ${v} }}`),
+			fc.tuple(nonCommentTagKeywordArb, identArb).map(([kw, v]) => `{% ${kw} ${v} %}`),
+			identArb.map((v) => `{% comment %} ${v}`),
+			fc.tuple(identArb, identArb).map(([a, b]) => `{% # ${a}\n ${b} %}`),
+		);
+
+		await assertProperty(
+			'search/parser__disallowed-liquid-syntax-rejection',
+			fc.property(printableAstArb, disallowedSnippetArb, (ast, badSnippet) => {
+				const printed = printAST(ast);
+				const combined = `${printed} ${badSnippet}`;
+				fc.pre(combined.length <= MAX_QUERY_LENGTH);
+
+				const parsed = parseQuery(combined);
+				expect(parsed.ast).toBeNull();
+				expect(parsed.diagnostics.some((d) => d.code === 'SYNTAX_ERROR')).toBe(true);
+
+				const compiled = compileQuery(combined, resolvedConfig, PINNED_REF_MS);
+				expect(compiled.executable).toBe(false);
+				expect(compiled.prepared).toBeNull();
 			}),
 		);
 	});

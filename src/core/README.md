@@ -14,6 +14,11 @@ a concrete adapter. If it can be unit-tested with an in-memory fake
 instead of the real Obsidian API or a real Dexie database, it belongs
 here.
 
+### Current modules
+
+- `src/core/search/` — Chevrotain lexer/parser (`SearchLexer`, `SearchParser`, including skipped Liquid comments `{% # ... %}` and `{% comment %}...{% endcomment %}`), metadata normalizer, semantic validator, linter, execution planner, evaluator, and progressive-shrinking `explainQuery` plan generator.
+- `src/core/templates/` — Pure LiquidJS template engine (`renderRhizomeTemplate`), `{% query <name> [explain] %} ... {% endquery %}` custom tag (`query-tag.ts`), and static codeblock token/diagnostic analyzer (`analyzeRhizomeCodeBlock`).
+
 ## What does not belong here
 
 - Anything that touches `metadataCache`, `vault`, or Dexie directly — that

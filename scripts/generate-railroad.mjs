@@ -3,6 +3,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import { fileURLToPath } from 'node:url';
 import { createJiti } from 'jiti';
+import { Lexer } from 'chevrotain';
 import prettier from 'prettier';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -335,9 +336,9 @@ export async function generateRailroadDocs() {
 		}
 	}
 
-	const nonSkippedTokenCount = ALL_TOKENS.filter(
-		(tok) => tok.GROUP !== 'whitespace' && tok.name !== 'WhiteSpace',
-	).length;
+	const isSkippedToken = (tok) =>
+		tok.GROUP === Lexer.SKIPPED || tok.GROUP === 'whitespace' || tok.name === 'WhiteSpace';
+	const nonSkippedTokenCount = ALL_TOKENS.filter((tok) => !isSkippedToken(tok)).length;
 
 	const lines = [
 		'# Filter Syntax Railroad Diagrams',
@@ -399,7 +400,7 @@ export async function generateRailroadDocs() {
 	ALL_TOKENS.forEach((tok, idx) => {
 		const priority = idx + 1;
 		const name = `\`${tok.name}\``;
-		const isSkipped = tok.GROUP === 'whitespace' || tok.name === 'WhiteSpace';
+		const isSkipped = isSkippedToken(tok);
 		const label = isSkipped ? '*(skipped)*' : `\`'${escapeMarkdownTableCell(tok.LABEL)}'\``;
 		const patternStr =
 			tok.PATTERN instanceof RegExp ? tok.PATTERN.source : String(tok.PATTERN ?? '');

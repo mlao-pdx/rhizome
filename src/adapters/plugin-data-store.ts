@@ -1,3 +1,9 @@
+import {
+	DEFAULT_LAYOUTS_FOLDER,
+	DEFAULT_PARTIALS_FOLDER,
+	DEFAULT_TEMPLATES_FOLDER,
+	normalizeTemplateFolderPath,
+} from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import type { RhizomeSettings } from '../settings';
 import { isValidVaultInstanceId, mintVaultInstanceId } from './database-identity';
@@ -155,6 +161,18 @@ function mergeSettings(defaults: RhizomeSettings, raw: unknown): RhizomeSettings
 	return {
 		...defaults,
 		...(raw as Partial<RhizomeSettings>),
+		templatesFolder: normalizeTemplateFolderPath(
+			typeof candidate.templatesFolder === 'string' ? candidate.templatesFolder : undefined,
+			defaults.templatesFolder ?? DEFAULT_TEMPLATES_FOLDER,
+		),
+		partialsFolder: normalizeTemplateFolderPath(
+			typeof candidate.partialsFolder === 'string' ? candidate.partialsFolder : undefined,
+			defaults.partialsFolder ?? DEFAULT_PARTIALS_FOLDER,
+		),
+		layoutsFolder: normalizeTemplateFolderPath(
+			typeof candidate.layoutsFolder === 'string' ? candidate.layoutsFolder : undefined,
+			defaults.layoutsFolder ?? DEFAULT_LAYOUTS_FOLDER,
+		),
 		loggingEnabled:
 			typeof candidate.loggingEnabled === 'boolean'
 				? candidate.loggingEnabled

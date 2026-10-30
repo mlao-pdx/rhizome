@@ -32,12 +32,37 @@ export class Plugin {
 		this.registeredCleanups.push(callback);
 	}
 
+	registerMarkdownCodeBlockProcessor(
+		_language: string,
+		_handler: (source: string, el: HTMLElement, ctx: unknown) => unknown,
+	): void {}
+
+	registerEditorExtension(_extension: unknown): void {}
+
 	async loadData(): Promise<unknown> {
 		return undefined;
 	}
 
 	async saveData(_data: unknown): Promise<void> {}
 }
+
+export class MarkdownRenderChild {
+	containerEl: unknown;
+
+	constructor(containerEl: unknown) {
+		this.containerEl = containerEl;
+	}
+}
+
+export const MarkdownRenderer = {
+	render: async (
+		_app: unknown,
+		_markdown: string,
+		_el: unknown,
+		_sourcePath: string,
+		_component: unknown,
+	): Promise<void> => {},
+};
 
 /**
  * Messages passed to `Notice` constructions, in order. Tests assert on

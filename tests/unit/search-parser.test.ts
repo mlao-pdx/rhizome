@@ -688,4 +688,54 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 		const keys = collectReferencedPropertyKeys(res.ast!);
 		expect(Array.from(keys).sort()).toEqual(['due date', 'priority', 'status']);
 	});
+
+	it('skips Liquid inline comments ({% # ... %}) and block comments ({% comment %}...{% endcomment %}) while preserving multi-line SourceSpans', () => {
+		const commentOnly = parseQuery(
+			'{% # single line %}\n{%- comment -%}\nignored\n{%- endcomment -%}',
+		);
+		expect(commentOnly.diagnostics).toEqual([]);
+		expect(commentOnly.ast).toEqual({ type: 'MATCH_ALL' });
+
+		const multiLineQuery = [
+			'{% # first line',
+			'   # second line',
+			'-%}',
+			'tag:work {% comment %}',
+			'multi-line block comment',
+			'{% endcomment %} [status: = "active"]',
+		].join('\n');
+
+		const parsed = parseQuery(multiLineQuery);
+		expect(parsed.diagnostics.filter((d) => d.severity === 'error')).toEqual([]);
+		expect(parsed.ast).not.toBeNull();
+
+		const baseline = parseQuery('tag:work [status: = "active"]');
+		expect(normalizeAST(parsed.ast!)).toEqual(normalizeAST(baseline.ast!));
+
+		const logical = parsed.ast as LogicalNode;
+		const firstChild = logical.children[0] as ScopedFilterNode;
+		const secondChild = logical.children[1] as ScopedFilterNode;
+		expect(firstChild.span?.startLine).toBe(4);
+		expect(firstChild.span?.startColumn).toBe(1);
+		expect(secondChild.span?.startLine).toBe(6);
+	});
+
+	it('rejects non-comment Liquid tags, output expressions, unclosed comments, and malformed multi-line inline comments while allowing braces in strings and regexes', () => {
+		const invalidInputs = [
+			'tag:work {{ someVar }}',
+			'{% if x %} tag:work {% endif %}',
+			'tag:work {% comment %} unclosed',
+			'{% # line 1\n missing hash on line 2 %} tag:work',
+			'unquoted{brace}',
+		];
+		for (const input of invalidInputs) {
+			const res = parseQuery(input);
+			expect(res.ast).toBeNull();
+			expect(res.diagnostics.some((d) => d.code === 'SYNTAX_ERROR')).toBe(true);
+		}
+
+		const validBraces = parseQuery('"[{\\"a\\": 1}]" AND /^a{2,4}$/ AND links:[[Note {1}]]');
+		expect(validBraces.diagnostics.filter((d) => d.severity === 'error')).toEqual([]);
+		expect(validBraces.ast).not.toBeNull();
+	});
 });
