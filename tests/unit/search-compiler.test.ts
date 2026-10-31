@@ -244,8 +244,13 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 			severity: 'error',
 			issue: '"high" is not a valid number for property "priority".',
 			hint: null,
+			span: {
+				startOffset: 17,
+				endOffset: 21,
+				startLine: 1,
+				startColumn: 18,
+			},
 		});
-		expect(r1.diagnostics[0]?.span).not.toBeNull();
 
 		const r2 = compileQuery('[priority: = /10/]', config, PINNED_REF_MS);
 		expect(r2.executable).toBe(false);

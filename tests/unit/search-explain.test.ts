@@ -285,10 +285,10 @@ describe('explainQuery', () => {
 		expect(md).toContain('## Logic Breakdown');
 		expect(md).toContain('- `bogus:value`\n    ❌ Unknown search scope `bogus:`. · [^3]');
 		expect(md).toContain(
-			'- `[priority: = "nan"]`\n    ❌ `priority`[^4] ❌ `"nan"` (expected an unquoted number such as `42` or `-3.5`). · [^5]',
+			'- `[priority: = "nan"]`\n    `priority`[^4] ❌ `"nan"` (expected an unquoted number such as `42` or `-3.5`). · [^5]',
 		);
 		expect(md).toContain(
-			'- `[done: > true]`\n    ❌ `done`[^6] ❌ `true` (ordering comparison is not supported on `checkbox` properties). · [^7]',
+			'- `[done: > true]`\n    `done`[^6] ❌ `true` (ordering comparison is not supported on `checkbox` properties). · [^7]',
 		);
 		expect(md).toContain(
 			'- `[unconfigured_prop: = "ok"]`\n    `unconfigured_prop`[^8] equals `"ok"` (case-insensitive).',
@@ -297,9 +297,22 @@ describe('explainQuery', () => {
 		expect(md).toContain('> [!danger] Error 1: `ERROR_UNKNOWN_SCOPE`');
 		expect(md).toContain('‼️bogus:value‼️');
 		expect(md).toContain('> [!danger] Error 2: `ERROR_TYPE_MISMATCH`');
-		expect(md).toContain('‼️[priority: = "nan"]‼️');
+		expect(md).toContain('[priority: = ‼️"nan"‼️]');
 		expect(md).toContain('> [!danger] Error 3: `ERROR_INVALID_OPERATOR_FOR_TYPE`');
 		expect(md).toContain('‼️[done: > true]‼️');
+
+		const datetimeErrMd = explainQuery(
+			'[~created: @thismoonth]',
+			makeConfig({ propertyTypes: { '~created': 'datetime' } }),
+			REF_TIME_MS,
+		);
+		expect(datetimeErrMd).toContain(
+			'- `[~created: @thismoonth]`\n  `~created`[^3] ❌ `@thismoonth` (invalid datetime expression: `INVALID_FORMAT`). · [^4]',
+		);
+		expect(datetimeErrMd).toContain(
+			'> [!danger] Error 1: `ERROR_TYPE_MISMATCH` (line 1, column 12)',
+		);
+		expect(datetimeErrMd).toContain('1 | [~created: ‼️@thismoonth‼️]');
 	});
 
 	it('handles syntax errors, invalid EngineConfig, and invalid referenceTimeMs gracefully', () => {

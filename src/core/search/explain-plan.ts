@@ -720,9 +720,11 @@ export function explainQuery(
 						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
 						const leafDiag = consumeDiagLinksForSpan(node.valueExpr.span);
 						const remDiag = consumeUnattachedContainedDiags(node.span);
+						const singleLeafPrefix =
+							leafDesc.startsWith('❌ ') && node.key.length > 0 ? '' : prefix;
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ${prefix}${propTargetLabel} ${leafDesc}.${exactDiagSuffix}${leafDiag}${remDiag}`,
+							`${indent}  ${singleLeafPrefix}${propTargetLabel} ${leafDesc}.${exactDiagSuffix}${leafDiag}${remDiag}`,
 						);
 					} else if (node.valueExpr) {
 						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);

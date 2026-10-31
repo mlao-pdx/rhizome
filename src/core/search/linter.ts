@@ -92,21 +92,23 @@ function isUnclosedRegexMatcher(
 
 function lintUnclosedRegexInValueExpr(
 	expr: ValueExprAST,
-	span: SourceSpan | null,
+	fallbackSpan: SourceSpan | null,
 	diagnostics: SearchDiagnostic[],
 ): void {
 	switch (expr.type) {
 		case 'VALUE_LEAF':
 			if (isUnclosedRegexMatcher(expr.matcher)) {
-				diagnostics.push(createUnclosedRegexHint(expr.matcher.value, span));
+				diagnostics.push(
+					createUnclosedRegexHint(expr.matcher.value, expr.span ?? fallbackSpan),
+				);
 			}
 			return;
 		case 'VALUE_NOT':
-			lintUnclosedRegexInValueExpr(expr.child, span, diagnostics);
+			lintUnclosedRegexInValueExpr(expr.child, expr.span ?? fallbackSpan, diagnostics);
 			return;
 		case 'VALUE_LOGICAL':
 			for (const child of expr.children) {
-				lintUnclosedRegexInValueExpr(child, span, diagnostics);
+				lintUnclosedRegexInValueExpr(child, expr.span ?? fallbackSpan, diagnostics);
 			}
 			return;
 	}

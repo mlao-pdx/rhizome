@@ -76,13 +76,15 @@ export function suggestScopeHint(
 	return bestMatch !== null ? `Did you mean "${bestMatch}:"?` : null;
 }
 
+type ValueLeafNode = Extract<ValueExprAST, { type: 'VALUE_LEAF' }>;
+
 function collectValueExprLeaves(
 	expr: ValueExprAST,
-	out: LeafMatcher[] = [],
-): readonly LeafMatcher[] {
+	out: ValueLeafNode[] = [],
+): readonly ValueLeafNode[] {
 	switch (expr.type) {
 		case 'VALUE_LEAF':
-			out.push(expr.matcher);
+			out.push(expr);
 			return out;
 		case 'VALUE_NOT':
 			return collectValueExprLeaves(expr.child, out);
@@ -96,11 +98,12 @@ function collectValueExprLeaves(
 
 function validateRegexLeavesInValueExpr(
 	expr: ValueExprAST,
-	span: SourceSpan | null,
+	fallbackSpan: SourceSpan | null,
 	diagnostics: SearchDiagnostic[],
 ): boolean {
 	let hadInvalidRegex = false;
-	for (const matcher of collectValueExprLeaves(expr)) {
+	for (const leafNode of collectValueExprLeaves(expr)) {
+		const matcher = leafNode.matcher;
 		if (matcher.kind === 'regex') {
 			if (validateRegexLiteral(matcher.pattern, matcher.flags) === null) {
 				hadInvalidRegex = true;
@@ -109,7 +112,7 @@ function validateRegexLeavesInValueExpr(
 					severity: 'error',
 					issue: `Invalid regular expression "/${matcher.pattern}/${matcher.flags}".`,
 					hint: null,
-					span,
+					span: leafNode.span ?? fallbackSpan,
 				});
 			}
 		}
@@ -119,13 +122,14 @@ function validateRegexLeavesInValueExpr(
 
 function validateComparisonLeaf(
 	leaf: Extract<LeafMatcher, { kind: 'string' }>,
+	leafSpan: SourceSpan | undefined,
 	propType: ObsidianPropertyType,
 	node: PropertyFilterNode,
 	resolvedConfig: ResolvedEngineConfig,
 	referenceTimeMs: number,
 	diagnostics: SearchDiagnostic[],
 ): boolean {
-	const span = node.span ?? null;
+	const span = leafSpan ?? node.span ?? null;
 	switch (propType) {
 		case 'checkbox': {
 			const lower = leaf.value.trim().toLowerCase();
@@ -359,10 +363,12 @@ export function validateQueryAST(
 				}
 
 				// Step 4b: Leaf literal value validation for :, =, !=, <, >, <=, >=
-				for (const matcher of collectValueExprLeaves(node.valueExpr)) {
+				for (const leafNode of collectValueExprLeaves(node.valueExpr)) {
+					const matcher = leafNode.matcher;
 					if (matcher.kind === 'string') {
 						const valid = validateComparisonLeaf(
 							matcher,
+							leafNode.span,
 							propType,
 							node,
 							resolvedConfig,
