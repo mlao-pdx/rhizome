@@ -135,8 +135,8 @@ export function createOriginWikiLinkResolver(
 		let orderIndex = 0;
 		for (const b of Object.values(blocks)) {
 			const currentOrder = orderIndex++;
-			const cleanedId = b.id.startsWith('^') ? b.id.slice(1) : b.id;
-			if (cleanedId.length === 0 || WIKILINK_UNSAFE_RE.test(cleanedId)) {
+			const cleanedId = b.id.replace(/^\^+/, '');
+			if (cleanedId.trim().length === 0 || WIKILINK_UNSAFE_RE.test(cleanedId)) {
 				continue;
 			}
 			const bStart = b.position?.start?.offset;
@@ -530,7 +530,7 @@ export function normalizeObsidianMetadata(
 	);
 
 	const blocks = Object.values(cache?.blocks ?? {})
-		.map((b) => (b.id.startsWith('^') ? b.id.slice(1) : b.id))
+		.map((b) => b.id.replace(/^\^+/, ''))
 		.filter((id) => id.length > 0);
 
 	const size = tfile.stat.size === 0 ? 0 : tfile.stat.size;

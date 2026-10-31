@@ -427,8 +427,17 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			{ tag: 'work/urgent', source: 'body', origin: '[[RootNote.md|RootNote]]' },
 			{ tag: 'inline-tag', source: 'body', origin: '[[RootNote.md|RootNote]]' },
 		]);
-		expect(doc.properties['tags']).toEqual(['Project', 'work/urgent', 'work/urgent']);
-		expect(doc.properties['tag']).toBe('extra-tag');
+		expect(doc.properties['tags']).toBeUndefined();
+		expect(doc.properties['tag']).toBeUndefined();
+		expect(doc.properties['aliases']).toBeUndefined();
+		expect(doc.properties['alias']).toBeUndefined();
+		expect(doc.propertyKeys).toEqual([]);
+		expect(doc.propertyOccurrences.find((o) => o.key === 'tags')?.rawValue).toEqual([
+			'Project',
+			'work/urgent',
+			'work/urgent',
+		]);
+		expect(doc.propertyOccurrences.find((o) => o.key === 'tag')?.rawValue).toBe('extra-tag');
 		expect(doc.aliases).toEqual(['First Alias', '42', 'Second Alias']);
 		expect(doc.headings).toEqual([
 			{ text: 'H1', level: 1 },
@@ -462,11 +471,12 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 
 		const docEmptyScalarTag = normalizeObsidianMetadata(
 			makeFile(),
-			{ frontmatter: { tags: '' } },
+			{ frontmatter: { tags: '', '◊InternalRhizome': '00' } },
 			config,
 		);
-		expect(docEmptyScalarTag.propertyKeys).toEqual(['tags']);
-		expect(docEmptyScalarTag.properties['tags']).toBeNull();
+		expect(docEmptyScalarTag.propertyKeys).toEqual([]);
+		expect(docEmptyScalarTag.properties['tags']).toBeUndefined();
+		expect(docEmptyScalarTag.properties['◊internalrhizome']).toBeUndefined();
 		expect(docEmptyScalarTag.propertyOccurrences[0]?.typedValues).toEqual([{ kind: 'null' }]);
 	});
 
@@ -609,7 +619,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			tfile,
 			{
 				frontmatter: {
-					tags: fmList,
+					categories: fmList,
 				},
 			},
 			config,
@@ -620,18 +630,18 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		expect(doc.file.modified).toBe(1700000005000);
 		expect(doc.file.size).toBe(512);
 		expect(doc.propertyOccurrences[0]?.rawValue).not.toBe(fmList);
-		expect(doc.properties['tags']).not.toBe(fmList);
-		expect(doc.properties['tags']).not.toBe(doc.propertyOccurrences[0]?.rawValue);
+		expect(doc.properties['categories']).not.toBe(fmList);
+		expect(doc.properties['categories']).not.toBe(doc.propertyOccurrences[0]?.rawValue);
 
 		// Mutating caller inputs must not affect the normalized document
 		inputStat.size = 999999;
 		fmList.push('mutated-input');
 		expect(doc.file.size).toBe(512);
 		expect(doc.propertyOccurrences[0]?.rawValue).toEqual(['alpha', 'beta']);
-		expect(doc.properties['tags']).toEqual(['alpha', 'beta']);
+		expect(doc.properties['categories']).toEqual(['alpha', 'beta']);
 
 		// Mutating doc.properties[key] array must not corrupt doc.propertyOccurrences[0].rawValue
-		(doc.properties['tags'] as unknown[]).push('mutated-view');
+		(doc.properties['categories'] as unknown[]).push('mutated-view');
 		expect(doc.propertyOccurrences[0]?.rawValue).toEqual(['alpha', 'beta']);
 	});
 

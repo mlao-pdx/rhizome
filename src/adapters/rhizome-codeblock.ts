@@ -1,18 +1,40 @@
 import {
+	getLanguage,
 	type MarkdownPostProcessorContext,
 	MarkdownRenderChild,
 	MarkdownRenderer,
 	normalizePath,
+	Platform,
 } from 'obsidian';
 import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
 import {
+	buildHostNoteQuery,
+	HOST_QUERY_KEY,
 	parseRhizomeTemplatePass1,
 	renderParsedRhizomeTemplate,
 	type TemplateRenderResult,
+	type TemplateRuntimeContext,
 } from '@core/templates';
 import type RhizomePlugin from '../main';
 import { markSensitive } from './logger-format';
-import type { VaultQueryResult } from './vault-query-runner';
+import { resolveDefaultTimeZone, type VaultQueryResult } from './vault-query-runner';
+
+function buildRuntimeContext(
+	plugin: RhizomePlugin,
+	referenceTimeMs: number,
+): TemplateRuntimeContext {
+	const vaultWithGetName = plugin.app.vault as { getName?: () => string };
+	const vaultName =
+		typeof vaultWithGetName.getName === 'function' ? vaultWithGetName.getName() : '';
+	const language = typeof getLanguage === 'function' ? getLanguage() : 'en';
+	return {
+		referenceTimeMs,
+		timeZone: resolveDefaultTimeZone(),
+		vault: vaultName,
+		language,
+		platform: Platform,
+	};
+}
 
 async function readVaultTemplateNote(
 	plugin: RhizomePlugin,
@@ -135,6 +157,7 @@ export async function processRhizomeCodeBlock(
 			parsed,
 			Object.freeze({}),
 			(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
+			buildRuntimeContext(plugin, referenceTimeMs),
 		);
 		if (abortController.signal.aborted || generation !== renderGeneration) {
 			return;
@@ -146,13 +169,22 @@ export async function processRhizomeCodeBlock(
 	}
 
 	const queries = parsed.env.queries;
-	if (queries.length === 0) {
+	const queryMap = Object.create(null) as Record<string, string>;
+	if (sourcePath.length > 0) {
+		queryMap[HOST_QUERY_KEY] = buildHostNoteQuery(sourcePath);
+	}
+	for (const q of queries) {
+		queryMap[q.name] = q.query;
+	}
+
+	if (Object.keys(queryMap).length === 0) {
 		const generation = ++renderGeneration;
 		const result = await renderParsedRhizomeTemplate(
 			source,
 			parsed,
 			Object.freeze({}),
 			(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
+			buildRuntimeContext(plugin, referenceTimeMs),
 		);
 		if (abortController.signal.aborted || generation !== renderGeneration) {
 			return;
@@ -161,11 +193,6 @@ export async function processRhizomeCodeBlock(
 		logCodeBlockRenderResult(plugin, sourcePath, result, durationMs);
 		await renderIntoContainer(result.markdown, generation);
 		return;
-	}
-
-	const queryMap = Object.create(null) as Record<string, string>;
-	for (const q of queries) {
-		queryMap[q.name] = q.query;
 	}
 
 	const onUpdate = async (newPayload: VaultQueryResult): Promise<void> => {
@@ -180,6 +207,7 @@ export async function processRhizomeCodeBlock(
 			newPayload,
 			(query, heading) =>
 				plugin.explainQuery(query, { referenceTimeMs: updateStartedAt, heading }),
+			buildRuntimeContext(plugin, updateStartedAt),
 		);
 		if (abortController.signal.aborted || generation !== renderGeneration) {
 			return;
@@ -204,6 +232,7 @@ export async function processRhizomeCodeBlock(
 		parsed,
 		initialPayload,
 		(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
+		buildRuntimeContext(plugin, referenceTimeMs),
 	);
 	if (abortController.signal.aborted || initialGeneration !== renderGeneration) {
 		return;

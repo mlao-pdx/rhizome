@@ -251,10 +251,21 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					inlineProps,
 				);
 
-				// 1. propertyKeys equals deduplicated sequence of occ.key in exact first-appearance order
+				// 1. propertyKeys equals deduplicated sequence of non-omitted occ.key in exact first-appearance order
+				const omittedKeys = new Set([
+					'tag',
+					'tags',
+					'alias',
+					'aliases',
+					'◊internalrhizome',
+				]);
 				const expectedKeys: string[] = [];
 				const occsByKey = new Map<string, typeof doc.propertyOccurrences>();
 				for (const occ of doc.propertyOccurrences) {
+					if (omittedKeys.has(occ.key)) {
+						expect(doc.properties[occ.key]).toBeUndefined();
+						continue;
+					}
 					if (!occsByKey.has(occ.key)) {
 						expectedKeys.push(occ.key);
 						occsByKey.set(occ.key, []);
@@ -535,7 +546,11 @@ describe('search metadata normalizer & property coercion invariants', () => {
 							expect(doc.tags[i - 1]! < t).toBe(true);
 						}
 					}
-					expect(doc.properties['tags']).toEqual(expectedFmTags);
+					expect(doc.properties['tags']).toBeUndefined();
+					expect(doc.propertyKeys).not.toContain('tags');
+					expect(doc.propertyOccurrences.find((o) => o.key === 'tags')?.rawValue).toEqual(
+						expectedFmTags,
+					);
 					for (const occ of doc.propertyOccurrences) {
 						if (occ.propertyType === 'tags') {
 							const rawList = Array.isArray(occ.rawValue)
@@ -559,7 +574,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 
 					// 3. blocks: non-empty, no leading '^', preserves exact casing from BlockCache.id
 					const expectedBlocks = Object.values(blocks)
-						.map((b) => (b.id.startsWith('^') ? b.id.slice(1) : b.id))
+						.map((b) => b.id.replace(/^\^+/, ''))
 						.filter((id) => id.length > 0);
 					expect(doc.blocks).toEqual(expectedBlocks);
 					for (const b of doc.blocks) {
@@ -834,11 +849,11 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					);
 					const allowedOriginPool = new Set<string>([noteOrigin]);
 					for (const b of Object.values(blocks)) {
-						const cleanedId = b.id.startsWith('^') ? b.id.slice(1) : b.id;
+						const cleanedId = b.id.replace(/^\^+/, '');
 						const bStart = b.position?.start?.offset;
 						const bEnd = b.position?.end?.offset;
 						if (
-							cleanedId.length > 0 &&
+							cleanedId.trim().length > 0 &&
 							!/[[\]#^|\r\n]/.test(cleanedId) &&
 							typeof bStart === 'number' &&
 							Number.isSafeInteger(bStart) &&

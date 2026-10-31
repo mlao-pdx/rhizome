@@ -43,7 +43,7 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 				const template = specs
 					.map(
 						(s) =>
-							`{% query ${s.name}${s.explain ? ' explain' : ''} %}${s.query}{% endquery %}\n{{ ${s.name}.size }}`,
+							`{% query ${s.name}${s.explain ? ' explain' : ''} %}${s.query}{% endquery %}\n{{ query.${s.name}.size }}`,
 					)
 					.join('\n');
 
@@ -96,13 +96,21 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 				const template = entries
 					.map(
 						(e) =>
-							`{% query ${e.name}${e.explain ? ' explain' : ''} %}${e.query}{% endquery %}\nCOUNT_${e.name}={{ ${e.name}.size | default: -1 }}`,
+							`{% query ${e.name}${e.explain ? ' explain' : ''} %}${e.query}{% endquery %}\nCOUNT_${e.name}={{ query.${e.name}.size | default: -1 }}`,
 					)
+					.concat([
+						'HOST={{ file.basename }}',
+						'HIDDEN_HOST={{ query["◊host"] | default: "NONE" }}',
+						'RANGE={{ yesterday..tomorrow }}',
+						'CMP={% if today == thisyear and yesterday < today and tomorrow > today %}OK{% endif %}',
+					])
 					.join('\n');
 
 				const res = await renderRhizomeTemplate(template, {
 					runQueries: async () => {
-						const payload: Record<string, unknown[]> = {};
+						const payload: Record<string, unknown[]> = {
+							'◊host': [{ file: { basename: 'HostDoc' } }],
+						};
 						for (const e of entries) {
 							if (e.status === 'matches') {
 								payload[e.name] = [{ file: { basename: 'A' } }];
@@ -117,9 +125,17 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 						explainedNames.push(heading);
 						return `PLAN[${heading}]`;
 					},
+					runtimeContext: {
+						referenceTimeMs: Date.UTC(2026, 9, 31, 8, 33, 0, 0),
+						timeZone: 'UTC',
+					},
 				});
 
 				expect(res.ok).toBe(true);
+				expect(res.markdown).toContain('HOST=HostDoc');
+				expect(res.markdown).toContain('HIDDEN_HOST=NONE');
+				expect(res.markdown).toContain('RANGE=2026-10-30..2026-11-01');
+				expect(res.markdown).toContain('CMP=OK');
 				for (const e of entries) {
 					const shouldExplain = e.explain || e.status === 'failed';
 					const marker = `PLAN[Query Explain Plan: ${e.name}]`;

@@ -17,9 +17,9 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'{%- query emptyList -%}',
 			'  tag:none',
 			'{%- endquery -%}',
-			'Tasks ({{ tasks.size }}):',
-			'{% for item in tasks %}- {{ item.file.basename }}\n{% endfor %}',
-			'Empty ({{ emptyList.size }})',
+			'Tasks ({{ query.tasks.size }}):',
+			'{% for item in query.tasks %}- {{ item.file.basename }}\n{% endfor %}',
+			'Empty ({{ query.emptyList.size }})',
 		].join('\n');
 
 		const res = await renderRhizomeTemplate(template, { runQueries, explainQuery });
@@ -51,11 +51,11 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'{% query validWithExplain explain %}',
 			'  tag:project',
 			'{% endquery %}',
-			'Count: {{ validWithExplain.size }}',
+			'Count: {{ query.validWithExplain.size }}',
 			'{% query brokenQuery %}',
 			'  [invalid_syntax',
 			'{% endquery %}',
-			'After broken: {{ brokenQuery.size | default: 0 }}',
+			'After broken: {{ query.brokenQuery.size | default: 0 }}',
 		].join('\n');
 
 		const res = await renderRhizomeTemplate(template, { runQueries, explainQuery });
@@ -80,7 +80,7 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'{% query q %}',
 			'  tag:work {% comment %} ignore {% endquery %} inside comment {% endcomment %} [status: active]',
 			'{% endquery %}',
-			'Found: {{ q.size }}',
+			'Found: {{ query.q.size }}',
 		].join('\n');
 
 		const res = await renderRhizomeTemplate(template, { runQueries, explainQuery });
@@ -165,7 +165,7 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		const explainQuery = vi.fn(async (q: string, heading: string) => `# ${heading}\nRaw:${q}`);
 
 		const res = await renderRhizomeTemplate(
-			'{% query strayBrace %}{{% endquery %}\n{% query quotedBraces %}"{{hello"{% endquery %}\nMatched: {{ quotedBraces.size }}',
+			'{% query strayBrace %}{{% endquery %}\n{% query quotedBraces %}"{{hello"{% endquery %}\nMatched: {{ query.quotedBraces.size }}',
 			{ runQueries, explainQuery },
 		);
 		expect(res.ok).toBe(true);
@@ -221,7 +221,7 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			"{% layout 'frame' %}",
 			'{% query tasks %}tag:task{% endquery %}',
 			"{% assign partialName = 'row' %}",
-			'{% render partialName, label: "Tasks", count: tasks.size %}',
+			'{% render partialName, label: "Tasks", count: query.tasks.size %}',
 		].join('\n');
 
 		const okRes = await renderRhizomeTemplate(validTemplate, {
@@ -265,5 +265,226 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'◊Rhizome/partials/nested-query.md',
 		);
 		expect(nestedQueryInPartial.diagnostics[0]?.span).toBeNull();
+	});
+
+	it('exposes host note metadata via ◊host at the root scope, namespaces queries under query.*, and exposes vault/tz/language/platform globals', async () => {
+		const runQueries = vi.fn(async () => ({
+			'◊host': [
+				{
+					file: {
+						path: 'Projects/Alpha.md',
+						name: 'Alpha.md',
+						basename: 'Alpha',
+						extension: 'md',
+						folder: 'Projects',
+						parent: 'Projects',
+						created: 1700000000000,
+						modified: Date.UTC(2026, 9, 31, 8, 33, 0, 0),
+						size: 1024,
+					},
+					aliases: ['Project Alpha', 'PA'],
+					tags: ['project', 'active'],
+					tagLocations: [{ tag: 'project', source: 'frontmatter', origin: '[[Alpha]]' }],
+					headings: [{ text: 'Overview', level: 1 }],
+					links: [],
+					embeds: [],
+					blocks: ['summary-block'],
+					properties: { status: 'in-progress', priority: 1 },
+				},
+			],
+			myFirstQuery: [{ file: { basename: 'Task 1' } }, { file: { basename: 'Task 2' } }],
+		}));
+		const explainQuery = vi.fn(async () => '');
+
+		const template = [
+			'{%- query myFirstQuery -%}tag:task{%- endquery -%}',
+			'Host: {{ file.basename }} ({{ file.path }})',
+			'Status: {{ properties.status }}',
+			'Aliases: {% for a in aliases %}{{ a }}{% unless forloop.last %}, {% endunless %}{% endfor %}',
+			'Tags: {{ tags | join: "+" }}',
+			'Heading: {{ headings[0].text }}',
+			'Block: {{ blocks.first }}',
+			'Query items: {% for note in query.myFirstQuery %}{{ note.file.basename }};{% endfor %}',
+			'Hidden host in query: {{ query["◊host"] | default: "HIDDEN" }}',
+			'Env: {{ vault }} | {{ tz }} | {{ language }} | mac={{ platform.isMacOS }} | mobile={{ platform.isMobile }}',
+		].join('\n');
+
+		const res = await renderRhizomeTemplate(template, {
+			runQueries,
+			explainQuery,
+			runtimeContext: {
+				referenceTimeMs: Date.UTC(2026, 9, 31, 8, 33, 0, 0),
+				timeZone: 'UTC',
+				vault: 'NarradinVault',
+				language: 'en-GB',
+				platform: {
+					isDesktop: true,
+					isMobile: false,
+					isDesktopApp: true,
+					isMobileApp: false,
+					isIosApp: false,
+					isAndroidApp: false,
+					isPhone: false,
+					isTablet: false,
+					isMacOS: true,
+					isWin: false,
+					isLinux: false,
+					isSafari: false,
+				},
+			},
+		});
+
+		expect(res.ok).toBe(true);
+		expect(res.markdown).toContain('Host: Alpha (Projects/Alpha.md)');
+		expect(res.markdown).toContain('Status: in-progress');
+		expect(res.markdown).toContain('Aliases: Project Alpha, PA');
+		expect(res.markdown).toContain('Tags: project+active');
+		expect(res.markdown).toContain('Heading: Overview');
+		expect(res.markdown).toContain('Block: summary-block');
+		expect(res.markdown).toContain('Query items: Task 1;Task 2;');
+		expect(res.markdown).toContain('Hidden host in query: HIDDEN');
+		expect(res.markdown).toContain(
+			'Env: NarradinVault | UTC | en-GB | mac=true | mobile=false',
+		);
+	});
+
+	it('renders grain-guided ISO temporal literals, ranges, | date formatting, interval comparisons, and for-loop iteration', async () => {
+		// Pin to 2026-10-31T08:39:15.123Z in UTC
+		const refMs = Date.UTC(2026, 9, 31, 8, 39, 15, 123);
+		const runQueries = vi.fn(async () => ({
+			'◊host': [
+				{
+					file: {
+						path: 'Daily/2026-10-31.md',
+						name: '2026-10-31.md',
+						basename: '2026-10-31',
+						extension: 'md',
+						folder: 'Daily',
+						parent: 'Daily',
+						created: Date.UTC(2026, 9, 31, 6, 15, 0, 0),
+						modified: Date.UTC(2026, 9, 31, 8, 30, 0, 0),
+						size: 256,
+					},
+					aliases: [],
+					tags: [],
+					tagLocations: [],
+					headings: [],
+					links: [],
+					embeds: [],
+					blocks: [],
+					properties: {
+						due: '2026-10-31',
+						window: '2026-10-01..2026-10-31',
+					},
+				},
+			],
+			notes: [
+				{ file: { basename: 'TodayNote', created: Date.UTC(2026, 9, 31, 7, 0, 0, 0) } },
+				{ file: { basename: 'OldNote', created: Date.UTC(2026, 9, 20, 7, 0, 0, 0) } },
+			],
+		}));
+		const explainQuery = vi.fn(async () => '');
+
+		const template = [
+			'{%- query notes -%}* {%- endquery -%}',
+			'year={{ thisyear }}',
+			'lastyear={{ lastyear }}',
+			'nextyear={{ nextyear }}',
+			'quarter={{ thisquarter }}',
+			'month={{ thismonth }}',
+			'week={{ thisweek }}',
+			'today={{ today }}',
+			'yesterday={{ yesterday }}',
+			'tomorrow={{ tomorrow }}',
+			'minus7={{ today-7d }}',
+			'plus3={{ yesterday+3d }}',
+			'now={{ now }}',
+			'r_year_today={{ thisyear..today }}',
+			'r_month_year={{ thismonth..thisyear }}',
+			'r_today_now={{ today..now }}',
+			'r_paren={{ (yesterday..tomorrow) }}',
+			'fmt_mod={{ file.modified | date: "%Y-%m-%d %H:%M" }}',
+			'fmt_today={{ today | date: "%Y/%m/%d" }}',
+			'fmt_str_now={{ "now" | date: "%Y-%m-%d %H:%M" }}',
+			'fmt_to_str={{ today | date_to_string }}',
+			'where_today={% assign matching = query.notes | where_exp: "n", "n.file.created == today" %}{% for m in matching %}{{ m.file.basename }}{% endfor %}',
+			'cmp_created_today={% if file.created == today %}YES{% else %}NO{% endif %}',
+			'cmp_created_yesterday={% if file.created > yesterday %}YES{% else %}NO{% endif %}',
+			'cmp_created_tomorrow={% if file.created < tomorrow %}YES{% else %}NO{% endif %}',
+			'cmp_due_today={% if properties.due == today %}YES{% else %}NO{% endif %}',
+			'cmp_due_month={% if properties.due <= thismonth %}YES{% else %}NO{% endif %}',
+			'cmp_window_month={% if properties.window == thismonth %}YES{% else %}NO{% endif %}',
+			'cmp_null_neq={% if properties.missing != today %}YES{% else %}NO{% endif %}',
+			'cmp_null_eq={% if properties.missing == today %}YES{% else %}NO{% endif %}',
+			'iter_months={% for m in thismonth..thisyear %}{{ m }};{% endfor %}',
+			'iter_days={% for d in today-2d..today %}{{ d }};{% endfor %}',
+			'iter_mins={% for min in "2026-10-31T08:38"..now %}{{ min }};{% endfor %}',
+			'iter_num={% for n in (1..3) %}{{ n }}{% endfor %}',
+		].join('\n');
+
+		const res = await renderRhizomeTemplate(template, {
+			runQueries,
+			explainQuery,
+			runtimeContext: {
+				referenceTimeMs: refMs,
+				timeZone: 'UTC',
+			},
+		});
+
+		expect(res.ok).toBe(true);
+		expect(res.markdown).toContain('year=2026');
+		expect(res.markdown).toContain('lastyear=2025');
+		expect(res.markdown).toContain('nextyear=2027');
+		expect(res.markdown).toContain('quarter=2026-10..2026-12');
+		expect(res.markdown).toContain('month=2026-10');
+		expect(res.markdown).toContain('week=2026-10-26..2026-11-01');
+		expect(res.markdown).toContain('today=2026-10-31');
+		expect(res.markdown).toContain('yesterday=2026-10-30');
+		expect(res.markdown).toContain('tomorrow=2026-11-01');
+		expect(res.markdown).toContain('minus7=2026-10-24');
+		expect(res.markdown).toContain('plus3=2026-11-02');
+		expect(res.markdown).toContain('now=2026-10-31T08:39');
+		expect(res.markdown).toContain('r_year_today=2026-01-01..2026-10-31');
+		expect(res.markdown).toContain('r_month_year=2026-10..2026-12');
+		expect(res.markdown).toContain('r_today_now=2026-10-31T00:00..2026-10-31T08:39');
+		expect(res.markdown).toContain('r_paren=2026-10-30..2026-11-01');
+		expect(res.markdown).toContain('fmt_mod=2026-10-31 08:30');
+		expect(res.markdown).toContain('fmt_today=2026/10/31');
+		expect(res.markdown).toContain('fmt_str_now=2026-10-31 08:39');
+		expect(res.markdown).toContain('fmt_to_str=31 Oct 2026');
+		expect(res.markdown).toContain('where_today=TodayNote');
+		expect(res.markdown).toContain('cmp_created_today=YES');
+		expect(res.markdown).toContain('cmp_created_yesterday=YES');
+		expect(res.markdown).toContain('cmp_created_tomorrow=YES');
+		expect(res.markdown).toContain('cmp_due_today=YES');
+		expect(res.markdown).toContain('cmp_due_month=YES');
+		expect(res.markdown).toContain('cmp_window_month=YES');
+		expect(res.markdown).toContain('cmp_null_neq=YES');
+		expect(res.markdown).toContain('cmp_null_eq=NO');
+		expect(res.markdown).toContain('iter_months=2026-10;2026-11;2026-12;');
+		expect(res.markdown).toContain('iter_days=2026-10-29;2026-10-30;2026-10-31;');
+		expect(res.markdown).toContain('iter_mins=2026-10-31T08:38;2026-10-31T08:39;');
+		expect(res.markdown).toContain('iter_num=123');
+	});
+
+	it('reports TEMPLATE_RENDER_ERROR with a swap hint when a temporal range is reversed', async () => {
+		const refMs = Date.UTC(2026, 9, 31, 8, 39, 0, 0);
+		const res = await renderRhizomeTemplate('{{ today..yesterday }}', {
+			runQueries: async () => ({}),
+			explainQuery: async () => '',
+			runtimeContext: {
+				referenceTimeMs: refMs,
+				timeZone: 'UTC',
+			},
+		});
+
+		expect(res.ok).toBe(false);
+		expect(res.diagnostics).toHaveLength(1);
+		expect(res.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
+		expect(res.diagnostics[0]?.issue).toContain("Reversed temporal range 'today..yesterday'");
+		expect(res.diagnostics[0]?.hint).toBe('Use yesterday..today');
+		expect(res.markdown).toContain('> [!danger] Template Error: `TEMPLATE_RENDER_ERROR`');
+		expect(res.markdown).toContain('‼️today..yesterday‼️');
+		expect(res.markdown).toContain('Use yesterday..today');
 	});
 });

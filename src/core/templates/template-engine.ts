@@ -7,6 +7,12 @@ import {
 	type QueryTagEnvironment,
 	registerQueryTag,
 } from './query-tag';
+import { buildRhizomeTemplateContext, extractUserQueryMap } from './template-context';
+import {
+	createRhizomeLiquidOperators,
+	installTemporalTokenizerExtensions,
+	registerTemporalLiquidExtensions,
+} from './temporal-drop';
 import type {
 	ExtractedQueryBlock,
 	TemplateDiagnostic,
@@ -14,6 +20,7 @@ import type {
 	TemplateExecutionCallbacks,
 	TemplateFolderConfig,
 	TemplateRenderResult,
+	TemplateRuntimeContext,
 } from './types';
 import { createVaultLiquidFs, resolveTemplateFolders } from './vault-liquid-fs';
 
@@ -30,10 +37,15 @@ export function extractLiquidErrorDiagnostic(
 	let span: SourceSpan | null = null;
 	let rawMessage = err instanceof Error ? err.message : String(err);
 	let externalFile: string | null = null;
+	let resolvedHint: string | null = defaultHint;
 
 	if (LiquidError.is(err)) {
 		if (err.originalError instanceof Error && err.originalError.message.trim().length > 0) {
 			rawMessage = err.originalError.message.trim();
+			const customHint = (err.originalError as { hint?: unknown }).hint;
+			if (typeof customHint === 'string' && customHint.trim().length > 0) {
+				resolvedHint = customHint.trim();
+			}
 		} else {
 			rawMessage = err.message
 				.replace(/,\s*(?:file:[^,]+,\s*)?line:\d+,\s*col:\d+\s*$/, '')
@@ -59,7 +71,7 @@ export function extractLiquidErrorDiagnostic(
 		code,
 		severity: 'error',
 		issue,
-		hint: defaultHint,
+		hint: resolvedHint,
 		span,
 	});
 }
@@ -108,6 +120,7 @@ export function createRhizomeLiquidInstance(
 	folders?: TemplateFolderConfig,
 	readTemplateFile?: (vaultRelativePath: string) => Promise<string | null>,
 ): Liquid {
+	installTemporalTokenizerExtensions();
 	const resolvedFolders = resolveTemplateFolders(folders);
 	const fs = createVaultLiquidFs(resolvedFolders, readTemplateFile);
 	const liquid = new Liquid({
@@ -119,8 +132,10 @@ export function createRhizomeLiquidInstance(
 		dynamicPartials: true,
 		relativeReference: false,
 		ownPropertyOnly: true,
+		operators: createRhizomeLiquidOperators(),
 	});
 	registerQueryTag(liquid, env, originalSource);
+	registerTemporalLiquidExtensions(liquid);
 	return liquid;
 }
 
@@ -180,6 +195,7 @@ export async function renderParsedRhizomeTemplate(
 	parsed: ParsedRhizomeTemplate,
 	payload: Readonly<Record<string, unknown[]>>,
 	explainQuery: (query: string, heading: string) => Promise<string>,
+	runtimeContext?: TemplateRuntimeContext,
 ): Promise<TemplateRenderResult> {
 	const queries: readonly ExtractedQueryBlock[] = Object.freeze([...parsed.env.queries]);
 
@@ -200,10 +216,13 @@ export async function renderParsedRhizomeTemplate(
 		try {
 			const safePayload: Readonly<Record<string, unknown[]>> =
 				payload && typeof payload === 'object' ? payload : Object.freeze({});
-			parsed.env.payload = safePayload;
+			parsed.env.payload = extractUserQueryMap(safePayload);
 			parsed.env.explainQuery = explainQuery;
 
-			const renderedRaw: unknown = await parsed.liquid.render(templates, safePayload);
+			const rootScope = buildRhizomeTemplateContext(safePayload, runtimeContext);
+			const renderedRaw: unknown = await parsed.liquid.render(templates, rootScope, {
+				globals: rootScope,
+			});
 			const markdown = typeof renderedRaw === 'string' ? renderedRaw : '';
 
 			return Object.freeze({
@@ -271,8 +290,12 @@ export async function renderRhizomeTemplate(
 			}
 		}
 
-		return await renderParsedRhizomeTemplate(source, parsed, payload, (q, heading) =>
-			callbacks.explainQuery(q, heading),
+		return await renderParsedRhizomeTemplate(
+			source,
+			parsed,
+			payload,
+			(q, heading) => callbacks.explainQuery(q, heading),
+			callbacks.runtimeContext,
 		);
 	} catch (err: unknown) {
 		const renderDiag = extractLiquidErrorDiagnostic(

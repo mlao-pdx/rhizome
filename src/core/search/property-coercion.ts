@@ -1,5 +1,6 @@
 import { parseTemporalExpr } from './temporal';
 import {
+	INTERNAL_RHIZOME_PROPERTY_KEY,
 	isVirtualFileKey,
 	type ObsidianPropertyType,
 	type PropertyOccurrence,
@@ -12,6 +13,20 @@ export const FORBIDDEN_KEYS: ReadonlySet<string> = new Set([
 	'__proto__',
 	'prototype',
 	'constructor',
+]);
+
+/**
+ * Normalized property keys excluded from `doc.propertyKeys` and `doc.properties`
+ * (while remaining in `doc.propertyOccurrences` for bracketed filters and diagnostics)
+ * because they are already exposed as first-class fields (`tags`, `aliases`) or are
+ * internal Rhizome metadata (`◊internalrhizome`).
+ */
+export const OMITTED_PROPERTY_VIEW_KEYS: ReadonlySet<string> = new Set([
+	'tag',
+	'tags',
+	'alias',
+	'aliases',
+	INTERNAL_RHIZOME_PROPERTY_KEY.toLowerCase(),
 ]);
 
 export const STRICT_NUMBER_RE = /^[+-]?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
@@ -250,7 +265,9 @@ export function resolveQueryPropertyType(
 
 /**
  * Builds the `propertyKeys` and null-prototype `properties` views from `propertyOccurrences`.
- * Defensively copies single-occurrence array values and promotes multi-occurrence keys into 1-level concatenated arrays.
+ * Excludes `FORBIDDEN_KEYS` and `OMITTED_PROPERTY_VIEW_KEYS` (`tag`, `tags`, `alias`, `aliases`,
+ * `◊internalrhizome`), defensively copies single-occurrence array values, and promotes
+ * multi-occurrence keys into 1-level concatenated arrays.
  */
 export function buildPropertiesViews(occurrences: readonly PropertyOccurrence[]): {
 	propertyKeys: string[];
@@ -261,7 +278,7 @@ export function buildPropertiesViews(occurrences: readonly PropertyOccurrence[])
 	const promotedKeys = new Set<string>();
 
 	for (const { key, rawValue } of occurrences) {
-		if (FORBIDDEN_KEYS.has(key)) continue;
+		if (FORBIDDEN_KEYS.has(key) || OMITTED_PROPERTY_VIEW_KEYS.has(key)) continue;
 		if (!(key in out)) {
 			propertyKeys.push(key);
 			if (Array.isArray(rawValue)) {

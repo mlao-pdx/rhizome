@@ -290,6 +290,26 @@ export function normalizePath(path: string): string {
 	return path.replace(/\/+/g, '/').replace(/\/$/, '');
 }
 
+export function getLanguage(): string {
+	return 'en';
+}
+
+export const Platform = {
+	isDesktop: true,
+	isMobile: false,
+	isDesktopApp: true,
+	isMobileApp: false,
+	isIosApp: false,
+	isAndroidApp: false,
+	isPhone: false,
+	isTablet: false,
+	isMacOS: true,
+	isWin: false,
+	isLinux: false,
+	isSafari: false,
+	resourcePathPrefix: 'app://local/',
+};
+
 export class App {}
 
 export class TAbstractFile {
@@ -352,6 +372,7 @@ export function createMockApp(): unknown {
 		vault: {
 			configDir: 'mock-config',
 			adapter: new FileSystemAdapter(),
+			getName: () => 'MockVault',
 			getMarkdownFiles: () => [],
 			on: vaultEvents.on,
 			trigger: vaultEvents.trigger,

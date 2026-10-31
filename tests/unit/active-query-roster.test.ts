@@ -424,7 +424,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 
 		const source = [
 			'{% query tasks %}#task{% endquery %}',
-			'{% for item in tasks %}- {{ item.file.basename }}\n{% endfor %}',
+			'{% for item in query.tasks %}- {{ item.file.basename }}\n{% endfor %}',
 		].join('\n');
 
 		await processRhizomeCodeBlock(source, el, ctx, plugin);
@@ -474,7 +474,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 	it('serializes concurrent renderParsedRhizomeTemplate calls on the same ParsedRhizomeTemplate instance', async () => {
 		const source = [
 			'{% query tasks explain %}#task{% endquery %}',
-			'{% for item in tasks %}{{ item.label }}{% endfor %}',
+			'{% for item in query.tasks %}{{ item.label }}{% endfor %}',
 		].join('\n');
 		const parsed = parseRhizomeTemplatePass1(source);
 
@@ -552,7 +552,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 
 		const source = [
 			'{% query tasks explain %}#task{% endquery %}',
-			'{% for item in tasks %}- {{ item.file.basename }}\n{% endfor %}',
+			'{% for item in query.tasks %}- {{ item.file.basename }}\n{% endfor %}',
 		].join('\n');
 
 		const blockPromise = processRhizomeCodeBlock(source, el, ctx, plugin);
@@ -584,6 +584,66 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(renderedMarkdowns[0]).toContain('# Updated Explain');
 		expect(renderedMarkdowns[0]).toContain('- beta');
 
+		renderSpy.mockRestore();
+	});
+
+	it('populates host note metadata via ◊host even in a zero-query codeblock and re-renders when the host note changes', async () => {
+		const harness = createMutableVaultApp([
+			{
+				path: 'notes/host.md',
+				cache: {
+					frontmatter: { status: 'draft', aliases: ['Initial Alias'] },
+					tags: [{ tag: '#journal', position: {} as never }],
+				},
+			},
+		]);
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		const renderedMarkdowns: string[] = [];
+		const renderSpy = vi
+			.spyOn(MarkdownRenderer, 'render')
+			.mockImplementation(async (_app, markdown) => {
+				renderedMarkdowns.push(markdown);
+			});
+
+		const el = { empty: () => {} } as unknown as HTMLElement;
+		const addedChildren: MarkdownRenderChild[] = [];
+		const ctx = {
+			sourcePath: 'notes/host.md',
+			addChild: (child: MarkdownRenderChild) => {
+				addedChildren.push(child);
+			},
+		} as unknown as MarkdownPostProcessorContext;
+
+		const source =
+			'Note={{ file.basename }} | Status={{ properties.status }} | Alias={{ aliases.first }} | Vault={{ vault }}';
+
+		await processRhizomeCodeBlock(source, el, ctx, plugin);
+
+		expect(plugin.activeQueryRoster.size).toBe(1);
+		expect(renderedMarkdowns).toHaveLength(1);
+		expect(renderedMarkdowns[0]).toContain('Note=host | Status=draft | Alias=Initial Alias');
+
+		// Mutate the host note's frontmatter and nudge the roster
+		harness.setNotes([
+			{
+				path: 'notes/host.md',
+				cache: {
+					frontmatter: { status: 'published', aliases: ['Updated Alias'] },
+					tags: [{ tag: '#journal', position: {} as never }],
+				},
+			},
+		]);
+		await plugin.activeQueryRoster.nudge();
+
+		expect(renderedMarkdowns).toHaveLength(2);
+		expect(renderedMarkdowns[1]).toContain(
+			'Note=host | Status=published | Alias=Updated Alias',
+		);
+
+		addedChildren[0]?.unload();
+		expect(plugin.activeQueryRoster.size).toBe(0);
 		renderSpy.mockRestore();
 	});
 });

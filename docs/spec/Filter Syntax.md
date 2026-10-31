@@ -25,8 +25,8 @@
    - Malformed stored property values on a note normalize to `{ kind: 'invalid' }` without crashing vault queries, attach a `DocumentDiagnostic` to `doc.diagnostics`, and are surfaced in `VaultEvaluationReport.propertyDiagnostics` whenever a query filters on that non-virtual property key.
 7. **Hybrid Property Model (Occurrence Stream + Key-Order Array + Per-Key Local Value Order)**:
    - `propertyOccurrences: PropertyOccurrence[]` preserves cache-level occurrence order (`Object.entries(frontmatter)` followed by the caller-supplied `inlineProperties` array).
-   - `propertyKeys: string[]` stores the exact first-seen order of normalized property keys from `propertyOccurrences`.
-   - `properties: Record<string, unknown>` exposes an $O(1)$ null-prototype lookup table with per-key local occurrence order.
+   - `propertyKeys: string[]` stores the exact first-seen order of normalized property keys from `propertyOccurrences` (excluding `tag`, `tags`, `alias`, `aliases`, and `◊internalrhizome`, which are omitted from `propertyKeys` and `properties` while remaining in `propertyOccurrences`).
+   - `properties: Record<string, unknown>` exposes an $O(1)$ null-prototype lookup table with per-key local occurrence order for all non-omitted keys.
 
 ---
 
@@ -1442,6 +1442,14 @@ function safeToString(val: unknown): string {
   }
 }
 
+export const OMITTED_PROPERTY_VIEW_KEYS: ReadonlySet<string> = new Set([
+  'tag',
+  'tags',
+  'alias',
+  'aliases',
+  '◊internalrhizome',
+]);
+
 export function buildPropertiesViews(occurrences: readonly PropertyOccurrence[]): {
   propertyKeys: string[];
   properties: Record<string, unknown>;
@@ -1451,7 +1459,7 @@ export function buildPropertiesViews(occurrences: readonly PropertyOccurrence[])
   const promotedKeys = new Set<string>();
 
   for (const { key, rawValue } of occurrences) {
-    if (FORBIDDEN_KEYS.has(key)) continue;
+    if (FORBIDDEN_KEYS.has(key) || OMITTED_PROPERTY_VIEW_KEYS.has(key)) continue;
     if (!(key in out)) {
       propertyKeys.push(key);
       if (Array.isArray(rawValue)) {
@@ -2352,7 +2360,7 @@ export function normalizeAST(ast: SearchAST): SearchAST {
    - For any generated `NormalizedDocument` and any `VaultEvaluationReport`, `JSON.parse(JSON.stringify(obj))` has identical JSON content to `obj`, no `undefined` values exist on `PropertyOccurrence`, `DocumentDiagnostic`, or `SearchDiagnostic`, and `__proto__`, `constructor`, and `prototype` never appear in `doc.propertyKeys` or `doc.properties`.
    - Evaluating a `PreparedQuery` against a `NormalizedDocument` with a mismatched `normalizationFingerprint` throws an error.
 3. **Hybrid Property Ordering & Aggregation Invariant**:
-   - `doc.propertyKeys` equals the deduplicated sequence of `occ.key` in exact order of first appearance in `doc.propertyOccurrences`.
+   - `doc.propertyKeys` equals the deduplicated sequence of `occ.key` in exact order of first appearance in `doc.propertyOccurrences`, excluding `tag`, `tags`, `alias`, `aliases`, and `◊internalrhizome` (`OMITTED_PROPERTY_VIEW_KEYS`).
    - For each `k` in `doc.propertyKeys`, if `k` appeared once in `propertyOccurrences`, `doc.properties[k]` equals `occ.rawValue`; if `k` appeared $\ge 2$ times, `doc.properties[k]` equals the 1-level concatenation of `rawValue` across all occurrences of `k` in local occurrence order (frontmatter values in original list order followed by inline values in order of appearance).
 4. **Target-Type Coercion & Non-Throwing Reference-Time Invariant**:
    - For any generated JSON primitive, `undefined`, or standard `Date` instance, `coercePropertyValue(val, propType, tz)` never throws and returns only `{ kind: 'null' }`, `{ kind: 'invalid', expectedType: propType }`, `{ kind: 'text' }` (when `propType` is `'text'|'multitext'|'tags'`), or `{ kind: propType }`.

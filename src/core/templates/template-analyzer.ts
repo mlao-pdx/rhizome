@@ -185,7 +185,7 @@ function scanLiquidTagInner(inner: string, baseOffset: number, out: CodeBlockTok
 	}
 
 	const tokenRe =
-		/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\|\s*[a-zA-Z_][a-zA-Z0-9_-]*)|([+-]?\d+(?:\.\d+)?)|([a-zA-Z_][a-zA-Z0-9_.-]*)/g;
+		/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\|\s*[a-zA-Z_][a-zA-Z0-9_-]*)|([+-]?\d+(?:\.\d+)?)|([a-zA-Z_][a-zA-Z0-9_.-]*(?:\+\d+d?)?)/g;
 	let match: RegExpExecArray | null;
 	while ((match = tokenRe.exec(inner)) !== null) {
 		const tokStart = baseOffset + match.index;
