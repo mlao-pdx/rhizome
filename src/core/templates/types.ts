@@ -69,6 +69,7 @@ export interface TemplatePlatformFlags {
  * root globals (`vault`, `tz`, `language`, `platform.*`) and pin relative temporal literals.
  */
 export interface TemplateRuntimeContext {
+	readonly sourcePath?: string;
 	readonly referenceTimeMs?: number;
 	readonly timeZone?: string;
 	readonly vault?: string;

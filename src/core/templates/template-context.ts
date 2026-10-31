@@ -4,7 +4,12 @@ import {
 	isValidReferenceTimeMs,
 	parseSingleTemporalAtom,
 } from '@core/search';
-import { isBareRelativeTemporalAtom, TemporalDrop } from './temporal-drop';
+import {
+	isBareRelativeTemporalAtom,
+	resolveValidTimeZone,
+	TEMPORAL_CONTEXT_META_SYMBOL,
+	TemporalDrop,
+} from './temporal-drop';
 import type { TemplatePlatformFlags, TemplateRuntimeContext } from './types';
 
 /**
@@ -120,10 +125,7 @@ export function buildRhizomeTemplateContext(
 	const referenceTimeMs = isValidReferenceTimeMs(runtimeContext?.referenceTimeMs)
 		? runtimeContext.referenceTimeMs
 		: Date.now();
-	const timeZone =
-		typeof runtimeContext?.timeZone === 'string' && runtimeContext.timeZone.trim().length > 0
-			? runtimeContext.timeZone.trim()
-			: 'UTC';
+	const timeZone = resolveValidTimeZone(runtimeContext?.timeZone);
 	const vault = typeof runtimeContext?.vault === 'string' ? runtimeContext.vault : '';
 	const language =
 		typeof runtimeContext?.language === 'string' && runtimeContext.language.trim().length > 0
@@ -166,6 +168,13 @@ export function buildRhizomeTemplateContext(
 		language,
 		platform,
 	};
+
+	Object.defineProperty(root, TEMPORAL_CONTEXT_META_SYMBOL, {
+		value: Object.freeze({ timeZone, referenceTimeMs }),
+		enumerable: false,
+		configurable: false,
+		writable: false,
+	});
 
 	const ensureDynamicTemporalKey = (target: Record<string, unknown>, prop: PropertyKey): void => {
 		if (typeof prop !== 'string' || prop in target || FORBIDDEN_KEYS.has(prop)) {

@@ -487,4 +487,169 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		expect(res.markdown).toContain('‼️today..yesterday‼️');
 		expect(res.markdown).toContain('Use yesterday..today');
 	});
+
+	it('reports TEMPLATE_RENDER_ERROR when both endpoints of a range are invalid temporal literals or unparenthesized non-numbers, while keeping parenthesized nil/empty ranges lenient', async () => {
+		const refMs = Date.UTC(2026, 9, 31, 8, 39, 0, 0);
+		const invalidCases = [
+			{
+				source: '{{ "2026-02-30".."2026-02-31" }}',
+				expectedBadSide: '"2026-02-30"',
+			},
+			{
+				source: '{{ ("2026-02-30".."2026-02-31") }}',
+				expectedBadSide: '"2026-02-30"',
+			},
+			{
+				source: '{{ tday..tmorrow }}',
+				expectedBadSide: 'tday',
+			},
+			{
+				source: '{{ properties.missing..false }}',
+				expectedBadSide: 'properties.missing',
+			},
+			{
+				source: '{{ "liquidMethodMissing"..today }}',
+				expectedBadSide: '"liquidMethodMissing"',
+			},
+			{
+				source: '{{ today.."liquidMethodMissing" }}',
+				expectedBadSide: '"liquidMethodMissing"',
+			},
+		];
+
+		for (const tc of invalidCases) {
+			const res = await renderRhizomeTemplate(tc.source, {
+				runQueries: async () => ({}),
+				explainQuery: async () => '',
+				runtimeContext: {
+					referenceTimeMs: refMs,
+					timeZone: 'UTC',
+				},
+			});
+			expect(res.ok).toBe(false);
+			expect(res.diagnostics).toHaveLength(1);
+			expect(res.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
+			expect(res.diagnostics[0]?.issue).toContain(
+				`'${tc.expectedBadSide}' is not a valid temporal literal`,
+			);
+		}
+
+		// Parenthesized (lhs..rhs) with undefined/null/empty-string endpoints remains lenient (`[]`),
+		// and does not coerce null/false/"" to 0.
+		const lenientRes = await renderRhizomeTemplate(
+			'{% assign emptyStr = "" %}[{% for x in (missingA..missingB) %}{{ x }}{% endfor %}][{% for x in (emptyStr..2) %}{{ x }}{% endfor %}][{% for x in (false..2) %}{{ x }}{% endfor %}]',
+			{
+				runQueries: async () => ({}),
+				explainQuery: async () => '',
+				runtimeContext: {
+					referenceTimeMs: refMs,
+					timeZone: 'UTC',
+				},
+			},
+		);
+		expect(lenientRes.ok).toBe(true);
+		expect(lenientRes.markdown).toBe('[][][]');
+	});
+
+	it('disambiguates bare 4-digit year literals vs epoch-ms numeric variables (including 0) when paired with a temporal endpoint', async () => {
+		const refMs = Date.UTC(2026, 9, 31, 8, 39, 0, 0);
+		const res = await renderRhizomeTemplate(
+			[
+				'epoch_zero={{ file.created..today }}',
+				'year_lit={{ 2020..today }}',
+				'year_lit_rhs={{ "2018-06"..2020 }}',
+				'num_range={{ (2020..2022) | join: "," }}',
+			].join('\n'),
+			{
+				runQueries: async () => ({
+					'◊host': [
+						{
+							file: {
+								path: 'EpochNote.md',
+								name: 'EpochNote.md',
+								basename: 'EpochNote',
+								extension: 'md',
+								folder: '',
+								parent: '',
+								created: 0,
+								modified: refMs,
+								size: 10,
+							},
+						},
+					],
+				}),
+				explainQuery: async () => '',
+				runtimeContext: {
+					sourcePath: 'EpochNote.md',
+					referenceTimeMs: refMs,
+					timeZone: 'UTC',
+				},
+			},
+		);
+
+		expect(res.ok).toBe(true);
+		expect(res.markdown).toContain('epoch_zero=1970-01-01T00:00..2026-10-31T23:59');
+		expect(res.markdown).toContain('year_lit=2020-01-01..2026-10-31');
+		expect(res.markdown).toContain('year_lit_rhs=2018-06..2020-12');
+		expect(res.markdown).toContain('num_range=2020,2021,2022');
+	});
+
+	it('keeps context temporal metadata unshadowable when templates assign tz or now, and falls back to UTC on invalid runtimeContext.timeZone', async () => {
+		const refMs = Date.UTC(2026, 9, 31, 8, 39, 0, 0);
+		const res = await renderRhizomeTemplate(
+			[
+				'{% assign tz = "Not/AZone" %}',
+				'{% assign now = "custom-now" %}',
+				'range={{ "yesterday".."tomorrow" }}',
+				'fmt={{ today | date: "%Y-%m-%d" }}',
+				'user_tz={{ tz }}',
+				'user_now={{ now }}',
+			].join('\n'),
+			{
+				runQueries: async () => ({}),
+				explainQuery: async () => '',
+				runtimeContext: {
+					referenceTimeMs: refMs,
+					timeZone: 'Invalid/TimeZone_Identifier',
+				},
+			},
+		);
+
+		expect(res.ok).toBe(true);
+		expect(res.markdown).toContain('range=2026-10-30..2026-11-01');
+		expect(res.markdown).toContain('fmt=2026-10-31');
+		expect(res.markdown).toContain('user_tz=Not/AZone');
+		expect(res.markdown).toContain('user_now=custom-now');
+	});
+
+	it('seeds ◊host in renderRhizomeTemplate when runtimeContext.sourcePath is provided even with zero {% query %} blocks', async () => {
+		const capturedBatches: Array<Readonly<Record<string, string>>> = [];
+		const res = await renderRhizomeTemplate(
+			'Host={{ file.basename }} | Prop={{ properties.category }}',
+			{
+				runQueries: async (batch) => {
+					capturedBatches.push(batch);
+					return {
+						'◊host': [
+							{
+								file: { basename: 'ZeroQueryHost' },
+								properties: { category: 'reference' },
+							},
+						],
+					};
+				},
+				explainQuery: async () => '',
+				runtimeContext: {
+					sourcePath: 'Notes/ZeroQueryHost.md',
+				},
+			},
+		);
+
+		expect(res.ok).toBe(true);
+		expect(capturedBatches).toHaveLength(1);
+		expect(capturedBatches[0]).toEqual({
+			'◊host': '[file.path: = "Notes/ZeroQueryHost.md"]',
+		});
+		expect(res.markdown).toBe('Host=ZeroQueryHost | Prop=reference');
+	});
 });

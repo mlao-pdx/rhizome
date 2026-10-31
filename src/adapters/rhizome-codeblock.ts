@@ -22,12 +22,14 @@ import { resolveDefaultTimeZone, type VaultQueryResult } from './vault-query-run
 function buildRuntimeContext(
 	plugin: RhizomePlugin,
 	referenceTimeMs: number,
+	sourcePath: string,
 ): TemplateRuntimeContext {
 	const vaultWithGetName = plugin.app.vault as { getName?: () => string };
 	const vaultName =
 		typeof vaultWithGetName.getName === 'function' ? vaultWithGetName.getName() : '';
 	const language = typeof getLanguage === 'function' ? getLanguage() : 'en';
 	return {
+		sourcePath,
 		referenceTimeMs,
 		timeZone: resolveDefaultTimeZone(),
 		vault: vaultName,
@@ -157,7 +159,7 @@ export async function processRhizomeCodeBlock(
 			parsed,
 			Object.freeze({}),
 			(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
-			buildRuntimeContext(plugin, referenceTimeMs),
+			buildRuntimeContext(plugin, referenceTimeMs, sourcePath),
 		);
 		if (abortController.signal.aborted || generation !== renderGeneration) {
 			return;
@@ -184,7 +186,7 @@ export async function processRhizomeCodeBlock(
 			parsed,
 			Object.freeze({}),
 			(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
-			buildRuntimeContext(plugin, referenceTimeMs),
+			buildRuntimeContext(plugin, referenceTimeMs, sourcePath),
 		);
 		if (abortController.signal.aborted || generation !== renderGeneration) {
 			return;
@@ -207,7 +209,7 @@ export async function processRhizomeCodeBlock(
 			newPayload,
 			(query, heading) =>
 				plugin.explainQuery(query, { referenceTimeMs: updateStartedAt, heading }),
-			buildRuntimeContext(plugin, updateStartedAt),
+			buildRuntimeContext(plugin, updateStartedAt, sourcePath),
 		);
 		if (abortController.signal.aborted || generation !== renderGeneration) {
 			return;
@@ -232,7 +234,7 @@ export async function processRhizomeCodeBlock(
 		parsed,
 		initialPayload,
 		(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
-		buildRuntimeContext(plugin, referenceTimeMs),
+		buildRuntimeContext(plugin, referenceTimeMs, sourcePath),
 	);
 	if (abortController.signal.aborted || initialGeneration !== renderGeneration) {
 		return;

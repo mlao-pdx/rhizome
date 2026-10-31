@@ -7,7 +7,12 @@ import {
 	type QueryTagEnvironment,
 	registerQueryTag,
 } from './query-tag';
-import { buildRhizomeTemplateContext, extractUserQueryMap } from './template-context';
+import {
+	buildHostNoteQuery,
+	buildRhizomeTemplateContext,
+	extractUserQueryMap,
+	HOST_QUERY_KEY,
+} from './template-context';
 import {
 	createRhizomeLiquidOperators,
 	installTemporalTokenizerExtensions,
@@ -279,11 +284,15 @@ export async function renderRhizomeTemplate(
 
 	try {
 		let payload: Record<string, unknown[]> = Object.create(null) as Record<string, unknown[]>;
-		if (queries.length > 0) {
-			const queryMap = Object.create(null) as Record<string, string>;
-			for (const q of queries) {
-				queryMap[q.name] = q.query;
-			}
+		const queryMap = Object.create(null) as Record<string, string>;
+		const sourcePath = callbacks.runtimeContext?.sourcePath;
+		if (typeof sourcePath === 'string' && sourcePath.length > 0) {
+			queryMap[HOST_QUERY_KEY] = buildHostNoteQuery(sourcePath);
+		}
+		for (const q of queries) {
+			queryMap[q.name] = q.query;
+		}
+		if (Object.keys(queryMap).length > 0) {
 			const rawPayload = await callbacks.runQueries(Object.freeze(queryMap));
 			if (rawPayload && typeof rawPayload === 'object') {
 				payload = rawPayload;
