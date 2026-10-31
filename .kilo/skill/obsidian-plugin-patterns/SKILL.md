@@ -269,6 +269,12 @@ export class SampleSettingTab extends PluginSettingTab {
   `onDelete`/`onReorder`/`emptyState`/`addItem` for user-managed rows (watched
   folders, aliases). `type: 'page'` = a navigable sub-page — use sparingly,
   only for a self-contained section too long for the parent tab.
+- **Diagnostics sub-page placement (project rule):** In `RhizomeSettingTab`,
+  Diagnostics settings live on a `type: 'page'` sub-page (`name: 'Diagnostics'`).
+  Its navigable entry bar on the opening settings page must **always remain at
+  the bottom** (the final element of the array returned by
+  `getSettingDefinitions()`). Insert any new top-level settings or groups
+  above the Diagnostics page entry.
 - **`getSettingDefinitions()` must stay cheap** — it also runs once at tab
   registration to index global settings search. No I/O, no network, no heavy
   computation. Call `this.update()` when the _set_ of rows changes; call

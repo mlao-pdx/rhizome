@@ -80,7 +80,10 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
 **Do**
 
 - Add commands with stable IDs (don't rename once released).
-- Provide defaults and validation in settings.
+- Provide defaults and validation in settings. Keep the Diagnostics
+  `type: 'page'` sub-page entry bar at the very bottom of the opening
+  settings page (the final item in `RhizomeSettingTab.getSettingDefinitions()`);
+  insert new settings and groups above it.
 - Write idempotent code paths so reload/unload doesn't leak listeners or
   intervals.
 - Use `this.register*` helpers for everything that needs cleanup.

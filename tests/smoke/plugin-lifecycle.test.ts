@@ -1,14 +1,24 @@
-import type { App, PluginManifest } from 'obsidian';
+import type {
+	App,
+	PluginManifest,
+	SettingDefinitionControl,
+	SettingDefinitionGroup,
+	SettingDefinitionPage,
+	SettingDefinitionRender,
+	SettingGroup,
+} from 'obsidian';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 
 import RhizomePlugin from '../../src/main';
+import type { RhizomeSettings, RhizomeSettingTab } from '../../src/settings';
 import {
 	createdSettings,
 	createMockApp,
 	createMockManifest,
 	openedModals,
+	Setting,
 } from '../support/mock-obsidian-app';
 
 function createPlugin(): RhizomePlugin {
@@ -82,6 +92,116 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		expect(plugin.settings.logLevel).toBe('warn');
 		expect(modal.isOpen).toBe(false);
 		expect(savedData).toHaveLength(1);
+	});
+
+	it('registers a declarative RhizomeSettingTab with the Diagnostics sub-page bar anchored at the bottom of the opening page', async () => {
+		const plugin = createPlugin();
+		plugin.loadData = async () => ({
+			settings: { loggingEnabled: false, logLevel: 'warn' },
+			vaultInstanceId: 'vault-id-1234',
+		});
+		const savedData: unknown[] = [];
+		plugin.saveData = async (data: unknown) => {
+			savedData.push(data);
+		};
+
+		await plugin.onload();
+
+		const settingTab = (plugin as unknown as { settingTabs: RhizomeSettingTab[] })
+			.settingTabs[0]!;
+		expect(settingTab).toBeDefined();
+
+		const definitions = settingTab.getSettingDefinitions();
+		expect(definitions.length).toBeGreaterThanOrEqual(2);
+
+		const templatesGroup = definitions[0] as SettingDefinitionGroup<keyof RhizomeSettings>;
+		expect(templatesGroup.type).toBe('group');
+		expect(templatesGroup.heading).toBe('Templates');
+		expect(templatesGroup.items?.map((item) => item.name)).toEqual([
+			'Templates folder',
+			'Partials folder',
+			'Layouts folder',
+		]);
+
+		// Ordering invariant: the Diagnostics sub-page entry bar must always be the final item.
+		const lastItem = definitions.at(-1) as SettingDefinitionPage<keyof RhizomeSettings>;
+		expect(lastItem.type).toBe('page');
+		expect(lastItem.name).toBe('Diagnostics');
+
+		const resolveDisplayValue = () =>
+			typeof lastItem.displayValue === 'function'
+				? lastItem.displayValue()
+				: lastItem.displayValue;
+		const resolveStatus = () =>
+			typeof lastItem.status === 'function' ? lastItem.status() : lastItem.status;
+
+		expect(resolveDisplayValue()).toBe('Off');
+		expect(resolveStatus()).toBeNull();
+
+		const pageItems = lastItem.items ?? [];
+		expect(pageItems.map((item) => ('name' in item ? item.name : undefined))).toEqual([
+			'Write diagnostic logs to vault',
+			'Log level',
+			'Reveal log folder',
+			'Clear logs',
+		]);
+
+		const logLevelItem = pageItems[1] as SettingDefinitionControl<keyof RhizomeSettings>;
+		const isLogLevelDisabled = () =>
+			typeof logLevelItem.control.disabled === 'function'
+				? logLevelItem.control.disabled()
+				: Boolean(logLevelItem.control.disabled);
+		expect(isLogLevelDisabled()).toBe(true);
+
+		// Folder path normalization and PluginDataStore persistence (preserving vaultInstanceId)
+		expect(settingTab.getControlValue('templatesFolder')).toBe('◊Rhizome/templates');
+		await settingTab.setControlValue('templatesFolder', '  /Custom/Templates/ ');
+		expect(settingTab.getControlValue('templatesFolder')).toBe('Custom/Templates');
+		const lastSaved = savedData.at(-1) as {
+			settings: RhizomeSettings;
+			vaultInstanceId?: string;
+		};
+		expect(lastSaved.settings.templatesFolder).toBe('Custom/Templates');
+		expect(lastSaved.vaultInstanceId).toBe('vault-id-1234');
+
+		await settingTab.setControlValue('partialsFolder', '  /Custom/Partials/ ');
+		expect(settingTab.getControlValue('partialsFolder')).toBe('Custom/Partials');
+
+		await settingTab.setControlValue('layoutsFolder', '  /Custom/Layouts/ ');
+		expect(settingTab.getControlValue('layoutsFolder')).toBe('Custom/Layouts');
+
+		// Toggling loggingEnabled updates the sub-page disabled predicate, bar status, and calls update()
+		const updateSpy = vi.spyOn(settingTab, 'update');
+		await settingTab.setControlValue('loggingEnabled', true);
+		expect(updateSpy).toHaveBeenCalledTimes(1);
+		expect(isLogLevelDisabled()).toBe(false);
+		expect(resolveDisplayValue()).toBe('Logging (warn)');
+		expect(resolveStatus()).toBe('warning');
+
+		await settingTab.setControlValue('logLevel', 'debug');
+		expect(updateSpy).toHaveBeenCalledTimes(2);
+		expect(resolveDisplayValue()).toBe('Logging (debug)');
+
+		// Reveal log folder and Clear logs action buttons on the Diagnostics sub-page
+		const revealSpy = vi
+			.spyOn(plugin.loggerAdapter, 'revealLogFolder')
+			.mockResolvedValue(undefined);
+		const clearSpy = vi.spyOn(plugin.loggerAdapter, 'clearLogs').mockResolvedValue(undefined);
+
+		const revealItem = pageItems[2] as SettingDefinitionRender;
+		const revealSetting = new Setting({});
+		revealItem.render(revealSetting as never, {} as SettingGroup);
+		expect(revealSetting.buttons[0]?.buttonText).toBe('Reveal log folder');
+		revealSetting.buttons[0]?.clickHandler?.({} as MouseEvent);
+		expect(revealSpy).toHaveBeenCalledTimes(1);
+
+		const clearItem = pageItems[3] as SettingDefinitionRender;
+		const clearSetting = new Setting({});
+		clearItem.render(clearSetting as never, {} as SettingGroup);
+		expect(clearSetting.buttons[0]?.buttonText).toBe('Clear logs');
+		expect(clearSetting.buttons[0]?.isDestructive).toBe(true);
+		await clearSetting.buttons[0]?.clickHandler?.({} as MouseEvent);
+		expect(clearSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it('query() evaluates against the vault and returns matched note payloads keyed by query name', async () => {

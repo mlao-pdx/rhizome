@@ -21,13 +21,16 @@ export class Plugin {
 	manifest: unknown;
 	readonly registeredCleanups: Array<() => unknown> = [];
 	readonly registeredEvents: unknown[] = [];
+	readonly settingTabs: unknown[] = [];
 
 	constructor(app: unknown, manifest: unknown) {
 		this.app = app;
 		this.manifest = manifest;
 	}
 
-	addSettingTab(_settingTab: unknown): void {}
+	addSettingTab(settingTab: unknown): void {
+		this.settingTabs.push(settingTab);
+	}
 
 	register(callback: () => unknown): void {
 		this.registeredCleanups.push(callback);
@@ -170,15 +173,23 @@ export class Modal {
 export class PluginSettingTab {
 	app: unknown;
 	plugin: unknown;
-	containerEl = {
-		empty: () => {},
-		createEl: (_tag: string, _options?: unknown) => ({}),
-	};
 
 	constructor(app: unknown, plugin: unknown) {
 		this.app = app;
 		this.plugin = plugin;
 	}
+
+	getSettingDefinitions(): unknown[] {
+		return [];
+	}
+
+	update(): void {}
+
+	getControlValue(_key: string): unknown {
+		return undefined;
+	}
+
+	setControlValue(_key: string, _value: unknown): void | Promise<void> {}
 }
 
 export const createdSettings: Setting[] = [];
@@ -203,15 +214,6 @@ export class Setting {
 		return this;
 	}
 
-	addText(_configure: (component: unknown) => unknown): this {
-		return this;
-	}
-
-	addToggle(configure: (component: MockToggleComponent) => unknown): this {
-		configure(new MockToggleComponent());
-		return this;
-	}
-
 	addDropdown(configure: (component: MockDropdownComponent) => unknown): this {
 		const dropdown = new MockDropdownComponent();
 		this.dropdowns.push(dropdown);
@@ -225,28 +227,12 @@ export class Setting {
 		configure(button);
 		return this;
 	}
-
-	setHeading(): this {
-		return this;
-	}
-}
-
-/** Minimal stand-in for Obsidian's `ToggleComponent`. */
-export class MockToggleComponent {
-	setValue(_value: boolean): this {
-		return this;
-	}
-
-	onChange(_callback: (value: boolean) => unknown): this {
-		return this;
-	}
 }
 
 /** Minimal stand-in for Obsidian's `DropdownComponent`. */
 export class MockDropdownComponent {
 	readonly options: Array<{ value: string; display: string }> = [];
 	value = '';
-	disabled = false;
 	changeHandler: ((value: string) => unknown) | undefined;
 
 	addOption(value: string, display: string): this {
@@ -256,11 +242,6 @@ export class MockDropdownComponent {
 
 	setValue(value: string): this {
 		this.value = value;
-		return this;
-	}
-
-	setDisabled(disabled: boolean): this {
-		this.disabled = disabled;
 		return this;
 	}
 
@@ -274,7 +255,7 @@ export class MockDropdownComponent {
 export class MockButtonComponent {
 	buttonText = '';
 	isCta = false;
-	isWarning = false;
+	isDestructive = false;
 	clickHandler: ((evt: MouseEvent) => unknown) | undefined;
 
 	setButtonText(text: string): this {
@@ -287,8 +268,8 @@ export class MockButtonComponent {
 		return this;
 	}
 
-	setWarning(): this {
-		this.isWarning = true;
+	setDestructive(): this {
+		this.isDestructive = true;
 		return this;
 	}
 

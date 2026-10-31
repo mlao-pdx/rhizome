@@ -1,12 +1,19 @@
-import { App, Modal, PluginSettingTab, Setting } from 'obsidian';
+import {
+	App,
+	Modal,
+	PluginSettingTab,
+	Setting,
+	type SettingDefinitionItem,
+	type SettingDefinitionPage,
+} from 'obsidian';
 import {
 	DEFAULT_LAYOUTS_FOLDER,
 	DEFAULT_PARTIALS_FOLDER,
 	DEFAULT_TEMPLATES_FOLDER,
-	normalizeTemplateFolderPath,
 } from '@core/templates';
 import type { LogLevel } from '@ports/logger-port';
 import { LEVEL_ORDER } from './adapters/logger-format';
+import { mergeSettings } from './adapters/plugin-data-store';
 import RhizomePlugin from './main';
 
 export interface RhizomeSettings {
@@ -105,147 +112,161 @@ export class RhizomeSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	override display(): void {
-		const { containerEl } = this;
-
-		containerEl.empty();
-
-		this.displayTemplates(containerEl);
-		this.displayDiagnostics(containerEl);
-	}
-
-	private displayTemplates(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName('Templates').setHeading();
-
-		new Setting(containerEl)
-			.setName('Templates folder')
-			.setDesc('Vault-relative folder where LiquidJS top-level templates are stored.')
-			.addText((text) => {
-				const t = text as {
-					setPlaceholder?: (p: string) => unknown;
-					setValue?: (v: string) => unknown;
-					onChange?: (cb: (v: string) => unknown) => unknown;
-				};
-				t.setPlaceholder?.(DEFAULT_TEMPLATES_FOLDER);
-				t.setValue?.(this.plugin.settings.templatesFolder);
-				t.onChange?.(async (value) => {
-					this.plugin.settings.templatesFolder = normalizeTemplateFolderPath(
-						value,
-						DEFAULT_TEMPLATES_FOLDER,
-					);
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new Setting(containerEl)
-			.setName('Partials folder')
-			.setDesc(
-				'Vault-relative folder where LiquidJS partials (`{% render %}` and `{% include %}`) are stored.',
-			)
-			.addText((text) => {
-				const t = text as {
-					setPlaceholder?: (p: string) => unknown;
-					setValue?: (v: string) => unknown;
-					onChange?: (cb: (v: string) => unknown) => unknown;
-				};
-				t.setPlaceholder?.(DEFAULT_PARTIALS_FOLDER);
-				t.setValue?.(this.plugin.settings.partialsFolder);
-				t.onChange?.(async (value) => {
-					this.plugin.settings.partialsFolder = normalizeTemplateFolderPath(
-						value,
-						DEFAULT_PARTIALS_FOLDER,
-					);
-					await this.plugin.saveSettings();
-				});
-			});
-
-		new Setting(containerEl)
-			.setName('Layouts folder')
-			.setDesc('Vault-relative folder where LiquidJS layouts (`{% layout %}`) are stored.')
-			.addText((text) => {
-				const t = text as {
-					setPlaceholder?: (p: string) => unknown;
-					setValue?: (v: string) => unknown;
-					onChange?: (cb: (v: string) => unknown) => unknown;
-				};
-				t.setPlaceholder?.(DEFAULT_LAYOUTS_FOLDER);
-				t.setValue?.(this.plugin.settings.layoutsFolder);
-				t.onChange?.(async (value) => {
-					this.plugin.settings.layoutsFolder = normalizeTemplateFolderPath(
-						value,
-						DEFAULT_LAYOUTS_FOLDER,
-					);
-					await this.plugin.saveSettings();
-				});
-			});
+	/**
+	 * Reads the current value for a declarative setting control key from
+	 * `this.plugin.settings`.
+	 */
+	override getControlValue(key: keyof RhizomeSettings): unknown {
+		return this.plugin.settings[key];
 	}
 
 	/**
-	 * Diagnostics section: local, developer-facing logging only. There is
-	 * no usage analytics or telemetry, per this project's own policy.
-	 * Nothing is written until "Write diagnostic logs to vault" is turned
-	 * on.
+	 * Mutates `this.plugin.settings` (normalizing folder paths and validating
+	 * `logLevel`) and persists via `PluginDataStore`.
+	 *
+	 * @remarks
+	 * (obsidian-idiom, 2026-10-30) Overridden so declarative `control` bindings
+	 * persist through `this.plugin.saveSettings()` (`PluginDataStore`) rather
+	 * than Obsidian's default `this.plugin.saveData(this.plugin.settings)`,
+	 * which would overwrite the top-level `vaultInstanceId` key in `data.json`.
 	 */
-	private displayDiagnostics(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName('Diagnostics').setHeading();
+	override async setControlValue(key: keyof RhizomeSettings, value: unknown): Promise<void> {
+		this.plugin.settings = mergeSettings(DEFAULT_SETTINGS, {
+			...this.plugin.settings,
+			[key]: value,
+		});
+		await this.plugin.saveSettings();
+		if (key === 'loggingEnabled' || key === 'logLevel') {
+			this.update();
+		}
+	}
 
-		new Setting(containerEl)
-			.setName('Write diagnostic logs to vault')
-			.setDesc(
-				`Writes log to ${this.plugin.loggerAdapter.logsFolderPath}/<epoch>.md for bug reports. ` +
-					'Off by default; nothing is written until enabled. Sensitive vault content is redacted in the ' +
-					'Description column and exposed in the ‼️Description‼️ column — decide which sensitive data to ' +
-					'delete before sharing a log file.',
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(this.plugin.settings.loggingEnabled).onChange(async (value) => {
-					this.plugin.settings.loggingEnabled = value;
-					await this.plugin.saveSettings();
-					this.display();
-				}),
-			);
+	/**
+	 * Returns the declarative settings definition tree (Obsidian 1.13+).
+	 *
+	 * @remarks
+	 * (obsidian-idiom, 2026-10-30) Uses Obsidian's declarative settings API
+	 * with a navigable `type: 'page'` sub-page for Diagnostics. The
+	 * Diagnostics sub-page entry bar MUST always remain the final item in the
+	 * returned array so it stays anchored at the bottom of the opening
+	 * settings page; insert all new top-level settings and groups above it.
+	 */
+	override getSettingDefinitions(): SettingDefinitionItem<keyof RhizomeSettings>[] {
+		return [
+			{
+				type: 'group',
+				heading: 'Templates',
+				items: [
+					{
+						name: 'Templates folder',
+						desc: 'Vault-relative folder where LiquidJS top-level templates are stored.',
+						control: {
+							type: 'text',
+							key: 'templatesFolder',
+							defaultValue: DEFAULT_TEMPLATES_FOLDER,
+							placeholder: DEFAULT_TEMPLATES_FOLDER,
+						},
+					},
+					{
+						name: 'Partials folder',
+						desc: 'Vault-relative folder where LiquidJS partials (`{% render %}` and `{% include %}`) are stored.',
+						control: {
+							type: 'text',
+							key: 'partialsFolder',
+							defaultValue: DEFAULT_PARTIALS_FOLDER,
+							placeholder: DEFAULT_PARTIALS_FOLDER,
+						},
+					},
+					{
+						name: 'Layouts folder',
+						desc: 'Vault-relative folder where LiquidJS layouts (`{% layout %}`) are stored.',
+						control: {
+							type: 'text',
+							key: 'layoutsFolder',
+							defaultValue: DEFAULT_LAYOUTS_FOLDER,
+							placeholder: DEFAULT_LAYOUTS_FOLDER,
+						},
+					},
+				],
+			},
+			// Ordering invariant: the Diagnostics sub-page entry bar must always
+			// remain the last item in `getSettingDefinitions()` at the bottom of
+			// the opening settings page. Add new setting groups above this line.
+			this.getDiagnosticsPageDefinition(),
+		];
+	}
 
-		new Setting(containerEl)
-			.setName('Log level')
-			.setDesc(
-				'Minimum severity written to the log file. Only takes effect while logging is enabled.',
-			)
-			.addDropdown((dropdown) => {
-				for (const level of LEVEL_ORDER) {
-					dropdown.addOption(level, level);
-				}
-				dropdown
-					.setValue(this.plugin.settings.logLevel)
-					.setDisabled(!this.plugin.settings.loggingEnabled)
-					.onChange(async (value) => {
-						this.plugin.settings.logLevel = value as LogLevel;
-						await this.plugin.saveSettings();
-					});
-			});
+	/**
+	 * Diagnostics sub-page definition: local, developer-facing logging only.
+	 * There is no usage analytics or telemetry, per this project's own policy.
+	 * Nothing is written until "Write diagnostic logs to vault" is turned on.
+	 */
+	private getDiagnosticsPageDefinition(): SettingDefinitionPage<keyof RhizomeSettings> {
+		const logLevelOptions: Record<string, string> = {};
+		for (const level of LEVEL_ORDER) {
+			logLevelOptions[level] = level;
+		}
 
-		new Setting(containerEl)
-			.setName('Reveal log folder')
-			.setDesc(
-				`Opens ${this.plugin.loggerAdapter.logsFolderPath} in Notebook Navigator (when active) or Obsidian\u2019s file explorer.`,
-			)
-			.addButton((button) =>
-				button.setButtonText('Reveal log folder').onClick(() => {
-					void this.plugin.loggerAdapter.revealLogFolder();
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName('Clear logs')
-			.setDesc(
-				`Deletes all diagnostic log files in ${this.plugin.loggerAdapter.logsFolderPath}, if present.`,
-			)
-			.addButton((button) =>
-				button
-					.setWarning()
-					.setButtonText('Clear logs')
-					.onClick(async () => {
-						await this.plugin.loggerAdapter.clearLogs();
-					}),
-			);
+		return {
+			type: 'page',
+			name: 'Diagnostics',
+			desc: 'Configure local diagnostic logging for troubleshooting and bug reports.',
+			displayValue: () =>
+				this.plugin.settings.loggingEnabled
+					? `Logging (${this.plugin.settings.logLevel})`
+					: 'Off',
+			status: () => (this.plugin.settings.loggingEnabled ? 'warning' : null),
+			items: [
+				{
+					name: 'Write diagnostic logs to vault',
+					desc:
+						`Writes log to ${this.plugin.loggerAdapter.logsFolderPath}/<epoch>.md for bug reports. ` +
+						'Off by default; nothing is written until enabled. Sensitive vault content is redacted in the ' +
+						'Description column and exposed in the ‼️Description‼️ column — decide which sensitive data to ' +
+						'delete before sharing a log file.',
+					control: {
+						type: 'toggle',
+						key: 'loggingEnabled',
+						defaultValue: DEFAULT_SETTINGS.loggingEnabled,
+					},
+				},
+				{
+					name: 'Log level',
+					desc: 'Minimum severity written to the log file. Only takes effect while logging is enabled.',
+					control: {
+						type: 'dropdown',
+						key: 'logLevel',
+						defaultValue: DEFAULT_SETTINGS.logLevel,
+						options: logLevelOptions,
+						disabled: () => !this.plugin.settings.loggingEnabled,
+					},
+				},
+				{
+					name: 'Reveal log folder',
+					desc: `Opens ${this.plugin.loggerAdapter.logsFolderPath} in Notebook Navigator (when active) or Obsidian\u2019s file explorer.`,
+					render: (setting) => {
+						setting.addButton((button) =>
+							button.setButtonText('Reveal log folder').onClick(() => {
+								void this.plugin.loggerAdapter.revealLogFolder();
+							}),
+						);
+					},
+				},
+				{
+					name: 'Clear logs',
+					desc: `Deletes all diagnostic log files in ${this.plugin.loggerAdapter.logsFolderPath}, if present.`,
+					render: (setting) => {
+						setting.addButton((button) =>
+							button
+								.setDestructive()
+								.setButtonText('Clear logs')
+								.onClick(async () => {
+									await this.plugin.loggerAdapter.clearLogs();
+								}),
+						);
+					},
+				},
+			],
+		};
 	}
 }

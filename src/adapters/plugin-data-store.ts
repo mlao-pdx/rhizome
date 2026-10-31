@@ -153,7 +153,10 @@ function parsePluginData(raw: unknown, defaults: RhizomeSettings): PluginData {
 	return { settings: mergeSettings(defaults, raw) };
 }
 
-function mergeSettings(defaults: RhizomeSettings, raw: unknown): RhizomeSettings {
+/**
+ * Merges and normalizes a raw partial settings candidate against `defaults`.
+ */
+export function mergeSettings(defaults: RhizomeSettings, raw: unknown): RhizomeSettings {
 	if (raw === null || typeof raw !== 'object') {
 		return { ...defaults };
 	}
