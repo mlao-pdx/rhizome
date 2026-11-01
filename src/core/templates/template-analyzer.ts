@@ -379,6 +379,7 @@ export function analyzeRhizomeCodeBlock(
 				headerSpan,
 				bodySpan,
 				fullSpan,
+				file: null,
 			}),
 		);
 	}

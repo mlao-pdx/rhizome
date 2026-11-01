@@ -19,7 +19,7 @@ import RhizomePlugin from './main';
 export interface RhizomeSettings {
 	/** Vault-relative folder path for LiquidJS top-level templates (`root`). */
 	templatesFolder: string;
-	/** Vault-relative folder path for LiquidJS partials (`{% render %}` and `{% include %}`). */
+	/** Vault-relative folder path for LiquidJS partials (`{% render %}`). */
 	partialsFolder: string;
 	/** Vault-relative folder path for LiquidJS layouts (`{% layout %}`). */
 	layoutsFolder: string;
@@ -136,6 +136,9 @@ export class RhizomeSettingTab extends PluginSettingTab {
 			[key]: value,
 		});
 		await this.plugin.saveSettings();
+		if (key === 'templatesFolder' || key === 'partialsFolder' || key === 'layoutsFolder') {
+			this.plugin.activeQueryRoster?.resetAll();
+		}
 		if (key === 'loggingEnabled' || key === 'logLevel') {
 			this.update();
 		}
@@ -169,7 +172,7 @@ export class RhizomeSettingTab extends PluginSettingTab {
 					},
 					{
 						name: 'Partials folder',
-						desc: 'Vault-relative folder where LiquidJS partials (`{% render %}` and `{% include %}`) are stored.',
+						desc: 'Vault-relative folder where LiquidJS partials (`{% render %}`) are stored.',
 						control: {
 							type: 'text',
 							key: 'partialsFolder',

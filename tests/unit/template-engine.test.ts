@@ -199,13 +199,14 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		expect(res.markdown).not.toContain('outer closed comment');
 	});
 
-	it('resolves dynamic partials and layouts inside configured vault folders while blocking path traversal, URLs, and ◊InternalRhizome 001 notes', async () => {
+	it('resolves static partials and layouts inside configured vault folders while blocking path traversal, URLs, and ◊InternalRhizome 001 notes', async () => {
 		const mockVaultFiles: Record<string, string> = {
 			'◊Rhizome/partials/row.md': '* {{ label }}: {{ count }}',
 			'◊Rhizome/layouts/frame.md': 'BEGIN\n{% block %}{% endblock %}\nEND',
 			'◊Rhizome/partials/secret-log.md':
 				'---\n◊InternalRhizome:\n  "001": Do not index or query.\n---\nSecret log body',
-			'◊Rhizome/partials/nested-query.md': '{% query inner %}tag:x{% endquery %}',
+			'◊Rhizome/partials/nested-query.md':
+				'{% query inner %}tag:x{% endquery %}Inner={{ query.inner.size }}',
 			'SecretOutside.md': 'Should never be accessible',
 		};
 
@@ -214,14 +215,14 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		);
 		const runQueries = vi.fn(async () => ({
 			tasks: [{ file: { basename: 'Alpha' } }, { file: { basename: 'Beta' } }],
+			inner: [{ file: { basename: 'Gamma' } }],
 		}));
 		const explainQuery = vi.fn(async () => '');
 
 		const validTemplate = [
 			"{% layout 'frame' %}",
 			'{% query tasks %}tag:task{% endquery %}',
-			"{% assign partialName = 'row' %}",
-			'{% render partialName, label: "Tasks", count: query.tasks.size %}',
+			'{% render "row", label: "Tasks", count: query.tasks.size %}',
 		].join('\n');
 
 		const okRes = await renderRhizomeTemplate(validTemplate, {
@@ -259,12 +260,254 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			explainQuery,
 			readTemplateFile,
 		});
-		expect(nestedQueryInPartial.ok).toBe(false);
-		expect(nestedQueryInPartial.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
-		expect(nestedQueryInPartial.diagnostics[0]?.issue).toContain(
-			'◊Rhizome/partials/nested-query.md',
+		expect(nestedQueryInPartial.ok).toBe(true);
+		expect(nestedQueryInPartial.queries).toHaveLength(1);
+		expect(nestedQueryInPartial.queries[0]?.name).toBe('inner');
+		expect(nestedQueryInPartial.queries[0]?.file).toBe('◊Rhizome/partials/nested-query.md');
+		expect(nestedQueryInPartial.markdown).toContain('Inner=1');
+	});
+
+	it('supports multi-level (3+ deep) partials and layouts with {% query %} blocks, explain flags, query body masking, and flat {{ query.<name> }} namespace', async () => {
+		const mockVaultFiles: Record<string, string> = {
+			'◊Rhizome/layouts/outer-layout.md': [
+				'{%- query layoutQ -%}tag:layout "{{masked"{%- endquery -%}',
+				'LAYOUT[{{ query.layoutQ.first.file.basename }}|{{ query.leafQ.first.file.basename }}]:',
+				'{% block %}{% endblock %}',
+			].join('\n'),
+			'◊Rhizome/partials/level1.md': [
+				'{%- query p1Q -%}tag:p1{%- endquery -%}',
+				'L1({{ query.p1Q.size }})->{% render "level2", passedFromRoot: rootVal %}',
+			].join('\n'),
+			'◊Rhizome/partials/level2.md': [
+				'{%- query p2Q explain -%}tag:p2{%- endquery -%}',
+				'L2({{ passedFromRoot }},{{ query.p2Q.size }})->{% render "level3" %}',
+			].join('\n'),
+			'◊Rhizome/partials/level3.md': [
+				'{%- query leafQ -%}{{%- endquery -%}',
+				'L3(root={{ query.rootQ.size }},layout={{ query.layoutQ.size }},p1={{ query.p1Q.size }})',
+			].join('\n'),
+		};
+
+		const readTemplateFile = vi.fn(
+			async (vaultPath: string) => mockVaultFiles[vaultPath] ?? null,
 		);
-		expect(nestedQueryInPartial.diagnostics[0]?.span).toBeNull();
+		const capturedBatches: Array<Readonly<Record<string, string>>> = [];
+		const runQueries = vi.fn(async (queries: Readonly<Record<string, string>>) => {
+			capturedBatches.push(queries);
+			return {
+				rootQ: [{ file: { basename: 'RootDoc' } }],
+				layoutQ: [{ file: { basename: 'LayoutDoc' } }],
+				p1Q: [{ file: { basename: 'P1DocA' } }, { file: { basename: 'P1DocB' } }],
+				p2Q: [{ file: { basename: 'P2Doc' } }],
+				// leafQ omitted to simulate query syntax error on `{` and trigger explain fallback
+			};
+		});
+		const explainQuery = vi.fn(
+			async (q: string, heading: string) => `[EXPLAIN:${heading}:${q.trim()}]`,
+		);
+
+		const rootSource = [
+			"{% layout 'outer-layout' %}",
+			'{%- query rootQ -%}tag:root{%- endquery -%}',
+			'{% render "level1", rootVal: "hello" %}',
+		].join('\n');
+
+		const res = await renderRhizomeTemplate(rootSource, {
+			runQueries,
+			explainQuery,
+			readTemplateFile,
+		});
+
+		expect(res.ok).toBe(true);
+		expect(runQueries).toHaveBeenCalledTimes(1);
+		expect(capturedBatches[0]).toEqual({
+			rootQ: 'tag:root',
+			p1Q: 'tag:p1',
+			p2Q: 'tag:p2',
+			leafQ: '{',
+			layoutQ: 'tag:layout "{{masked"',
+		});
+		expect(res.queries.map((q) => ({ name: q.name, file: q.file }))).toEqual([
+			{ name: 'rootQ', file: null },
+			{ name: 'p1Q', file: '◊Rhizome/partials/level1.md' },
+			{ name: 'p2Q', file: '◊Rhizome/partials/level2.md' },
+			{ name: 'leafQ', file: '◊Rhizome/partials/level3.md' },
+			{ name: 'layoutQ', file: '◊Rhizome/layouts/outer-layout.md' },
+		]);
+		expect(explainQuery).toHaveBeenCalledTimes(2);
+		expect(res.markdown).toContain('LAYOUT[LayoutDoc|]:');
+		expect(res.markdown).toContain('L1(2)->');
+		expect(res.markdown).toContain('[EXPLAIN:Query Explain Plan: p2Q:tag:p2]');
+		expect(res.markdown).toContain('L2(hello,1)->');
+		expect(res.markdown).toContain('[EXPLAIN:Query Explain Plan: leafQ:{]');
+		expect(res.markdown).toContain('L3(root=1,layout=1,p1=2)');
+	});
+
+	it('handles diamond partial inclusion (including mixed .md extensions) and {% render %} inside {% for %} loops without false DUPLICATE_QUERY_NAME errors', async () => {
+		const mockVaultFiles: Record<string, string> = {
+			'◊Rhizome/partials/branch-a.md': 'A[{% render "shared-leaf" %}]',
+			'◊Rhizome/partials/branch-b.md': 'B[{% render "shared-leaf.md" %}]',
+			'◊Rhizome/partials/shared-leaf.md':
+				'{%- query sharedQ -%}tag:shared{%- endquery -%}{{ label | default: "leaf" }}={{ query.sharedQ.size }}',
+		};
+
+		const readTemplateFile = vi.fn(
+			async (vaultPath: string) => mockVaultFiles[vaultPath] ?? null,
+		);
+		const runQueries = vi.fn(async () => ({
+			sharedQ: [{ file: { basename: 'S1' } }, { file: { basename: 'S2' } }],
+		}));
+		const explainQuery = vi.fn(async () => '');
+
+		const template = [
+			'{% render "branch-a" %}',
+			'{% render "branch-b" %}',
+			'{% for idx in (1..3) %}{% render "shared-leaf", label: idx %};{% endfor %}',
+		].join('\n');
+
+		const res = await renderRhizomeTemplate(template, {
+			runQueries,
+			explainQuery,
+			readTemplateFile,
+		});
+
+		expect(res.ok).toBe(true);
+		expect(res.queries).toHaveLength(1);
+		expect(res.queries[0]?.name).toBe('sharedQ');
+		expect(runQueries).toHaveBeenCalledTimes(1);
+		expect(readTemplateFile).toHaveBeenCalledTimes(3); // branch-a, shared-leaf, branch-b
+		expect(res.markdown).toContain('A[leaf=2]');
+		expect(res.markdown).toContain('B[leaf=2]');
+		expect(res.markdown).toContain('1=2;2=2;3=2;');
+	});
+
+	it('detects DUPLICATE_QUERY_NAME across root and partials or across two partials with file-accurate caret snippets', async () => {
+		const mockVaultFiles: Record<string, string> = {
+			'◊Rhizome/partials/p-one.md': 'Line 1\n{% query dup %}tag:one{% endquery %}',
+			'◊Rhizome/partials/p-two.md':
+				'Header\nSecond line\n{% query dup %}tag:two{% endquery %}',
+		};
+		const readTemplateFile = vi.fn(
+			async (vaultPath: string) => mockVaultFiles[vaultPath] ?? null,
+		);
+		const runQueries = vi.fn(async () => ({}));
+		const explainQuery = vi.fn(async () => '');
+
+		// 1. Root + partial collision
+		const rootVsPartial = await renderRhizomeTemplate(
+			'{% query dup %}tag:root{% endquery %}\n{% render "p-one" %}',
+			{ runQueries, explainQuery, readTemplateFile },
+		);
+		expect(rootVsPartial.ok).toBe(false);
+		expect(rootVsPartial.diagnostics).toHaveLength(1);
+		expect(rootVsPartial.diagnostics[0]?.code).toBe('DUPLICATE_QUERY_NAME');
+		expect(rootVsPartial.diagnostics[0]?.file).toBe('◊Rhizome/partials/p-one.md');
+		expect(rootVsPartial.diagnostics[0]?.span?.startLine).toBe(2);
+		expect(rootVsPartial.diagnostics[0]?.issue).toContain('in the root codeblock, on line 1');
+		expect(rootVsPartial.markdown).toContain(
+			"in '◊Rhizome/partials/p-one.md', line 2, column 1",
+		);
+		expect(rootVsPartial.markdown).toContain('‼️{% query dup %}‼️tag:one{% endquery %}');
+		expect(runQueries).not.toHaveBeenCalled();
+
+		// 2. Partial + partial collision
+		const partialVsPartial = await renderRhizomeTemplate(
+			'{% render "p-one" %}\n{% render "p-two" %}',
+			{ runQueries, explainQuery, readTemplateFile },
+		);
+		expect(partialVsPartial.ok).toBe(false);
+		expect(partialVsPartial.diagnostics).toHaveLength(1);
+		expect(partialVsPartial.diagnostics[0]?.code).toBe('DUPLICATE_QUERY_NAME');
+		expect(partialVsPartial.diagnostics[0]?.file).toBe('◊Rhizome/partials/p-two.md');
+		expect(partialVsPartial.diagnostics[0]?.span?.startLine).toBe(3);
+		expect(partialVsPartial.diagnostics[0]?.issue).toContain(
+			"in '◊Rhizome/partials/p-one.md', on line 2",
+		);
+		expect(partialVsPartial.markdown).toContain(
+			"in '◊Rhizome/partials/p-two.md', line 3, column 1",
+		);
+		expect(partialVsPartial.markdown).toContain('‼️{% query dup %}‼️tag:two{% endquery %}');
+	});
+
+	it('detects circular partial/layout references (A -> B -> A and self-cycles) during Pass 1 and emits TEMPLATE_SYNTAX_ERROR', async () => {
+		const mockVaultFiles: Record<string, string> = {
+			'◊Rhizome/partials/cycle-a.md': '{% render "cycle-b" %}',
+			'◊Rhizome/partials/cycle-b.md': '{% render "cycle-a" %}',
+			'◊Rhizome/partials/self-cycle.md': '{% render "self-cycle" %}',
+		};
+		const readTemplateFile = vi.fn(
+			async (vaultPath: string) => mockVaultFiles[vaultPath] ?? null,
+		);
+		const runQueries = vi.fn(async () => ({}));
+		const explainQuery = vi.fn(async () => '');
+
+		const abCycle = await renderRhizomeTemplate('{% render "cycle-a" %}', {
+			runQueries,
+			explainQuery,
+			readTemplateFile,
+		});
+		expect(abCycle.ok).toBe(false);
+		expect(abCycle.diagnostics).toHaveLength(1);
+		expect(abCycle.diagnostics[0]?.code).toBe('TEMPLATE_SYNTAX_ERROR');
+		expect(abCycle.diagnostics[0]?.file).toBe('◊Rhizome/partials/cycle-b.md');
+		expect(abCycle.diagnostics[0]?.issue).toContain(
+			'render:cycle-a -> render:cycle-b -> render:cycle-a',
+		);
+		expect(runQueries).not.toHaveBeenCalled();
+
+		const selfCycle = await renderRhizomeTemplate('{% render "self-cycle" %}', {
+			runQueries,
+			explainQuery,
+			readTemplateFile,
+		});
+		expect(selfCycle.ok).toBe(false);
+		expect(selfCycle.diagnostics[0]?.code).toBe('TEMPLATE_SYNTAX_ERROR');
+		expect(selfCycle.diagnostics[0]?.issue).toContain('render:self-cycle -> render:self-cycle');
+	});
+
+	it('rejects dynamic variable filenames in {% render %} and {% layout %} and rejects deprecated {% include %}', async () => {
+		const runQueries = vi.fn(async () => ({}));
+		const explainQuery = vi.fn(async () => '');
+
+		const dynamicRender = await renderRhizomeTemplate(
+			"{% assign p = 'row' %}\n{% render p %}",
+			{ runQueries, explainQuery },
+		);
+		expect(dynamicRender.ok).toBe(false);
+		expect(dynamicRender.diagnostics[0]?.code).toBe('TEMPLATE_SYNTAX_ERROR');
+		expect(dynamicRender.diagnostics[0]?.issue).toContain(
+			"Dynamic or variable filename in '{% render p %}' is not supported",
+		);
+		expect(dynamicRender.markdown).toContain('‼️{% render p %}‼️');
+
+		const interpolatedLayout = await renderRhizomeTemplate('{% layout "frames/{{ kind }}" %}', {
+			runQueries,
+			explainQuery,
+		});
+		expect(interpolatedLayout.ok).toBe(false);
+		expect(interpolatedLayout.diagnostics[0]?.code).toBe('TEMPLATE_SYNTAX_ERROR');
+		expect(interpolatedLayout.diagnostics[0]?.issue).toContain(
+			"'{% layout %}' requires a static quoted string filename",
+		);
+
+		const layoutNoneRes = await renderRhizomeTemplate('{% layout none %}Plain body', {
+			runQueries,
+			explainQuery,
+		});
+		expect(layoutNoneRes.ok).toBe(true);
+		expect(layoutNoneRes.markdown).toBe('Plain body');
+
+		const deprecatedInclude = await renderRhizomeTemplate("{% include 'row' %}", {
+			runQueries,
+			explainQuery,
+		});
+		expect(deprecatedInclude.ok).toBe(false);
+		expect(deprecatedInclude.diagnostics[0]?.code).toBe('TEMPLATE_SYNTAX_ERROR');
+		expect(deprecatedInclude.diagnostics[0]?.issue).toContain(
+			"'{% include 'row' %}' is disabled; use '{% render ... %}' instead",
+		);
+		expect(deprecatedInclude.markdown).toContain("‼️{% include 'row' %}‼️");
+		expect(runQueries).not.toHaveBeenCalled();
 	});
 
 	it('exposes host note metadata via ◊host at the root scope, namespaces queries under query.*, and exposes vault/tz/language/platform globals', async () => {

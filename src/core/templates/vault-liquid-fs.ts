@@ -1,4 +1,5 @@
 import type { FS } from 'liquidjs';
+import { maskQueryBlockBodies } from './query-tag';
 import type { TemplateFolderConfig } from './types';
 
 export const DEFAULT_TEMPLATES_FOLDER = '◊Rhizome/templates';
@@ -142,6 +143,18 @@ function normalizeRelativeFilePath(dir: string, file: string, ext: string): stri
 	return relPath;
 }
 
+/**
+ * Resolves a partial or layout reference (`file`) against its root folder (`dir`) and extension (`ext`)
+ * using the same normalization rules as `VaultLiquidFs.resolve()`.
+ */
+export function normalizeTemplateLookupPath(
+	dir: string,
+	file: string,
+	ext: string = '.md',
+): string {
+	return normalizeRelativeFilePath(dir, file, ext);
+}
+
 function isContainedInVaultFolder(root: string, file: string, configDir: string | null): boolean {
 	if (
 		file === BLOCKED_PATH_SENTINEL ||
@@ -184,15 +197,40 @@ function isContainedInVaultFolder(root: string, file: string, configDir: string 
 }
 
 /**
+ * Checks whether a vault-relative file path resides inside any of the configured
+ * `templatesFolder`, `partialsFolder`, or `layoutsFolder` directories.
+ */
+export function isPathInTemplateFolders(
+	vaultPath: unknown,
+	config?: TemplateFolderConfig,
+): boolean {
+	if (typeof vaultPath !== 'string' || vaultPath.length === 0) {
+		return false;
+	}
+	const resolved = resolveTemplateFolders(config);
+	const allowedRoots = [
+		resolved.templatesFolder,
+		resolved.partialsFolder,
+		resolved.layoutsFolder,
+	];
+	return allowedRoots.some((root) =>
+		isContainedInVaultFolder(root, vaultPath, resolved.configDir),
+	);
+}
+
+/**
  * Creates a strictly sandboxed, vault-scoped LiquidJS `FS` implementation that:
  * - Never touches Node `fs` or browser `XMLHttpRequest`.
  * - Enforces containment inside the configured `templatesFolder`, `partialsFolder`, and `layoutsFolder`.
  * - Blocks path traversal (`..`), hidden dot-directories, absolute paths, URL schemes, `configDir`,
  *   `◊Rhizome/logs/`, and notes marked with `◊InternalRhizome` code `"001"`.
+ * - Masks `{% query %} ... {% endquery %}` block bodies in returned file text while storing raw
+ *   unmasked text in `fileSources` so `QueryBlockTag` and diagnostic formatters slice exact coordinates.
  */
 export function createVaultLiquidFs(
 	folders: ResolvedTemplateFolders,
 	readTemplateFile?: (vaultRelativePath: string) => Promise<string | null>,
+	fileSources?: Map<string, string>,
 ): FS {
 	const allowedRoots = [folders.templatesFolder, folders.partialsFolder, folders.layoutsFolder];
 	const fileCache = new Map<string, Promise<string | null>>();
@@ -215,6 +253,7 @@ export function createVaultLiquidFs(
 					if (INTERNAL_DO_NOT_INDEX_RE.test(content)) {
 						return null;
 					}
+					fileSources?.set(filepath, content);
 					return content;
 				})
 				.catch(() => null);
@@ -249,7 +288,7 @@ export function createVaultLiquidFs(
 					`ENOENT: Template file '${filepath}' does not exist in allowed vault template folders.`,
 				);
 			}
-			return content;
+			return maskQueryBlockBodies(content);
 		},
 		readFileSync(filepath: string): string {
 			throw new Error(

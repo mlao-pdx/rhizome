@@ -25,12 +25,15 @@ import {
 interface MutableNote {
 	path: string;
 	mtime?: number;
+	content?: string;
 	cache?: Partial<CachedMetadata> | null;
 }
 
 function createMutableVaultApp(initialNotes: MutableNote[]) {
 	let notes = [...initialNotes];
 	let getMarkdownFilesCalls = 0;
+	const metadataListeners: Record<string, Array<(...args: unknown[]) => void>> = {};
+	const vaultListeners: Record<string, Array<(...args: unknown[]) => void>> = {};
 
 	const makeFile = (n: MutableNote) => {
 		const slashIdx = n.path.lastIndexOf('/');
@@ -53,15 +56,40 @@ function createMutableVaultApp(initialNotes: MutableNote[]) {
 		};
 	};
 
+	const adapter = new FileSystemAdapter() as FileSystemAdapter & {
+		read?: (path: string) => Promise<string>;
+	};
+	adapter.read = async (path: string) => {
+		const found = notes.find((n) => n.path === path);
+		if (!found || typeof found.content !== 'string') {
+			throw new Error(`ENOENT: ${path}`);
+		}
+		return found.content;
+	};
+
 	const app = {
 		vault: {
 			configDir: 'mock-config',
-			adapter: new FileSystemAdapter(),
+			adapter,
 			getMarkdownFiles: () => {
 				getMarkdownFilesCalls++;
 				return notes.map(makeFile);
 			},
-			on: () => ({}),
+			getFileByPath: (path: string) => {
+				const found = notes.find((n) => n.path === path);
+				return found ? makeFile(found) : null;
+			},
+			cachedRead: async (file: { path: string }) => {
+				const found = notes.find((n) => n.path === file.path);
+				if (!found || typeof found.content !== 'string') {
+					throw new Error(`ENOENT: ${file.path}`);
+				}
+				return found.content;
+			},
+			on: (event: string, cb: (...args: unknown[]) => void) => {
+				(vaultListeners[event] ??= []).push(cb);
+				return {};
+			},
 		},
 		metadataCache: {
 			getFileCache: (file: { path: string }) => {
@@ -69,7 +97,10 @@ function createMutableVaultApp(initialNotes: MutableNote[]) {
 				return found?.cache ?? null;
 			},
 			getFirstLinkpathDest: () => null,
-			on: () => ({}),
+			on: (event: string, cb: (...args: unknown[]) => void) => {
+				(metadataListeners[event] ??= []).push(cb);
+				return {};
+			},
 		},
 		workspace: {
 			onLayoutReady: () => {},
@@ -82,6 +113,26 @@ function createMutableVaultApp(initialNotes: MutableNote[]) {
 		app: app as unknown as App,
 		setNotes(next: MutableNote[]) {
 			notes = [...next];
+		},
+		emitMetadataChanged(path: string) {
+			const found = notes.find((n) => n.path === path);
+			const file = makeFile(found ?? { path });
+			for (const cb of metadataListeners['changed'] ?? []) {
+				cb(file, found?.content ?? '', found?.cache ?? null);
+			}
+		},
+		emitMetadataDeleted(path: string, prevCache: Partial<CachedMetadata> | null = null) {
+			const file = makeFile({ path });
+			for (const cb of metadataListeners['deleted'] ?? []) {
+				cb(file, prevCache);
+			}
+		},
+		emitVaultRename(newPath: string, oldPath: string) {
+			const found = notes.find((n) => n.path === newPath);
+			const file = makeFile(found ?? { path: newPath });
+			for (const cb of vaultListeners['rename'] ?? []) {
+				cb(file, oldPath);
+			}
 		},
 		getScanCount() {
 			return getMarkdownFilesCalls;
@@ -385,6 +436,73 @@ describe('ActiveQueryRoster & reactive plugin.query()', () => {
 		expect(harness.getScanCount()).toBe(0);
 		expect(updates).toHaveLength(0);
 	});
+
+	it('registers reset-only (0-query) subscribers without scanning them during nudge(), and resetAll() deregisters all subscribers and invokes onReset', async () => {
+		const harness = createMutableVaultApp([
+			{
+				path: 'notes/one.md',
+				cache: { tags: [{ tag: '#task', position: {} as never }] },
+			},
+		]);
+		const roster = new ActiveQueryRoster(harness.app);
+
+		let resetCount1 = 0;
+		let resetCount2 = 0;
+		const acAborted = new AbortController();
+		let abortedResetCalls = 0;
+
+		// 1. 0-query reset-only subscriber
+		roster.register(
+			{},
+			{
+				onReset: () => {
+					resetCount1++;
+				},
+			},
+			{},
+		);
+
+		// 2. Query + onUpdate + onReset subscriber
+		const init = await runVaultQuery(harness.app, { tasks: '#task' }, { timeZone: 'UTC' });
+		roster.register(
+			{ tasks: '#task' },
+			{
+				timeZone: 'UTC',
+				onReset: () => {
+					resetCount2++;
+				},
+			},
+			init,
+			() => {},
+		);
+
+		// 3. Aborted subscriber
+		roster.register(
+			{},
+			{
+				signal: acAborted.signal,
+				onReset: () => {
+					abortedResetCalls++;
+				},
+			},
+			{},
+		);
+		acAborted.abort();
+
+		expect(roster.size).toBe(2);
+
+		// Nudge should only scan for the active query subscriber, ignoring the 0-query subscriber
+		harness.resetScanCount();
+		await roster.nudge(1700000000000);
+		expect(harness.getScanCount()).toBe(1);
+
+		// resetAll() clears the roster and invokes non-aborted onReset callbacks
+		roster.resetAll();
+		expect(roster.size).toBe(0);
+		expect(resetCount1).toBe(1);
+		expect(resetCount2).toBe(1);
+		expect(abortedResetCalls).toBe(0);
+	});
 });
 
 describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
@@ -641,6 +759,108 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(renderedMarkdowns[1]).toContain(
 			'Note=host | Status=published | Alias=Updated Alias',
 		);
+
+		addedChildren[0]?.unload();
+		expect(plugin.activeQueryRoster.size).toBe(0);
+		renderSpy.mockRestore();
+	});
+
+	it('re-runs Pass 1 and heals or updates mounted rhizome codeblocks when a partial/layout file or folder setting changes', async () => {
+		const harness = createMutableVaultApp([
+			{
+				path: 'notes/alpha.md',
+				cache: { tags: [{ tag: '#task', position: {} as never }] },
+			},
+			{
+				path: 'notes/project.md',
+				cache: { tags: [{ tag: '#project', position: {} as never }] },
+			},
+			// Note: '◊Rhizome/partials/summary.md' initially does NOT exist
+		]);
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		const renderedMarkdowns: string[] = [];
+		const renderSpy = vi
+			.spyOn(MarkdownRenderer, 'render')
+			.mockImplementation(async (_app, markdown) => {
+				renderedMarkdowns.push(markdown);
+			});
+
+		const el = { empty: () => {} } as unknown as HTMLElement;
+		const addedChildren: MarkdownRenderChild[] = [];
+		const ctx = {
+			sourcePath: '',
+			addChild: (child: MarkdownRenderChild) => {
+				addedChildren.push(child);
+			},
+		} as unknown as MarkdownPostProcessorContext;
+
+		const source = "{% render 'summary' %}";
+		await processRhizomeCodeBlock(source, el, ctx, plugin);
+
+		// Initially fails in Pass 1 because '◊Rhizome/partials/summary.md' is missing,
+		// but still registers a reset-only subscription on activeQueryRoster!
+		expect(plugin.activeQueryRoster.size).toBe(1);
+		expect(renderedMarkdowns).toHaveLength(1);
+		expect(renderedMarkdowns[0]).toContain(
+			'> [!danger] Template Error: `TEMPLATE_RENDER_ERROR`',
+		);
+
+		// 1. Create '◊Rhizome/partials/summary.md' with a {% query tasks %} block and trigger resetAll()
+		harness.setNotes([
+			{
+				path: 'notes/alpha.md',
+				cache: { tags: [{ tag: '#task', position: {} as never }] },
+			},
+			{
+				path: 'notes/project.md',
+				cache: { tags: [{ tag: '#project', position: {} as never }] },
+			},
+			{
+				path: '◊Rhizome/partials/summary.md',
+				content:
+					'{% query tasks %}#task{% endquery %}Tasks={{ query.tasks.first.file.basename }}',
+				cache: {},
+			},
+		]);
+		plugin.activeQueryRoster.resetAll();
+
+		await vi.waitFor(() => {
+			expect(renderedMarkdowns).toHaveLength(2);
+		});
+		expect(renderedMarkdowns[1]).toContain('Tasks=alpha');
+		expect(plugin.activeQueryRoster.size).toBe(1);
+
+		// 2. Edit '◊Rhizome/partials/summary.md' to add a second query `#project` and emit metadataCache 'changed'
+		vi.useFakeTimers();
+		try {
+			harness.setNotes([
+				{
+					path: 'notes/alpha.md',
+					cache: { tags: [{ tag: '#task', position: {} as never }] },
+				},
+				{
+					path: 'notes/project.md',
+					cache: { tags: [{ tag: '#project', position: {} as never }] },
+				},
+				{
+					path: '◊Rhizome/partials/summary.md',
+					content:
+						'{% query tasks %}#task{% endquery %}{% query projs %}#project{% endquery %}Tasks={{ query.tasks.size }},Projs={{ query.projs.first.file.basename }}',
+					cache: {},
+				},
+			]);
+			harness.emitMetadataChanged('◊Rhizome/partials/summary.md');
+			await vi.advanceTimersByTimeAsync(600);
+		} finally {
+			vi.useRealTimers();
+		}
+
+		await vi.waitFor(() => {
+			expect(renderedMarkdowns).toHaveLength(3);
+		});
+		expect(renderedMarkdowns[2]).toContain('Tasks=1,Projs=project');
 
 		addedChildren[0]?.unload();
 		expect(plugin.activeQueryRoster.size).toBe(0);

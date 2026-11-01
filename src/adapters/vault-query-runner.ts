@@ -44,6 +44,11 @@ export interface VaultQueryOptions {
 	readonly heading?: string | undefined;
 	/** Optional AbortSignal to unregister a reactive `onUpdate` callback when the caller unloads. */
 	readonly signal?: AbortSignal | undefined;
+	/**
+	 * Optional callback invoked by `ActiveQueryRoster.resetAll()` when a template, partial,
+	 * layout, or template folder setting changes, forcing the subscriber to re-run Pass 1.
+	 */
+	readonly onReset?: (() => void) | undefined;
 }
 
 /**

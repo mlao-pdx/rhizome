@@ -310,7 +310,9 @@ interface ActiveSubscription {
 	readonly timeZone: string | undefined;
 	readonly propertyTypes: PropertyTypeRegistry | undefined;
 	readonly signal: AbortSignal | undefined;
-	readonly onUpdate: VaultQueryCallback;
+	readonly onAbort: () => void;
+	readonly onUpdate: VaultQueryCallback | undefined;
+	readonly onReset: (() => void) | undefined;
 	lastPayloadHash: string;
 }
 
@@ -350,41 +352,77 @@ export class ActiveQueryRoster {
 
 	/**
 	 * Registers a reactive query subscriber with its initial result snapshot and
-	 * optional `AbortSignal` for automatic cleanup on unload.
+	 * optional `AbortSignal` / `onReset` callback for automatic cleanup or forced re-parse.
 	 */
 	register(
 		queries: Readonly<Record<string, string>>,
 		options: VaultQueryOptions | undefined,
 		initialResult: VaultQueryResult,
-		onUpdate: VaultQueryCallback,
+		onUpdate?: VaultQueryCallback,
 	): () => void {
 		const entries = sanitizeQueryEntries(queries);
 		const signal = options?.signal;
-		if (entries.length === 0 || signal?.aborted === true) {
+		const onReset = options?.onReset;
+		const hasUpdateQueries = entries.length > 0 && typeof onUpdate === 'function';
+		if ((!hasUpdateQueries && typeof onReset !== 'function') || signal?.aborted === true) {
 			return () => {};
 		}
 
 		const id = this.nextId++;
+		const onAbort = () => {
+			this.subscriptions.delete(id);
+		};
 		const sub: ActiveSubscription = {
 			id,
 			entries,
 			timeZone: options?.timeZone,
 			propertyTypes: options?.propertyTypes,
 			signal,
+			onAbort,
 			onUpdate,
+			onReset,
 			lastPayloadHash: hashVaultQueryResult(initialResult),
 		};
 		this.subscriptions.set(id, sub);
 
-		const onAbort = () => {
-			this.subscriptions.delete(id);
-		};
 		signal?.addEventListener('abort', onAbort, { once: true });
 
 		return () => {
 			signal?.removeEventListener('abort', onAbort);
 			this.subscriptions.delete(id);
 		};
+	}
+
+	/**
+	 * Deregisters all active subscriptions and invokes each non-aborted subscriber's
+	 * `onReset()` callback so mounted `rhizome` codeblocks re-run Pass 1 from scratch.
+	 */
+	resetAll(): void {
+		if (this.subscriptions.size === 0) {
+			return;
+		}
+		const snapshot = [...this.subscriptions.values()];
+		this.subscriptions.clear();
+		this.rerunPending = false;
+
+		for (const sub of snapshot) {
+			sub.signal?.removeEventListener('abort', sub.onAbort);
+			if (sub.signal?.aborted || typeof sub.onReset !== 'function') {
+				continue;
+			}
+			try {
+				sub.onReset();
+			} catch (error) {
+				this.logger?.log(
+					'error',
+					`Reactive query reset callback failed: ${markSensitive(String(error))}`,
+					{
+						source: 'query.reactive',
+						error: markSensitive(String(error)),
+					},
+				);
+			}
+		}
 	}
 
 	/**
@@ -418,6 +456,9 @@ export class ActiveQueryRoster {
 
 	/** Removes all active subscriptions immediately. */
 	clear(): void {
+		for (const sub of this.subscriptions.values()) {
+			sub.signal?.removeEventListener('abort', sub.onAbort);
+		}
 		this.subscriptions.clear();
 		this.rerunPending = false;
 	}
@@ -438,7 +479,11 @@ export class ActiveQueryRoster {
 
 		for (const sub of this.subscriptions.values()) {
 			if (sub.signal?.aborted) {
+				sub.signal.removeEventListener('abort', sub.onAbort);
 				this.subscriptions.delete(sub.id);
+				continue;
+			}
+			if (sub.entries.length === 0 || typeof sub.onUpdate !== 'function') {
 				continue;
 			}
 			const key = buildConfigGroupKey(sub.timeZone, sub.propertyTypes);
@@ -486,6 +531,9 @@ export class ActiveQueryRoster {
 			for (const sub of group.subs) {
 				if (sub.signal?.aborted || !this.subscriptions.has(sub.id)) {
 					this.subscriptions.delete(sub.id);
+					continue;
+				}
+				if (typeof sub.onUpdate !== 'function') {
 					continue;
 				}
 

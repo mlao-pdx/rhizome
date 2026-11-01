@@ -7,6 +7,7 @@ import {
 	TFile,
 } from 'obsidian';
 import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
+import { isPathInTemplateFolders, type TemplateFolderConfig } from '@core/templates';
 import { ActiveQueryRoster } from './adapters/active-query-roster';
 import { createRhizomeEditorExtension } from './adapters/codemirror/rhizome-editor-extension';
 import { DexiePersistenceAdapter } from './adapters/dexie-persistence-adapter';
@@ -108,6 +109,7 @@ export default class RhizomePlugin extends Plugin {
 		this.register(() => this.activeQueryRoster.clear());
 
 		let nudgeTimer: ReturnType<typeof setTimeout> | null = null;
+		let resetTimer: ReturnType<typeof setTimeout> | null = null;
 		const scheduleReactiveQueryNudge = (): void => {
 			if (this.activeQueryRoster.size === 0) {
 				return;
@@ -120,12 +122,31 @@ export default class RhizomePlugin extends Plugin {
 				void this.activeQueryRoster.nudge();
 			}, REACTIVE_QUERY_DEBOUNCE_MS);
 		};
+		const scheduleTemplateReset = (): void => {
+			if (this.activeQueryRoster.size === 0) {
+				return;
+			}
+			if (resetTimer !== null) {
+				clearTimeout(resetTimer);
+			}
+			resetTimer = setTimeout(() => {
+				resetTimer = null;
+				this.activeQueryRoster.resetAll();
+			}, REACTIVE_QUERY_DEBOUNCE_MS);
+		};
 		this.register(() => {
 			if (nudgeTimer !== null) {
 				clearTimeout(nudgeTimer);
 				nudgeTimer = null;
 			}
+			if (resetTimer !== null) {
+				clearTimeout(resetTimer);
+				resetTimer = null;
+			}
 		});
+
+		const isTemplateFolderNote = (path: unknown): boolean =>
+			isMarkdownPath(path) && isPathInTemplateFolders(path, this.getTemplateFolderConfig());
 
 		// Notes with ◊InternalRhizome code "001" (DO_NOT_INDEX_OR_QUERY) are
 		// ignored across metadataCache/vault events so internal notes (such as
@@ -137,6 +158,9 @@ export default class RhizomePlugin extends Plugin {
 		// state-tracking complexity.
 		this.registerEvent(
 			this.app.metadataCache.on('changed', (file, _data, cache) => {
+				if (isTemplateFolderNote(file?.path)) {
+					scheduleTemplateReset();
+				}
 				if (
 					isMarkdownPath(file?.path) &&
 					!isDoNotIndexFrontmatter(cache ?? this.app.metadataCache.getFileCache(file))
@@ -147,6 +171,9 @@ export default class RhizomePlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.metadataCache.on('deleted', (file, prevCache) => {
+				if (isTemplateFolderNote(file?.path)) {
+					scheduleTemplateReset();
+				}
 				if (
 					isMarkdownPath(file?.path) &&
 					!isDoNotIndexFrontmatter(prevCache ?? this.app.metadataCache.getFileCache(file))
@@ -157,6 +184,9 @@ export default class RhizomePlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
+				if (isTemplateFolderNote(file?.path) || isTemplateFolderNote(oldPath)) {
+					scheduleTemplateReset();
+				}
 				if (
 					(isMarkdownPath(file?.path) || isMarkdownPath(oldPath)) &&
 					!isDoNotIndexFrontmatter(getAbstractFileCache(this.app, file))
@@ -196,13 +226,22 @@ export default class RhizomePlugin extends Plugin {
 		await this.dataStore.saveSettings(this.settings);
 	}
 
+	getTemplateFolderConfig(): TemplateFolderConfig {
+		return {
+			templatesFolder: this.settings.templatesFolder,
+			partialsFolder: this.settings.partialsFolder,
+			layoutsFolder: this.settings.layoutsFolder,
+			configDir: this.app.vault.configDir,
+		};
+	}
+
 	async query(
 		queries: Readonly<Record<string, string>> = {},
 		options?: VaultQueryOptions,
 		onUpdate?: VaultQueryCallback,
 	): Promise<VaultQueryResult> {
 		const result = await runVaultQuery(this.app, queries, options, this.loggerAdapter);
-		if (onUpdate) {
+		if (onUpdate || typeof options?.onReset === 'function') {
 			this.activeQueryRoster?.register(queries, options, result, onUpdate);
 		}
 		return result;

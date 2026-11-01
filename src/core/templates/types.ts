@@ -11,6 +11,7 @@ export interface ExtractedQueryBlock {
 	readonly headerSpan: SourceSpan;
 	readonly bodySpan: SourceSpan;
 	readonly fullSpan: SourceSpan;
+	readonly file?: string | null;
 }
 
 /**
@@ -33,10 +34,11 @@ export interface TemplateDiagnostic {
 	readonly issue: string;
 	readonly hint: string | null;
 	readonly span: SourceSpan | null;
+	readonly file?: string | null;
 }
 
 /**
- * Vault-relative folder paths for LiquidJS `root` (templates), `partials` (`{% render %}` / `{% include %}`),
+ * Vault-relative folder paths for LiquidJS `root` (templates), `partials` (`{% render %}`),
  * and `layouts` (`{% layout %}`).
  */
 export interface TemplateFolderConfig {

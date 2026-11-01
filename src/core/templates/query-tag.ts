@@ -64,6 +64,7 @@ export function offsetRangeToSourceSpan(
 export function parseQueryTagArgs(
 	rawArgs: string,
 	headerSpan: SourceSpan,
+	file: string | null = null,
 ):
 	| { readonly ok: true; readonly name: string; readonly explain: boolean }
 	| { readonly ok: false; readonly diagnostic: TemplateDiagnostic } {
@@ -77,6 +78,7 @@ export function parseQueryTagArgs(
 				issue: "Missing query variable name in '{% query %}' tag.",
 				hint: "Provide a variable name after 'query', e.g., '{% query tasks %}' or '{% query tasks explain %}'.",
 				span: headerSpan,
+				file,
 			}),
 		};
 	}
@@ -93,6 +95,7 @@ export function parseQueryTagArgs(
 				issue: "Reserved keyword 'explain' cannot be used as a query variable name.",
 				hint: "Place the variable name before 'explain', e.g., '{% query tasks explain %}'.",
 				span: headerSpan,
+				file,
 			}),
 		};
 	}
@@ -106,6 +109,7 @@ export function parseQueryTagArgs(
 				issue: `Invalid query variable name '${rawName}'.`,
 				hint: "Query variable names must start with a letter or '_' and contain only letters, digits, '_', or '-'.",
 				span: headerSpan,
+				file,
 			}),
 		};
 	}
@@ -119,6 +123,7 @@ export function parseQueryTagArgs(
 				issue: `Too many arguments in '{% query ${trimmed} %}' tag.`,
 				hint: "Expected '{% query <name> %}' or '{% query <name> explain %}'; put filter expressions inside the tag body before '{% endquery %}'.",
 				span: headerSpan,
+				file,
 			}),
 		};
 	}
@@ -138,6 +143,7 @@ export function parseQueryTagArgs(
 						rawName +
 						" explain %}'.",
 					span: headerSpan,
+					file,
 				}),
 			};
 		}
@@ -340,13 +346,23 @@ export function scanQueryBlockSpans(source: string): readonly ScannedQueryBlockS
 }
 
 /**
+ * Source location and optional vault-relative file path where a query variable name was first defined.
+ */
+export interface SeenQueryDefinition {
+	readonly span: SourceSpan;
+	readonly file: string | null;
+}
+
+/**
  * Mutable parse/render state shared across `{% query %}` tags within a single
  * `renderRhizomeTemplate` or `analyzeRhizomeCodeBlock` invocation.
  */
 export interface QueryTagEnvironment {
-	readonly seenNames: Map<string, SourceSpan>;
+	readonly seenNames: Map<string, SeenQueryDefinition>;
+	readonly fileSources: Map<string, string>;
 	readonly queries: ExtractedQueryBlock[];
 	readonly diagnostics: TemplateDiagnostic[];
+	pass1Complete: boolean;
 	payload: Readonly<Record<string, unknown[]>>;
 	explainQuery: ((query: string, heading: string) => Promise<string>) | null;
 }
@@ -356,9 +372,11 @@ export interface QueryTagEnvironment {
  */
 export function createQueryTagEnvironment(): QueryTagEnvironment {
 	return {
-		seenNames: new Map<string, SourceSpan>(),
+		seenNames: new Map<string, SeenQueryDefinition>(),
+		fileSources: new Map<string, string>(),
 		queries: [],
 		diagnostics: [],
+		pass1Complete: false,
 		payload: Object.freeze({}),
 		explainQuery: null,
 	};
@@ -387,8 +405,8 @@ export function maskQueryBlockBodies(source: string): string {
 }
 
 /**
- * Registers the `{% query <name> [explain] %} ... {% endquery %}` block tag on `liquid`,
- * bound to `env`.
+ * Registers the `{% query <name> [explain] %} ... {% endquery %}` block tag and disables
+ * the deprecated `{% include %}` tag on `liquid`, bound to `env`.
  */
 export function registerQueryTag(
 	liquid: Liquid,
@@ -407,15 +425,21 @@ export function registerQueryTag(
 		) {
 			super(tagToken, remainTokens, liquidInstance);
 
-			if (typeof tagToken.file === 'string' && tagToken.file.trim().length > 0) {
+			if (env.pass1Complete) {
 				throw new Error(
-					`'{% query %}' blocks must be declared in the top-level rhizome codeblock, not inside '${tagToken.file.trim()}'.`,
+					"'{% query %}' blocks cannot be parsed dynamically during render Pass 2; use static quoted filenames in '{% render %}' and '{% layout %}'.",
 				);
 			}
 
-			const source = originalSource ?? tagToken.input;
+			const externalFile =
+				typeof tagToken.file === 'string' && tagToken.file.trim().length > 0
+					? tagToken.file.trim()
+					: null;
+			const source =
+				(externalFile !== null ? env.fileSources.get(externalFile) : originalSource) ??
+				tagToken.input;
 			const headerSpan = offsetRangeToSourceSpan(source, tagToken.begin, tagToken.end);
-			const parsedArgs = parseQueryTagArgs(tagToken.args, headerSpan);
+			const parsedArgs = parseQueryTagArgs(tagToken.args, headerSpan, externalFile);
 
 			let endTagToken: TagToken | null = null;
 			let commentDepth = 0;
@@ -453,6 +477,7 @@ export function registerQueryTag(
 						issue: `Unclosed '${tagToken.getText()}' block; missing '{% endquery %}'.`,
 						hint: "Close the query block with '{% endquery %}'.",
 						span: headerSpan,
+						file: externalFile,
 					}),
 				);
 				return;
@@ -467,6 +492,7 @@ export function registerQueryTag(
 						issue: `Unexpected arguments '${endTagToken.args.trim()}' in '{% endquery %}' tag.`,
 						hint: "Use '{% endquery %}' with no arguments.",
 						span: endSpan,
+						file: externalFile,
 					}),
 				);
 			}
@@ -488,21 +514,28 @@ export function registerQueryTag(
 			this.queryText = rawQuery;
 			this.explainFlag = explain;
 
-			const previousSpan = env.seenNames.get(name);
-			if (previousSpan) {
+			const previousDef = env.seenNames.get(name);
+			if (previousDef) {
+				const prevFileNote =
+					previousDef.file !== null
+						? `in '${previousDef.file}', `
+						: externalFile !== null
+							? 'in the root codeblock, '
+							: '';
 				env.diagnostics.push(
 					Object.freeze({
 						code: 'DUPLICATE_QUERY_NAME',
 						severity: 'error',
-						issue: `Duplicate query variable name '${name}' (already defined on line ${previousSpan.startLine}, column ${previousSpan.startColumn}).`,
-						hint: `Rename one of the '{% query ${name} %}' blocks so every query in the codeblock binds a unique variable name.`,
+						issue: `Duplicate query variable name '${name}' (already defined ${prevFileNote}on line ${previousDef.span.startLine}, column ${previousDef.span.startColumn}).`,
+						hint: `Rename one of the '{% query ${name} %}' blocks so every query in the codeblock and its partials/layouts binds a unique variable name.`,
 						span: headerSpan,
+						file: externalFile,
 					}),
 				);
 				return;
 			}
 
-			env.seenNames.set(name, headerSpan);
+			env.seenNames.set(name, Object.freeze({ span: headerSpan, file: externalFile }));
 			env.queries.push(
 				Object.freeze({
 					name,
@@ -511,6 +544,7 @@ export function registerQueryTag(
 					headerSpan,
 					bodySpan,
 					fullSpan,
+					file: externalFile,
 				}),
 			);
 		}
@@ -533,5 +567,41 @@ export function registerQueryTag(
 		}
 	}
 
+	class DisabledIncludeTag extends Tag {
+		public constructor(
+			tagToken: TagToken,
+			remainTokens: TopLevelToken[],
+			liquidInstance: Liquid,
+		) {
+			super(tagToken, remainTokens, liquidInstance);
+
+			const externalFile =
+				typeof tagToken.file === 'string' && tagToken.file.trim().length > 0
+					? tagToken.file.trim()
+					: null;
+			const source =
+				(externalFile !== null ? env.fileSources.get(externalFile) : originalSource) ??
+				tagToken.input;
+			const span = offsetRangeToSourceSpan(source, tagToken.begin, tagToken.end);
+			const inFileSuffix = externalFile !== null ? ` (in '${externalFile}')` : '';
+
+			env.diagnostics.push(
+				Object.freeze({
+					code: 'TEMPLATE_SYNTAX_ERROR',
+					severity: 'error',
+					issue: `'${tagToken.getText()}' is disabled; use '{% render ... %}' instead of deprecated '{% include ... %}'${inFileSuffix}.`,
+					hint: "Replace '{% include ... %}' with '{% render ... %}'.",
+					span,
+					file: externalFile,
+				}),
+			);
+		}
+
+		public render(): void {
+			// No-op: blocked during Pass 1
+		}
+	}
+
 	liquid.registerTag('query', QueryBlockTag);
+	liquid.registerTag('include', DisabledIncludeTag);
 }

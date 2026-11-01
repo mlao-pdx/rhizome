@@ -10,7 +10,7 @@ import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
 import {
 	buildHostNoteQuery,
 	HOST_QUERY_KEY,
-	parseRhizomeTemplatePass1,
+	parseRhizomeTemplatePass1Async,
 	renderParsedRhizomeTemplate,
 	type TemplateRenderResult,
 	type TemplateRuntimeContext,
@@ -103,9 +103,10 @@ function logCodeBlockRenderResult(
 }
 
 /**
- * Processes a fenced `rhizome` Markdown codeblock by parsing its template in Pass 1,
- * subscribing to reactive query updates via `plugin.query(..., onUpdate)` when queries
- * are present, and rendering the resulting Markdown into `el` via `MarkdownRenderer.render`.
+ * Processes a fenced `rhizome` Markdown codeblock by parsing its template and any
+ * referenced partials/layouts in Pass 1, subscribing to reactive query updates (`onUpdate`)
+ * and template/partial/layout resets (`onReset`) via `plugin.query(...)`, and rendering
+ * the resulting Markdown into `el` via `MarkdownRenderer.render`.
  */
 export async function processRhizomeCodeBlock(
 	source: string,
@@ -113,19 +114,29 @@ export async function processRhizomeCodeBlock(
 	ctx: MarkdownPostProcessorContext,
 	plugin: RhizomePlugin,
 ): Promise<void> {
-	const startedAt = Date.now();
-	const referenceTimeMs = startedAt;
 	const sourcePath = typeof ctx.sourcePath === 'string' ? ctx.sourcePath : '';
 
 	const outerChild = new MarkdownRenderChild(el);
 	ctx.addChild(outerChild);
-	const abortController = new AbortController();
-	outerChild.register(() => abortController.abort());
+	const outerAbortController = new AbortController();
+	let activeCycleController: AbortController | null = null;
+	outerChild.register(() => {
+		outerAbortController.abort();
+		activeCycleController?.abort();
+	});
 
 	let activeRenderChild: MarkdownRenderChild | null = null;
 	let renderGeneration = 0;
-	const renderIntoContainer = async (markdown: string, generation: number): Promise<void> => {
-		if (abortController.signal.aborted || generation !== renderGeneration) {
+	const renderIntoContainer = async (
+		markdown: string,
+		generation: number,
+		cycleSignal: AbortSignal,
+	): Promise<void> => {
+		if (
+			outerAbortController.signal.aborted ||
+			cycleSignal.aborted ||
+			generation !== renderGeneration
+		) {
 			return;
 		}
 		if (activeRenderChild !== null) {
@@ -141,106 +152,142 @@ export async function processRhizomeCodeBlock(
 		await MarkdownRenderer.render(plugin.app, markdown, el, sourcePath, renderChild);
 	};
 
-	const parsed = parseRhizomeTemplatePass1(
-		source,
-		{
-			templatesFolder: plugin.settings.templatesFolder,
-			partialsFolder: plugin.settings.partialsFolder,
-			layoutsFolder: plugin.settings.layoutsFolder,
-			configDir: plugin.app.vault.configDir,
-		},
-		(vaultRelativePath) => readVaultTemplateNote(plugin, vaultRelativePath),
-	);
+	const runCycle = async (): Promise<void> => {
+		if (outerAbortController.signal.aborted) {
+			return;
+		}
+		activeCycleController?.abort();
+		const cycleController = new AbortController();
+		activeCycleController = cycleController;
+		const cycleSignal = cycleController.signal;
 
-	if (parsed.env.diagnostics.length > 0 || parsed.templates === null) {
-		const generation = ++renderGeneration;
-		const errorResult = await renderParsedRhizomeTemplate(
+		const startedAt = Date.now();
+		const referenceTimeMs = startedAt;
+		const onReset = (): void => {
+			if (outerAbortController.signal.aborted) {
+				return;
+			}
+			cycleController.abort();
+			void runCycle();
+		};
+
+		const parsed = await parseRhizomeTemplatePass1Async(
+			source,
+			{
+				templatesFolder: plugin.settings.templatesFolder,
+				partialsFolder: plugin.settings.partialsFolder,
+				layoutsFolder: plugin.settings.layoutsFolder,
+				configDir: plugin.app.vault.configDir,
+			},
+			(vaultRelativePath) => readVaultTemplateNote(plugin, vaultRelativePath),
+		);
+		if (outerAbortController.signal.aborted || cycleSignal.aborted) {
+			return;
+		}
+
+		if (parsed.env.diagnostics.length > 0 || parsed.templates === null) {
+			const generation = ++renderGeneration;
+			await plugin.query(Object.freeze({}), {
+				referenceTimeMs,
+				signal: cycleSignal,
+				onReset,
+			});
+			if (
+				outerAbortController.signal.aborted ||
+				cycleSignal.aborted ||
+				generation !== renderGeneration
+			) {
+				return;
+			}
+			const errorResult = await renderParsedRhizomeTemplate(
+				source,
+				parsed,
+				Object.freeze({}),
+				(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
+				buildRuntimeContext(plugin, referenceTimeMs, sourcePath),
+			);
+			if (
+				outerAbortController.signal.aborted ||
+				cycleSignal.aborted ||
+				generation !== renderGeneration
+			) {
+				return;
+			}
+			const durationMs = Math.max(0, Date.now() - startedAt);
+			logCodeBlockRenderResult(plugin, sourcePath, errorResult, durationMs);
+			await renderIntoContainer(errorResult.markdown, generation, cycleSignal);
+			return;
+		}
+
+		const queries = parsed.env.queries;
+		const queryMap = Object.create(null) as Record<string, string>;
+		if (sourcePath.length > 0) {
+			queryMap[HOST_QUERY_KEY] = buildHostNoteQuery(sourcePath);
+		}
+		for (const q of queries) {
+			queryMap[q.name] = q.query;
+		}
+
+		const onUpdate = async (newPayload: VaultQueryResult): Promise<void> => {
+			if (outerAbortController.signal.aborted || cycleSignal.aborted) {
+				return;
+			}
+			const generation = ++renderGeneration;
+			const updateStartedAt = Date.now();
+			const updatedResult = await renderParsedRhizomeTemplate(
+				source,
+				parsed,
+				newPayload,
+				(query, heading) =>
+					plugin.explainQuery(query, { referenceTimeMs: updateStartedAt, heading }),
+				buildRuntimeContext(plugin, updateStartedAt, sourcePath),
+			);
+			if (
+				outerAbortController.signal.aborted ||
+				cycleSignal.aborted ||
+				generation !== renderGeneration
+			) {
+				return;
+			}
+			const updateDurationMs = Math.max(0, Date.now() - updateStartedAt);
+			logCodeBlockRenderResult(plugin, sourcePath, updatedResult, updateDurationMs);
+			await renderIntoContainer(updatedResult.markdown, generation, cycleSignal);
+		};
+
+		const initialGeneration = ++renderGeneration;
+		const hasQueries = Object.keys(queryMap).length > 0;
+		const initialPayload = await plugin.query(
+			Object.freeze(queryMap),
+			{ referenceTimeMs, signal: cycleSignal, onReset },
+			hasQueries ? onUpdate : undefined,
+		);
+		if (
+			outerAbortController.signal.aborted ||
+			cycleSignal.aborted ||
+			initialGeneration !== renderGeneration
+		) {
+			return;
+		}
+
+		const initialResult = await renderParsedRhizomeTemplate(
 			source,
 			parsed,
-			Object.freeze({}),
+			initialPayload,
 			(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
 			buildRuntimeContext(plugin, referenceTimeMs, sourcePath),
 		);
-		if (abortController.signal.aborted || generation !== renderGeneration) {
+		if (
+			outerAbortController.signal.aborted ||
+			cycleSignal.aborted ||
+			initialGeneration !== renderGeneration
+		) {
 			return;
 		}
+
 		const durationMs = Math.max(0, Date.now() - startedAt);
-		logCodeBlockRenderResult(plugin, sourcePath, errorResult, durationMs);
-		await renderIntoContainer(errorResult.markdown, generation);
-		return;
-	}
-
-	const queries = parsed.env.queries;
-	const queryMap = Object.create(null) as Record<string, string>;
-	if (sourcePath.length > 0) {
-		queryMap[HOST_QUERY_KEY] = buildHostNoteQuery(sourcePath);
-	}
-	for (const q of queries) {
-		queryMap[q.name] = q.query;
-	}
-
-	if (Object.keys(queryMap).length === 0) {
-		const generation = ++renderGeneration;
-		const result = await renderParsedRhizomeTemplate(
-			source,
-			parsed,
-			Object.freeze({}),
-			(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
-			buildRuntimeContext(plugin, referenceTimeMs, sourcePath),
-		);
-		if (abortController.signal.aborted || generation !== renderGeneration) {
-			return;
-		}
-		const durationMs = Math.max(0, Date.now() - startedAt);
-		logCodeBlockRenderResult(plugin, sourcePath, result, durationMs);
-		await renderIntoContainer(result.markdown, generation);
-		return;
-	}
-
-	const onUpdate = async (newPayload: VaultQueryResult): Promise<void> => {
-		if (abortController.signal.aborted) {
-			return;
-		}
-		const generation = ++renderGeneration;
-		const updateStartedAt = Date.now();
-		const updatedResult = await renderParsedRhizomeTemplate(
-			source,
-			parsed,
-			newPayload,
-			(query, heading) =>
-				plugin.explainQuery(query, { referenceTimeMs: updateStartedAt, heading }),
-			buildRuntimeContext(plugin, updateStartedAt, sourcePath),
-		);
-		if (abortController.signal.aborted || generation !== renderGeneration) {
-			return;
-		}
-		const updateDurationMs = Math.max(0, Date.now() - updateStartedAt);
-		logCodeBlockRenderResult(plugin, sourcePath, updatedResult, updateDurationMs);
-		await renderIntoContainer(updatedResult.markdown, generation);
+		logCodeBlockRenderResult(plugin, sourcePath, initialResult, durationMs);
+		await renderIntoContainer(initialResult.markdown, initialGeneration, cycleSignal);
 	};
 
-	const initialGeneration = ++renderGeneration;
-	const initialPayload = await plugin.query(
-		Object.freeze(queryMap),
-		{ referenceTimeMs, signal: abortController.signal },
-		onUpdate,
-	);
-	if (abortController.signal.aborted || initialGeneration !== renderGeneration) {
-		return;
-	}
-
-	const initialResult = await renderParsedRhizomeTemplate(
-		source,
-		parsed,
-		initialPayload,
-		(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
-		buildRuntimeContext(plugin, referenceTimeMs, sourcePath),
-	);
-	if (abortController.signal.aborted || initialGeneration !== renderGeneration) {
-		return;
-	}
-
-	const durationMs = Math.max(0, Date.now() - startedAt);
-	logCodeBlockRenderResult(plugin, sourcePath, initialResult, durationMs);
-	await renderIntoContainer(initialResult.markdown, initialGeneration);
+	await runCycle();
 }
