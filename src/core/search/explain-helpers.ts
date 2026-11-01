@@ -19,7 +19,6 @@ import {
 	type ScopedFilterNode,
 	type SearchAST,
 	type SourceSpan,
-	type TextMatchNode,
 	type ValueExprAST,
 } from './types';
 
@@ -237,12 +236,8 @@ export function buildRegex101Url(pattern: string, flags: string): string {
 /**
  * Formats the authored filter representation of a leaf AST node.
  */
-export function formatAuthoredFilter(
-	node: ScopedFilterNode | PropertyFilterNode | TextMatchNode,
-): string {
+export function formatAuthoredFilter(node: ScopedFilterNode | PropertyFilterNode): string {
 	switch (node.type) {
-		case 'TEXT_MATCH':
-			return node.rawText;
 		case 'SCOPED_FILTER': {
 			const rhs = formatScopeRhsDisplay(node.expr);
 			if (node.rawScope === '#') {
@@ -419,7 +414,6 @@ export function extractAstSlice(input: string, node: SearchAST): string {
 		return input.slice(node.span.startOffset, node.span.endOffset);
 	}
 	switch (node.type) {
-		case 'TEXT_MATCH':
 		case 'SCOPED_FILTER':
 		case 'PROPERTY_FILTER':
 			return formatAuthoredFilter(node);

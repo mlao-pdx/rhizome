@@ -123,7 +123,7 @@ describe('search conformance matrix', () => {
 		const aliasDraft = makeDoc('Notes/published.md', { frontmatter: { aliases: ['draft'] } });
 		const extensionDraft = makeDoc('Notes/final.draft');
 		const docs = [draft, signed, aliasDraft, extensionDraft, clean];
-		assertReports('!draft', docs, [clean]);
+		assertReports('!file:draft', docs, [aliasDraft, clean]);
 		assertReports('file:-draft', docs, [signed]);
 		assertReports('file:!draft', docs, [aliasDraft, extensionDraft, clean]);
 		assertReports('file:(!draft)', docs, [aliasDraft, extensionDraft, clean]);
@@ -454,7 +454,7 @@ describe('search conformance matrix', () => {
 		const getScope = vi.fn(custom.getScope);
 		const instrumented = Object.freeze({ ...custom, getScope });
 		const query =
-			'file:/a/i AND task:/^urgent/i AND [status: /open/i] AND /a/i AND [due: = @today] AND [score: > 1] AND [done: = true]';
+			'file:/a/i AND task:/^urgent/i AND [status: /open/i] AND aliases:/u/i AND [due: = @today] AND [score: > 1] AND [done: = true]';
 		const { prepared } = compile(query, instrumented);
 		const doc = makeDoc(
 			'A.md',
@@ -483,7 +483,7 @@ describe('search conformance matrix', () => {
 			expect(date).toHaveBeenCalledTimes(1);
 			expect(type).toHaveBeenCalledTimes(4);
 			expect(keys).toHaveBeenCalledTimes(1);
-			expect(getScope).toHaveBeenCalledTimes(2);
+			expect(getScope).toHaveBeenCalledTimes(3);
 			expect(evaluateDoc(doc, prepared)).toBe(true);
 			expect(evaluateVault([doc], prepared).matches).toEqual([doc]);
 			expect(getExecutionPlan(prepared)).toBe(plan);
@@ -491,7 +491,7 @@ describe('search conformance matrix', () => {
 			expect(date).toHaveBeenCalledTimes(1);
 			expect(type).toHaveBeenCalledTimes(4);
 			expect(keys).toHaveBeenCalledTimes(1);
-			expect(getScope).toHaveBeenCalledTimes(2);
+			expect(getScope).toHaveBeenCalledTimes(3);
 		} finally {
 			vi.restoreAllMocks();
 		}

@@ -1,5 +1,12 @@
 import { CstParser, type IRecognitionException, type IToken } from 'chevrotain';
-import { endOfInputSpan, lowerQueryCst, type ParseQueryResult, tokenToSpan } from './ast-lowering';
+import {
+	endOfInputSpan,
+	lowerQueryCst,
+	mergeSpans,
+	type ParseQueryResult,
+	resolveBuiltInScopeCanonicalName,
+	tokenToSpan,
+} from './ast-lowering';
 import {
 	ALL_TOKENS,
 	And,
@@ -36,7 +43,7 @@ export class MaxDepthExceededError extends Error {
 }
 
 /**
- * Disambiguated LL(k) Chevrotain `CstParser` implementing the 16-rule filter syntax grammar.
+ * Disambiguated LL(k) Chevrotain `CstParser` implementing the 15-rule filter syntax grammar.
  */
 export class SearchParser extends CstParser {
 	private currentDepth = 0;
@@ -116,7 +123,6 @@ export class SearchParser extends CstParser {
 			{ ALT: () => this.SUBRULE(this.propertyFilter) },
 			{ ALT: () => this.SUBRULE(this.scopedOperator) },
 			{ ALT: () => this.SUBRULE(this.tagShorthand) },
-			{ ALT: () => this.SUBRULE(this.bareLeafValue) },
 		]);
 	});
 
@@ -218,15 +224,6 @@ export class SearchParser extends CstParser {
 		this.CONSUME(TagLiteral);
 	});
 
-	public readonly bareLeafValue = this.RULE('bareLeafValue', () => {
-		this.OR([
-			{ ALT: () => this.CONSUME(QuotedString) },
-			{ ALT: () => this.CONSUME(RegexLiteral) },
-			{ ALT: () => this.CONSUME(DateTimeLiteral) },
-			{ ALT: () => this.CONSUME(Identifier) },
-		]);
-	});
-
 	public readonly valueLeaf = this.RULE('valueLeaf', () => {
 		this.OR([
 			{ ALT: () => this.CONSUME(QuotedString) },
@@ -240,18 +237,121 @@ export class SearchParser extends CstParser {
 
 const sharedParser = new SearchParser();
 
+function isUnquotedValueToken(tok: IToken | undefined): tok is IToken {
+	return (
+		tok !== undefined &&
+		(tok.tokenType === Identifier ||
+			tok.tokenType === DateTimeLiteral ||
+			tok.tokenType === TagLiteral)
+	);
+}
+
+function isBareLiteralToken(tok: IToken | undefined): tok is IToken {
+	return (
+		tok !== undefined &&
+		(tok.tokenType === QuotedString ||
+			tok.tokenType === RegexLiteral ||
+			tok.tokenType === DateTimeLiteral ||
+			tok.tokenType === WikiLinkValue)
+	);
+}
+
 function recognitionExceptionToDiagnostic(
 	err: IRecognitionException,
 	input: string,
 	tokens: readonly IToken[],
 ): SearchDiagnostic {
-	const prev = (err as { previousToken?: IToken }).previousToken ?? tokens[tokens.length - 1];
+	const prevTok = (err as { previousToken?: IToken }).previousToken;
+	const fallback = prevTok ?? tokens[tokens.length - 1];
+	const ruleStack = err.context?.ruleStack ?? [];
+	const topRule = ruleStack[ruleStack.length - 1];
+
+	if (
+		err.name === 'MismatchedTokenException' &&
+		topRule === 'scopedOperator' &&
+		prevTok?.tokenType === Identifier
+	) {
+		const raw = prevTok.image;
+		const upper = raw.toUpperCase();
+		if ((upper === 'AND' || upper === 'OR' || upper === 'NOT') && raw !== upper) {
+			return {
+				code: 'SYNTAX_ERROR',
+				severity: 'error',
+				issue: `Lowercase "${raw}" is not a valid logical operator.`,
+				hint: `Use uppercase "${upper}".`,
+				span: tokenToSpan(prevTok, fallback, input),
+			};
+		}
+
+		const prevIdx = tokens.findIndex((t) => t.startOffset === prevTok.startOffset);
+		if (prevIdx >= 3) {
+			const scopeTok = tokens[prevIdx - 3];
+			const colonTok = tokens[prevIdx - 2];
+			const valTok = tokens[prevIdx - 1];
+			const beforeScopeTok = prevIdx >= 4 ? tokens[prevIdx - 4] : undefined;
+			if (
+				scopeTok?.tokenType === Identifier &&
+				colonTok?.tokenType === Colon &&
+				isUnquotedValueToken(valTok) &&
+				beforeScopeTok?.tokenType !== LBracket &&
+				scopeTok.startLine !== undefined &&
+				scopeTok.startLine === prevTok.startLine
+			) {
+				const scopeName = resolveBuiltInScopeCanonicalName(scopeTok.image);
+				return {
+					code: 'SYNTAX_ERROR',
+					severity: 'error',
+					issue: `"${raw}" is not inside "${scopeName}:"; bare search terms are not supported.`,
+					hint: `Use ${scopeName}:"${valTok.image} ${raw}"`,
+					span: mergeSpans(
+						tokenToSpan(scopeTok, fallback, input),
+						tokenToSpan(prevTok, fallback, input),
+					),
+				};
+			}
+		}
+
+		if (raw.startsWith('-')) {
+			return {
+				code: 'SYNTAX_ERROR',
+				severity: 'error',
+				issue: `Bare term "${raw}" is not allowed (hyphen negation is not supported).`,
+				hint: 'Use "!" or "NOT" to negate a filter (e.g. "!tag:..." or "![prop]").',
+				span: tokenToSpan(prevTok, fallback, input),
+			};
+		}
+
+		return {
+			code: 'SYNTAX_ERROR',
+			severity: 'error',
+			issue: `Bare search term "${raw}" is not supported.`,
+			hint: `Specify a scope (e.g. "file:${raw}", "aliases:${raw}", "#${raw}") or a property filter ("[prop:${raw}]").`,
+			span: tokenToSpan(prevTok, fallback, input),
+		};
+	}
+
+	if (
+		isBareLiteralToken(err.token) &&
+		(err.name === 'NoViableAltException' ||
+			err.name === 'NotAllInputParsedException' ||
+			(err.name === 'MismatchedTokenException' && topRule === 'parenthesized'))
+	) {
+		const raw = err.token.image;
+		return {
+			code: 'SYNTAX_ERROR',
+			severity: 'error',
+			issue: `Bare search term ${raw} is not supported.`,
+			hint: `Specify a scope (e.g. "file:${raw}") or a property filter ("[prop:${raw}]").`,
+			span: tokenToSpan(err.token, fallback, input),
+		};
+	}
+
 	return {
 		code: 'SYNTAX_ERROR',
 		severity: 'error',
 		issue: err.message,
 		hint: null,
-		span: tokenToSpan(err.token, prev, input),
+		span: tokenToSpan(err.token, fallback, input),
 	};
 }
 

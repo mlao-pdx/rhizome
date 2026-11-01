@@ -195,9 +195,9 @@ const RULE_METADATA = {
 			'Document-level unary negation (`NOT` or prefix `!`) or a `Primary` filter atom. Each negation increments syntactic nesting depth by `+1`.',
 	},
 	primary: {
-		ebnf: 'Primary ::= Parenthesized | PropertyFilter | ScopedOperator | TagShorthand | BareLeafValue',
+		ebnf: 'Primary ::= Parenthesized | PropertyFilter | ScopedOperator | TagShorthand',
 		description:
-			'Disambiguated atomic document-level filter unit: parenthesized group, bracketed property filter, `scope:value` operator, `#tag` shorthand, or bare full-text search term.',
+			'Disambiguated atomic document-level filter unit: parenthesized group, bracketed property filter, `scope:value` operator, or `#tag` shorthand.',
 	},
 	parenthesized: {
 		ebnf: 'Parenthesized ::= "(" OrExpression ")"',
@@ -244,11 +244,6 @@ const RULE_METADATA = {
 		description:
 			'Top-level `#tag` shorthand (e.g. `#work/urgent`), lowered identically to `tag:#work/urgent`.',
 	},
-	bareLeafValue: {
-		ebnf: 'BareLeafValue ::= QuotedString | RegexLiteral | DateTimeLiteral | Identifier',
-		description:
-			'Unscoped full-text search term matched against note title/filename, aliases, and body text.',
-	},
 	valueLeaf: {
 		ebnf: 'ValueLeaf ::= QuotedString | RegexLiteral | DateTimeLiteral | TagLiteral | Identifier',
 		description:
@@ -281,8 +276,8 @@ const SECTIONS = [
 	},
 	{
 		title: '4. Keys, Scopes & Leaf Values',
-		intro: 'Terminal-level productions disambiguating property keys, scope identifiers, `#tag` shorthands, bare full-text terms, and value leaves.',
-		rules: ['propertyKey', 'scopeName', 'tagShorthand', 'bareLeafValue', 'valueLeaf'],
+		intro: 'Terminal-level productions disambiguating property keys, scope identifiers, `#tag` shorthands, and value leaves.',
+		rules: ['propertyKey', 'scopeName', 'tagShorthand', 'valueLeaf'],
 	},
 ];
 

@@ -68,9 +68,6 @@ function assertAstSpansAndFreeze(ast: SearchAST, inputLength: number, checkFroze
 		assertValidSpan(ast.span, inputLength);
 	}
 	switch (ast.type) {
-		case 'TEXT_MATCH':
-			if (checkFrozen) expect(Object.isFrozen(ast.matcher)).toBe(true);
-			return;
 		case 'NOT':
 			assertAstSpansAndFreeze(ast.child, inputLength, checkFrozen);
 			return;
@@ -235,8 +232,8 @@ describe('Phase 4 parser, AST normalizer, literal decoder & fuzz invariants', ()
 				.map((parts) => parts.join('')),
 			fc
 				.integer({ min: 1, max: 40 })
-				.map((depth) => `${'('.repeat(depth)}a${')'.repeat(depth)}`),
-			fc.integer({ min: 1, max: 40 }).map((depth) => `${'!'.repeat(depth)}a`),
+				.map((depth) => `${'('.repeat(depth)}#a${')'.repeat(depth)}`),
+			fc.integer({ min: 1, max: 40 }).map((depth) => `${'!'.repeat(depth)}#a`),
 			fc.integer({ min: 4090, max: 4105 }).map((len) => 'x'.repeat(len)),
 		);
 		await assertProperty(

@@ -66,14 +66,14 @@ describe('Step 1 & 2: SYNTAX_ERROR diagnostics', () => {
 	const config = createStandardConfig();
 
 	it('rejects queries exceeding MAX_QUERY_LENGTH (4096) and MAX_SYNTACTIC_DEPTH (32)', () => {
-		const overLength = 'a'.repeat(MAX_QUERY_LENGTH + 1);
+		const overLength = `file:${'a'.repeat(MAX_QUERY_LENGTH - 4)}`;
 		const lenRes = compileQuery(overLength, config, PINNED_REF_MS);
 		expect(lenRes.executable).toBe(false);
 		expect(lenRes.ast).toBeNull();
 		expect(lenRes.prepared).toBeNull();
 		expect(lenRes.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
 
-		const overDepth = `${'('.repeat(MAX_SYNTACTIC_DEPTH + 1)}a${')'.repeat(MAX_SYNTACTIC_DEPTH + 1)}`;
+		const overDepth = `${'('.repeat(MAX_SYNTACTIC_DEPTH + 1)}#a${')'.repeat(MAX_SYNTACTIC_DEPTH + 1)}`;
 		const depthRes = compileQuery(overDepth, config, PINNED_REF_MS);
 		expect(depthRes.executable).toBe(false);
 		expect(depthRes.ast).toBeNull();
@@ -111,13 +111,13 @@ describe('Step 1 & 2: SYNTAX_ERROR diagnostics', () => {
 			'SYNTAX_ERROR',
 		]);
 
-		const bareTextAndErr = compileQuery('roadmap AND [""]', config, PINNED_REF_MS);
-		expect(bareTextAndErr.executable).toBe(false);
-		expect(bareTextAndErr.ast).toBeNull();
-		expect(bareTextAndErr.prepared).toBeNull();
-		expect(bareTextAndErr.diagnostics.map((d) => d.code)).toEqual([
+		const propHintAndErr = compileQuery('[status: != done] AND [""]', config, PINNED_REF_MS);
+		expect(propHintAndErr.executable).toBe(false);
+		expect(propHintAndErr.ast).toBeNull();
+		expect(propHintAndErr.prepared).toBeNull();
+		expect(propHintAndErr.diagnostics.map((d) => d.code)).toEqual([
 			'SYNTAX_ERROR',
-			'HINT_BARE_TEXT_NO_BODY',
+			'HINT_PROP_NEQ_EXISTENCE',
 		]);
 
 		const emptyKeyNeq = compileQuery('["" : != high]', config, PINNED_REF_MS);
@@ -186,18 +186,27 @@ describe('Step 3: Scope resolution & suggestions (ERROR_UNKNOWN_SCOPE)', () => {
 		expect(suggestScopeHint('properties', config)).toBe('Use "[prop:]" for property filters.');
 		expect(suggestScopeHint('hedings', config)).toBe('Did you mean "headings:"?');
 		expect(suggestScopeHint('fiel', config)).toBe('Did you mean "file:"?');
+		expect(suggestScopeHint('-tag', config)).toBe(
+			'Use "!tag:..." or "NOT tag:..." to negate a scope.',
+		);
+		expect(suggestScopeHint('-unknown', config)).toBe(
+			'Use "!" or "NOT" to negate a filter (e.g. "!tag:...").',
+		);
 		expect(suggestScopeHint('zzzzzz', config)).toBeNull();
 	});
 
-	it('emits ERROR_UNKNOWN_SCOPE with lowering and linter diagnostics on unknown scopes', () => {
-		const typoRes = compileQuery('hedings:Action Items', config, PINNED_REF_MS);
+	it('emits ERROR_UNKNOWN_SCOPE with linter diagnostics on unknown scopes', () => {
+		const typoRes = compileQuery(
+			'hedings:"Action Items" AND [status: != done]',
+			config,
+			PINNED_REF_MS,
+		);
 		expect(typoRes.executable).toBe(false);
 		expect(typoRes.ast).toBeNull();
 		expect(typoRes.prepared).toBeNull();
 		expect(typoRes.diagnostics.map((d) => d.code)).toEqual([
-			'WARN_UNQUOTED_MULTIWORD_SCOPE',
 			'ERROR_UNKNOWN_SCOPE',
-			'HINT_BARE_TEXT_NO_BODY',
+			'HINT_PROP_NEQ_EXISTENCE',
 		]);
 		const scopeErr = typoRes.diagnostics.find((d) => d.code === 'ERROR_UNKNOWN_SCOPE')!;
 		expect(scopeErr.issue).toBe('Unknown search scope "hedings:".');
@@ -434,54 +443,55 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 	const config = createStandardConfig();
 
-	it('emits WARN_UNQUOTED_MULTIWORD_SCOPE when unquoted scope is followed by bare text on the same line', () => {
+	it('rejects unquoted multi-word scope values with SYNTAX_ERROR and quoting hint', () => {
 		const res = compileQuery('headings:Action Items', config, PINNED_REF_MS);
-		expect(res.executable).toBe(true);
-		const warn = res.diagnostics.find((d) => d.code === 'WARN_UNQUOTED_MULTIWORD_SCOPE');
-		expect(warn).toMatchObject({
-			code: 'WARN_UNQUOTED_MULTIWORD_SCOPE',
-			severity: 'warning',
-			issue: '"Items" is searched as a separate term, not inside "headings:".',
-			hint: 'Use headings:"Action Items"',
-		});
-		expect(warn?.span).not.toBeNull();
+		expect(res.executable).toBe(false);
+		expect(res.ast).toBeNull();
+		expect(res.prepared).toBeNull();
+		expect(res.diagnostics).toEqual([
+			{
+				code: 'SYNTAX_ERROR',
+				severity: 'error',
+				issue: '"Items" is not inside "headings:"; bare search terms are not supported.',
+				hint: 'Use headings:"Action Items"',
+				span: {
+					startOffset: 0,
+					endOffset: 21,
+					startLine: 1,
+					startColumn: 1,
+				},
+			},
+		]);
 	});
 
-	it('emits WARN_LOWERCASE_BOOLEAN on unquoted lowercase boolean words and suppresses HINT_BARE_TEXT_NO_BODY on that node', () => {
+	it('rejects lowercase boolean words with SYNTAX_ERROR and uppercase hint', () => {
 		for (const word of ['and', 'or', 'not', 'And']) {
-			const res = compileQuery(word, config, PINNED_REF_MS);
-			expect(res.executable).toBe(true);
+			const res = compileQuery(`#a ${word} #b`, config, PINNED_REF_MS);
+			expect(res.executable).toBe(false);
+			expect(res.ast).toBeNull();
 			expect(res.diagnostics).toHaveLength(1);
 			expect(res.diagnostics[0]).toMatchObject({
-				code: 'WARN_LOWERCASE_BOOLEAN',
-				severity: 'warning',
-				issue: `Lowercase "${word}" is searched as literal text.`,
+				code: 'SYNTAX_ERROR',
+				severity: 'error',
+				issue: `Lowercase "${word}" is not a valid logical operator.`,
 				hint: `Use uppercase "${word.toUpperCase()}".`,
 			});
 			expect(res.diagnostics[0]?.span).not.toBeNull();
 		}
-
-		const quotedRes = compileQuery('"and"', config, PINNED_REF_MS);
-		expect(quotedRes.executable).toBe(true);
-		expect(quotedRes.diagnostics.map((d) => d.code)).toEqual(['HINT_BARE_TEXT_NO_BODY']);
 	});
 
-	it('treats bare "-" as an ordinary literal text term (HINT_BARE_TEXT_NO_BODY) and rejects spaced "! term" with SYNTAX_ERROR', () => {
-		const leadingRes = compileQuery('- term', config, PINNED_REF_MS);
-		expect(leadingRes.executable).toBe(true);
-		expect(leadingRes.diagnostics.map((d) => d.code)).toEqual([
-			'HINT_BARE_TEXT_NO_BODY',
-			'HINT_BARE_TEXT_NO_BODY',
-		]);
+	it('rejects hyphen-prefixed bare terms and spaced "! term" with SYNTAX_ERROR', () => {
+		for (const q of ['-work', '- term']) {
+			const res = compileQuery(q, config, PINNED_REF_MS);
+			expect(res.executable).toBe(false);
+			expect(res.diagnostics[0]).toMatchObject({
+				code: 'SYNTAX_ERROR',
+				severity: 'error',
+				hint: 'Use "!" or "NOT" to negate a filter (e.g. "!tag:..." or "![prop]").',
+			});
+		}
 
-		const trailingRes = compileQuery('term -', config, PINNED_REF_MS);
-		expect(trailingRes.executable).toBe(true);
-		expect(trailingRes.diagnostics.map((d) => d.code)).toEqual([
-			'HINT_BARE_TEXT_NO_BODY',
-			'HINT_BARE_TEXT_NO_BODY',
-		]);
-
-		const spacedBang = compileQuery('! term', config, PINNED_REF_MS);
+		const spacedBang = compileQuery('! #work', config, PINNED_REF_MS);
 		expect(spacedBang.executable).toBe(false);
 		expect(spacedBang.diagnostics.map((d) => d.code)).toEqual(['SYNTAX_ERROR']);
 	});
@@ -563,15 +573,17 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 		expect(res.diagnostics[0]?.span).not.toBeNull();
 	});
 
-	it('emits HINT_BARE_TEXT_NO_BODY on bare document-level TextMatchNode', () => {
+	it('rejects bare search terms with SYNTAX_ERROR and suggests scopes or property filters', () => {
 		const res = compileQuery('roadmap', config, PINNED_REF_MS);
-		expect(res.executable).toBe(true);
+		expect(res.executable).toBe(false);
+		expect(res.ast).toBeNull();
+		expect(res.prepared).toBeNull();
 		expect(res.diagnostics).toHaveLength(1);
 		expect(res.diagnostics[0]).toMatchObject({
-			code: 'HINT_BARE_TEXT_NO_BODY',
-			severity: 'hint',
-			issue: 'Bare terms only search filenames, paths, aliases, and tags (note body is not indexed).',
-			hint: null,
+			code: 'SYNTAX_ERROR',
+			severity: 'error',
+			issue: 'Bare search term "roadmap" is not supported.',
+			hint: 'Specify a scope (e.g. "file:roadmap", "aliases:roadmap", "#roadmap") or a property filter ("[prop:roadmap]").',
 		});
 		expect(res.diagnostics[0]?.span).not.toBeNull();
 	});
@@ -627,33 +639,12 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 		}
 	});
 
-	it('emits HINT_UNCLOSED_REGEX on unquoted leading-slash strings in regex-capable leaf positions and suppresses HINT_BARE_TEXT_NO_BODY on bare terms', () => {
+	it('emits HINT_UNCLOSED_REGEX on unquoted leading-slash strings in scoped and property colon leaf positions', () => {
 		for (const bare of ['/foo', '/^draft']) {
 			const res = compileQuery(bare, config, PINNED_REF_MS);
-			expect(res.executable).toBe(true);
-			expect(res.diagnostics).toHaveLength(1);
-			expect(res.diagnostics[0]).toMatchObject({
-				code: 'HINT_UNCLOSED_REGEX',
-				severity: 'hint',
-				issue: `Unquoted "${bare}" starts with "/" and is searched as literal text.`,
-				hint: 'Add a closing "/" for a regular expression, or wrap in quotes for literal text.',
-			});
-			expect(res.diagnostics[0]?.span).not.toBeNull();
+			expect(res.executable).toBe(false);
+			expect(res.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
 		}
-
-		// Bracketed unclosed regex splits as Identifier("/"), PropertyFilter("[a-z]"), Identifier("+")
-		const bracketedRes = compileQuery('/[a-z]+', config, PINNED_REF_MS);
-		expect(bracketedRes.executable).toBe(true);
-		expect(bracketedRes.diagnostics.map((d) => d.code)).toEqual([
-			'HINT_UNCLOSED_REGEX',
-			'HINT_BARE_TEXT_NO_BODY',
-		]);
-		expect(bracketedRes.diagnostics[0]).toMatchObject({
-			code: 'HINT_UNCLOSED_REGEX',
-			severity: 'hint',
-			issue: 'Unquoted "/" starts with "/" and is searched as literal text.',
-			hint: 'Add a closing "/" for a regular expression, or wrap in quotes for literal text.',
-		});
 
 		// Scoped filter leaf and compound ValueExprAST
 		const scopedSingle = compileQuery('file:/^draft', config, PINNED_REF_MS);
@@ -697,12 +688,9 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 
 		// Negative cases that must NOT emit HINT_UNCLOSED_REGEX
 		const negativeQueries = [
-			'"/foo"',
 			'file:"/projects/active"',
 			'[status: "/todo"]',
-			'/foo/i',
 			'file:/^draft/',
-			'//',
 			'file://',
 			'[status: = /todo]',
 			'[status: != /todo]',

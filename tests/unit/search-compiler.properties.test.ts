@@ -78,12 +78,6 @@ function assertAstDeepFrozen(ast: SearchAST): void {
 	switch (ast.type) {
 		case 'MATCH_ALL':
 			return;
-		case 'TEXT_MATCH':
-			expect(Object.isFrozen(ast.matcher)).toBe(true);
-			expect(() => {
-				(ast.matcher as { kind: string }).kind = 'MUTATED';
-			}).toThrow(TypeError);
-			return;
 		case 'NOT':
 			assertAstDeepFrozen(ast.child);
 			return;
@@ -100,21 +94,6 @@ function assertAstDeepFrozen(ast: SearchAST): void {
 			}).toThrow(TypeError);
 			for (const child of ast.children) assertAstDeepFrozen(child);
 			return;
-	}
-}
-
-function collectDocTextMatchNodes(
-	ast: SearchAST,
-): Array<Extract<SearchAST, { type: 'TEXT_MATCH' }>> {
-	switch (ast.type) {
-		case 'TEXT_MATCH':
-			return [ast];
-		case 'NOT':
-			return collectDocTextMatchNodes(ast.child);
-		case 'LOGICAL':
-			return ast.children.flatMap((child) => collectDocTextMatchNodes(child));
-		default:
-			return [];
 	}
 }
 
@@ -261,7 +240,7 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 		);
 	});
 
-	it('enforces Step 2 -> Step 4a -> Step 4b short-circuit precedence, negation non-suppression, and TextMatchNode lint partitioning', async () => {
+	it('enforces Step 2 -> Step 4a -> Step 4b short-circuit precedence and negation non-suppression', async () => {
 		const propKeyArb = fc.constantFrom(
 			'score',
 			'priority',
@@ -300,7 +279,7 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 		);
 	});
 
-	it('satisfies Levenshtein metric axioms, 1-edit scope suggestion recovery, and document-level TextMatchNode diagnostic partitioning', async () => {
+	it('satisfies Levenshtein metric axioms, 1-edit scope suggestion recovery, and hyphen-prefixed scope negation hints', async () => {
 		const shortAsciiArb = fc.stringMatching(/^[a-z]{0,8}$/);
 		await assertProperty(
 			'search/compiler__levenshtein-metric-and-text-match-lint-partition',
@@ -323,26 +302,14 @@ describe('Invariant 2b & 4b: Total Never-Throw Fuzzing, Compile Gate & POJO Diag
 							expect(hint).not.toBeNull();
 							expect(hint?.startsWith('Did you mean "')).toBe(true);
 						}
+						const negHint = suggestScopeHint(`-${scope.canonicalName}`, resolvedConfig);
+						expect(negHint).toBe(
+							`Use "!${scope.canonicalName}:..." or "NOT ${scope.canonicalName}:..." to negate a scope.`,
+						);
 					}
 					const res = compileQuery(fuzzQuery, resolvedConfig, PINNED_REF_MS);
 					if (res.executable && res.ast) {
-						const textNodes = collectDocTextMatchNodes(res.ast);
-						const textNodeSpans = new Set(
-							textNodes.map((n) =>
-								n.span ? `${n.span.startOffset}:${n.span.endOffset}` : '',
-							),
-						);
-						const textDiagCount = res.diagnostics.filter(
-							(diagnostic) =>
-								diagnostic.code === 'HINT_BARE_TEXT_NO_BODY' ||
-								diagnostic.code === 'WARN_LOWERCASE_BOOLEAN' ||
-								(diagnostic.code === 'HINT_UNCLOSED_REGEX' &&
-									diagnostic.span !== null &&
-									textNodeSpans.has(
-										`${diagnostic.span.startOffset}:${diagnostic.span.endOffset}`,
-									)),
-						).length;
-						expect(textDiagCount).toBe(textNodes.length);
+						expect(res.diagnostics.every((d) => d.severity !== 'error')).toBe(true);
 					}
 				},
 			),

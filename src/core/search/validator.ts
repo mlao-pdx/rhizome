@@ -57,6 +57,14 @@ export function suggestScopeHint(
 	resolvedConfig: ResolvedEngineConfig,
 ): string | null {
 	const lower = rawScope.trim().toLowerCase();
+	if (lower.startsWith('-')) {
+		const stripped = lower.replace(/^-+/, '');
+		const matchedScope = stripped.length > 0 ? resolvedConfig.getScope(stripped) : undefined;
+		if (matchedScope) {
+			return `Use "!${matchedScope.canonicalName}:..." or "NOT ${matchedScope.canonicalName}:..." to negate a scope.`;
+		}
+		return 'Use "!" or "NOT" to negate a filter (e.g. "!tag:...").';
+	}
 	if (lower === 'tags') {
 		return 'Did you mean "tag:"?';
 	}
@@ -217,19 +225,6 @@ export function validateQueryAST(
 	function step2Traverse(node: SearchAST): void {
 		switch (node.type) {
 			case 'MATCH_ALL':
-				return;
-			case 'TEXT_MATCH':
-				if (node.matcher.kind === 'regex') {
-					if (validateRegexLiteral(node.matcher.pattern, node.matcher.flags) === null) {
-						diagnostics.push({
-							code: 'SYNTAX_ERROR',
-							severity: 'error',
-							issue: `Invalid regular expression "/${node.matcher.pattern}/${node.matcher.flags}".`,
-							hint: null,
-							span: node.span ?? null,
-						});
-					}
-				}
 				return;
 			case 'SCOPED_FILTER':
 				validateRegexLeavesInValueExpr(node.expr, node.span ?? null, diagnostics);

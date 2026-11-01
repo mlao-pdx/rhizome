@@ -13,7 +13,6 @@ import {
 	type ResolvedEngineConfig,
 	type ScopedFilterNode,
 	type SearchAST,
-	type TextMatchNode,
 	type ValueExprAST,
 } from '../../src/core/search';
 import {
@@ -31,9 +30,8 @@ import {
 	rhsLeafMatcherArb,
 	structuralRegexMatcherArb,
 	unquotedIdentifierArb,
-	unsignedLeafMatcherArb,
 } from './search-leaf-arbitraries';
-import { computeSyntacticDepth, printAST, printValueExprAST } from './search-printer';
+import { computeSyntacticDepth, printAST } from './search-printer';
 
 export const printableValueExprArb = buildValueExprArb(2);
 
@@ -234,15 +232,9 @@ export function printableExecutableAstArb(
 	resolvedConfig: ResolvedEngineConfig,
 	refMs: number,
 ): fc.Arbitrary<SearchAST> {
-	const textMatchArb: fc.Arbitrary<TextMatchNode> = unsignedLeafMatcherArb.map((matcher) => ({
-		type: 'TEXT_MATCH' as const,
-		matcher,
-		rawText: printValueExprAST({ type: 'VALUE_LEAF', matcher }),
-	}));
 	const atomAstArb: fc.Arbitrary<SearchAST> = fc.oneof(
 		printableScopedFilterArb(resolvedConfig),
 		printablePropertyFilterArb(resolvedConfig, refMs),
-		textMatchArb,
 	);
 
 	function buildAstRec(depth: number): fc.Arbitrary<SearchAST> {

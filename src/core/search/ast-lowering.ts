@@ -1,5 +1,5 @@
 import type { CstElement, CstNode, IToken } from 'chevrotain';
-import { createUnquotedMultiwordScopeWarning, createWikilinkBracketsHint } from './linter';
+import { createWikilinkBracketsHint } from './linter';
 import { decodeQuotedString, decodeRegexLiteral, decodeWikiLinkValue } from './literals';
 import { BUILT_IN_SCOPES } from './scopes';
 import type {
@@ -40,6 +40,11 @@ const BUILT_IN_SCOPE_MAP: ReadonlyMap<string, ScopeDefinition> = (() => {
 	}
 	return map;
 })();
+
+export function resolveBuiltInScopeCanonicalName(rawScope: string): string {
+	const trimmed = rawScope.trim();
+	return BUILT_IN_SCOPE_MAP.get(trimmed.toLowerCase())?.canonicalName ?? trimmed;
+}
 
 /**
  * Computes the 1-based line and column at the end of `input`.
@@ -132,14 +137,12 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 	function lowerLeafTokens(ch: Record<string, CstElement[]>): {
 		matcher: LeafMatcher;
 		span: SourceSpan;
-		rawText: string;
 	} {
 		const quoted = asTokens(ch.QuotedString)[0];
 		if (quoted) {
 			return {
 				matcher: { kind: 'string', value: decodeQuotedString(quoted.image), quoted: true },
 				span: tokenToSpan(quoted),
-				rawText: quoted.image,
 			};
 		}
 		const regex = asTokens(ch.RegexLiteral)[0];
@@ -148,7 +151,6 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 			return {
 				matcher: { kind: 'regex', pattern, flags },
 				span: tokenToSpan(regex),
-				rawText: regex.image,
 			};
 		}
 		const tok =
@@ -158,7 +160,6 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		return {
 			matcher: { kind: 'string', value: tok.image, quoted: false },
 			span: tokenToSpan(tok),
-			rawText: tok.image,
 		};
 	}
 
@@ -378,9 +379,7 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 			const scopeNameNode = asNodes(scoped.children.scopeName)[0]!;
 			const scopeTok = asTokens(scopeNameNode.children.Identifier)[0]!;
 			const rawScope = scopeTok.image;
-			const trimmedScope = rawScope.trim();
-			const scope =
-				BUILT_IN_SCOPE_MAP.get(trimmedScope.toLowerCase())?.canonicalName ?? trimmedScope;
+			const scope = resolveBuiltInScopeCanonicalName(rawScope);
 			const rhs = lowerValueNotExpr(asNodes(scoped.children.valueNotExpr)[0]!);
 			return {
 				type: 'SCOPED_FILTER',
@@ -391,30 +390,19 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 			};
 		}
 
-		const tagShort = asNodes(ch.tagShorthand)[0];
-		if (tagShort) {
-			const tagTok = asTokens(tagShort.children.TagLiteral)[0]!;
-			const span = tokenToSpan(tagTok);
-			return {
-				type: 'SCOPED_FILTER',
-				scope: 'tag',
-				rawScope: '#',
-				expr: {
-					type: 'VALUE_LEAF',
-					matcher: { kind: 'string', value: tagTok.image, quoted: false },
-					span,
-				},
-				span,
-			};
-		}
-
-		const bare = asNodes(ch.bareLeafValue)[0]!;
-		const leaf = lowerLeafTokens(bare.children);
+		const tagShort = asNodes(ch.tagShorthand)[0]!;
+		const tagTok = asTokens(tagShort.children.TagLiteral)[0]!;
+		const span = tokenToSpan(tagTok);
 		return {
-			type: 'TEXT_MATCH',
-			matcher: leaf.matcher,
-			rawText: leaf.rawText,
-			span: leaf.span,
+			type: 'SCOPED_FILTER',
+			scope: 'tag',
+			rawScope: '#',
+			expr: {
+				type: 'VALUE_LEAF',
+				matcher: { kind: 'string', value: tagTok.image, quoted: false },
+				span,
+			},
+			span,
 		};
 	}
 
@@ -441,41 +429,6 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 		const notNodes = [...asNodes(node.children.lhs), ...asNodes(node.children.rhs)];
 		const andTokens = asTokens(node.children.And);
 		const children = notNodes.map(lowerNotExpression);
-
-		for (let i = 0; i < children.length - 1; i++) {
-			const left = children[i]!;
-			const right = children[i + 1]!;
-			if (
-				left.type === 'SCOPED_FILTER' &&
-				right.type === 'TEXT_MATCH' &&
-				left.span &&
-				right.span &&
-				left.span.startLine === right.span.startLine &&
-				left.expr.type === 'VALUE_LEAF' &&
-				left.expr.matcher.kind === 'string' &&
-				!left.expr.matcher.quoted &&
-				right.matcher.kind === 'string' &&
-				!right.matcher.quoted
-			) {
-				const hasExplicitAnd = andTokens.some(
-					(t) =>
-						t.startOffset >= left.span!.endOffset &&
-						t.startOffset <= right.span!.startOffset,
-				);
-				if (!hasExplicitAnd) {
-					const leftVal = left.expr.matcher.value;
-					const nextVal = right.rawText;
-					diagnostics.push(
-						createUnquotedMultiwordScopeWarning(
-							left.scope,
-							leftVal,
-							nextVal,
-							mergeSpans(left.span, right.span),
-						),
-					);
-				}
-			}
-		}
 
 		if (children.length === 1) return children[0]!;
 		const firstChild = children[0]!;

@@ -78,9 +78,13 @@ describe('printable executable AST generator', () => {
 		(limit) => {
 			const config = evaluatorConfig('UTC');
 			const leaf = (value: string): SearchAST => ({
-				type: 'TEXT_MATCH',
-				matcher: { kind: 'string', value, quoted: true },
-				rawText: value,
+				type: 'SCOPED_FILTER',
+				scope: 'file',
+				rawScope: 'file',
+				expr: {
+					type: 'VALUE_LEAF',
+					matcher: { kind: 'string', value, quoted: true },
+				},
 			});
 			const safe = leaf('work');
 			let oversized = leaf('x'.repeat(MAX_QUERY_LENGTH / 2));

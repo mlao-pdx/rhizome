@@ -254,14 +254,6 @@ function evalAstNode(
 				: ast.children.some((c) => evalAstNode(doc, c, resolvedConfig, referenceTimeMs));
 		case 'NOT':
 			return !evalAstNode(doc, ast.child, resolvedConfig, referenceTimeMs);
-		case 'TEXT_MATCH': {
-			const targets = [doc.file.basename, doc.file.path, ...doc.aliases, ...doc.tags];
-			return targets.some((t) =>
-				ast.matcher.kind === 'regex'
-					? testRegex(t, ast.matcher)
-					: substringStringMatch(t, ast.matcher.value),
-			);
-		}
 		case 'SCOPED_FILTER': {
 			const def =
 				ast.rawScope === '#'

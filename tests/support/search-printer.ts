@@ -54,8 +54,6 @@ function printSearchAST(ast: SearchAST, parentOp?: 'AND' | 'OR' | 'NOT'): string
 	switch (ast.type) {
 		case 'MATCH_ALL':
 			return '';
-		case 'TEXT_MATCH':
-			return printLeafMatcher(ast.matcher);
 		case 'NOT': {
 			const child =
 				ast.child.type === 'LOGICAL'
@@ -141,7 +139,6 @@ export function computeSyntacticDepthValueExpr(
 export function computeSyntacticDepth(ast: SearchAST, parentOp?: 'AND' | 'OR' | 'NOT'): number {
 	switch (ast.type) {
 		case 'MATCH_ALL':
-		case 'TEXT_MATCH':
 			return 0;
 		case 'NOT': {
 			const needsParens = ast.child.type === 'LOGICAL';

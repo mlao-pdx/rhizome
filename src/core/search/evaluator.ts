@@ -168,14 +168,6 @@ function evalCompiledSearchNode(doc: NormalizedDocument, node: CompiledSearchNod
 				: node.children.some((c) => evalCompiledSearchNode(doc, c));
 		case 'NOT':
 			return !evalCompiledSearchNode(doc, node.child);
-		case 'TEXT_MATCH_REGEX': {
-			const targets = [doc.file.basename, doc.file.path, ...doc.aliases, ...doc.tags];
-			return targets.some((t) => node.regex.test(t));
-		}
-		case 'TEXT_MATCH_STRING': {
-			const targets = [doc.file.basename, doc.file.path, ...doc.aliases, ...doc.tags];
-			return targets.some((t) => substringStringMatch(t, node.value));
-		}
 		case 'SCOPED_FILTER': {
 			const targets = node.scopeDef.extract(doc);
 			return targets.some((t) => evalCompiledValueExpr(t, node.expr, node.scopeDef));

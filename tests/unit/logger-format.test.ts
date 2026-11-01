@@ -52,9 +52,9 @@ describe('redactSensitiveText', () => {
 describe('redactQuerySyntax', () => {
 	it('preserves Rhizome syntax, built-in scopes, virtual properties, and relative anchors while redacting user identifiers and literals', () => {
 		const raw =
-			'tag:(#project OR #area !archived) [status: != "done"] [file.modified: !@thisweek..@today] /junk\\s+$/i';
+			'tag:(#project OR #area !archived) [status: != "done"] [file.modified: !@thisweek..@today] file:/junk\\s+$/i';
 		expect(redactQuerySyntax(raw)).toBe(
-			'tag:(#xxxxxxx OR #xxxx !xxxxxxxx) [xxxxxx: != "xxxx"] [file.modified: !@thisweek..@today] /xxxx\\s+$/i',
+			'tag:(#xxxxxxx OR #xxxx !xxxxxxxx) [xxxxxx: != "xxxx"] [file.modified: !@thisweek..@today] file:/xxxx\\s+$/i',
 		);
 	});
 

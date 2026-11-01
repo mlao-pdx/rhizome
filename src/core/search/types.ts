@@ -219,7 +219,7 @@ export interface SourceSpan {
 }
 
 export type SearchAST =
-	MatchAllNode | LogicalNode | NotNode | ScopedFilterNode | PropertyFilterNode | TextMatchNode;
+	MatchAllNode | LogicalNode | NotNode | ScopedFilterNode | PropertyFilterNode;
 
 export interface MatchAllNode {
 	readonly type: 'MATCH_ALL';
@@ -280,13 +280,6 @@ export interface PropertyFilterNode {
 	readonly span?: SourceSpan;
 }
 
-export interface TextMatchNode {
-	readonly type: 'TEXT_MATCH';
-	readonly matcher: LeafMatcher;
-	readonly rawText: string; // Original token text for linting
-	readonly span?: SourceSpan;
-}
-
 export type DiagnosticSeverity = 'error' | 'warning' | 'hint';
 
 export type DiagnosticCode =
@@ -295,14 +288,11 @@ export type DiagnosticCode =
 	| 'ERROR_UNKNOWN_SCOPE'
 	| 'ERROR_TYPE_MISMATCH'
 	| 'ERROR_INVALID_OPERATOR_FOR_TYPE'
-	| 'WARN_UNQUOTED_MULTIWORD_SCOPE'
-	| 'WARN_LOWERCASE_BOOLEAN'
 	| 'WARN_SINGLE_VALUE_CONTRADICTION'
 	| 'HINT_PROP_NEQ_EXISTENCE'
 	| 'HINT_PROPERTY_MATCHES_SCOPE'
 	| 'HINT_AMBIGUOUS_PRECEDENCE'
 	| 'HINT_WIKILINK_BRACKETS_IN_SCOPE'
-	| 'HINT_BARE_TEXT_NO_BODY'
 	| 'HINT_UNCLOSED_REGEX';
 
 export interface SearchDiagnostic {

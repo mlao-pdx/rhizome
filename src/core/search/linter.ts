@@ -8,7 +8,6 @@ import type {
 	SearchAST,
 	SearchDiagnostic,
 	SourceSpan,
-	TextMatchNode,
 	ValueExprAST,
 } from './types';
 
@@ -41,24 +40,6 @@ export function createWikilinkBracketsHint(span: SourceSpan | null): SearchDiagn
 		severity: 'hint',
 		issue: 'Wikilink brackets "[[...]]" are not needed.',
 		hint: 'Stripped "[[...]]" automatically.',
-		span,
-	};
-}
-
-/**
- * Builds the `WARN_UNQUOTED_MULTIWORD_SCOPE` diagnostic emitted when an unquoted scoped filter is followed by a bare term on the same line without an explicit `AND`.
- */
-export function createUnquotedMultiwordScopeWarning(
-	scope: string,
-	leftVal: string,
-	nextVal: string,
-	span: SourceSpan | null,
-): SearchDiagnostic {
-	return {
-		code: 'WARN_UNQUOTED_MULTIWORD_SCOPE',
-		severity: 'warning',
-		issue: `"${nextVal}" is searched as a separate term, not inside "${scope}:".`,
-		hint: `Use ${scope}:"${leftVal} ${nextVal}"`,
 		span,
 	};
 }
@@ -224,7 +205,6 @@ export function lintQueryAST(
 	resolvedConfig?: ResolvedEngineConfig,
 ): SearchDiagnostic[] {
 	const diagnostics: SearchDiagnostic[] = [];
-	const flaggedTextNodes = new Set<TextMatchNode>();
 	const getScope = (nameOrAlias: string): ScopeDefinition | undefined =>
 		resolvedConfig
 			? resolvedConfig.getScope(nameOrAlias)
@@ -278,41 +258,6 @@ export function lintQueryAST(
 							);
 						}
 					}
-				}
-				return;
-			}
-
-			case 'TEXT_MATCH': {
-				if (node.matcher.kind === 'string' && !node.matcher.quoted) {
-					const lower = node.rawText.toLowerCase();
-					if (
-						(lower === 'and' || lower === 'or' || lower === 'not') &&
-						node.rawText !== node.rawText.toUpperCase()
-					) {
-						flaggedTextNodes.add(node);
-						diagnostics.push({
-							code: 'WARN_LOWERCASE_BOOLEAN',
-							severity: 'warning',
-							issue: `Lowercase "${node.rawText}" is searched as literal text.`,
-							hint: `Use uppercase "${node.rawText.toUpperCase()}".`,
-							span: node.span ?? null,
-						});
-					}
-				}
-				if (!flaggedTextNodes.has(node) && isUnclosedRegexMatcher(node.matcher)) {
-					flaggedTextNodes.add(node);
-					diagnostics.push(
-						createUnclosedRegexHint(node.matcher.value, node.span ?? null),
-					);
-				}
-				if (!flaggedTextNodes.has(node)) {
-					diagnostics.push({
-						code: 'HINT_BARE_TEXT_NO_BODY',
-						severity: 'hint',
-						issue: 'Bare terms only search filenames, paths, aliases, and tags (note body is not indexed).',
-						hint: null,
-						span: node.span ?? null,
-					});
 				}
 				return;
 			}

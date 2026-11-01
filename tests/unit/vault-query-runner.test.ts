@@ -541,7 +541,7 @@ describe('runVaultQuery', () => {
 				app,
 				{
 					cleanQuery: '#project',
-					warnQuery: 'alpha and beta',
+					warnQuery: 'ext:md AND ext:pdf AND [priority: != 5]',
 					brokenQuery: '[priority: = "nan"]',
 				},
 				{ timeZone: 'UTC' },
@@ -564,12 +564,12 @@ describe('runVaultQuery', () => {
 				message: 'Query compilation diagnostics for ‼️warnQuery‼️',
 				meta: {
 					source: 'query.compile',
-					count: 3,
-					query: '‼️alpha and beta‼️',
+					count: 2,
+					query: '‼️ext:md AND ext:pdf AND [priority: != 5]‼️',
 					executable: true,
 					errorCodes: [],
-					warningCodes: ['WARN_LOWERCASE_BOOLEAN'],
-					hintCodes: ['HINT_BARE_TEXT_NO_BODY'],
+					warningCodes: ['WARN_SINGLE_VALUE_CONTRADICTION'],
+					hintCodes: ['HINT_PROP_NEQ_EXISTENCE'],
 				},
 			});
 			expect(spy.calls).toContainEqual({

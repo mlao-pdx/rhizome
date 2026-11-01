@@ -26,9 +26,6 @@ export function deepFreezeAST(ast: SearchAST): SearchAST {
 	if ('span' in ast && ast.span) Object.freeze(ast.span);
 
 	switch (ast.type) {
-		case 'TEXT_MATCH':
-			Object.freeze(ast.matcher);
-			return Object.freeze(ast);
 		case 'NOT':
 			deepFreezeAST(ast.child);
 			return Object.freeze(ast);
@@ -113,12 +110,6 @@ export function normalizeAST(ast: SearchAST): SearchAST {
 	switch (ast.type) {
 		case 'MATCH_ALL':
 			return { type: 'MATCH_ALL' };
-		case 'TEXT_MATCH':
-			return {
-				type: 'TEXT_MATCH',
-				matcher: { ...ast.matcher },
-				rawText: '',
-			};
 		case 'NOT':
 			return {
 				type: 'NOT',

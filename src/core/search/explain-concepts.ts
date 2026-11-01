@@ -121,13 +121,6 @@ function slugifyScopeName(scope: string): string {
 	return slug || 'custom';
 }
 
-export function refBareScopeFootnote(registry: FootnoteRegistry): string {
-	return registry.ref(
-		'scope-bare',
-		'**Bare Text & Regex Search**: Searches note metadata (`file.basename`, `file.path`, `aliases`, and `tags`) using case-insensitive substring matching (or regex matching). Note body prose is never searched.',
-	);
-}
-
 export function refScopeFootnote(registry: FootnoteRegistry, canonicalScope: string): string {
 	switch (canonicalScope) {
 		case 'tag':

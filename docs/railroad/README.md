@@ -5,7 +5,7 @@
 
 ## Overview
 
-Rhizome parses filter queries with a single-pass Chevrotain lexer and a disambiguated LL(k) `CstParser` (`SearchParser`) comprising **16 grammar productions** and **16 lexical tokens** (plus skipped whitespace).
+Rhizome parses filter queries with a single-pass Chevrotain lexer and a disambiguated LL(k) `CstParser` (`SearchParser`) comprising **15 grammar productions** and **16 lexical tokens** (plus skipped whitespace).
 
 ### Visual Legend
 
@@ -59,10 +59,10 @@ NotExpression ::= ( "NOT" | BangNot ) NotExpression | Primary
 
 ### `primary`
 
-Disambiguated atomic document-level filter unit: parenthesized group, bracketed property filter, `scope:value` operator, `#tag` shorthand, or bare full-text search term.
+Disambiguated atomic document-level filter unit: parenthesized group, bracketed property filter, `scope:value` operator, or `#tag` shorthand.
 
 ```ebnf
-Primary ::= Parenthesized | PropertyFilter | ScopedOperator | TagShorthand | BareLeafValue
+Primary ::= Parenthesized | PropertyFilter | ScopedOperator | TagShorthand
 ```
 
 ![primary](./assets/primary.svg)
@@ -137,7 +137,7 @@ ValueNotExpr ::= ( "NOT" | BangNot ) ValueNotExpr | "(" ValueOrExpr ")" | WikiLi
 
 ## 4. Keys, Scopes & Leaf Values
 
-Terminal-level productions disambiguating property keys, scope identifiers, `#tag` shorthands, bare full-text terms, and value leaves.
+Terminal-level productions disambiguating property keys, scope identifiers, `#tag` shorthands, and value leaves.
 
 ### `propertyKey`
 
@@ -168,16 +168,6 @@ TagShorthand ::= TagLiteral
 ```
 
 ![tagShorthand](./assets/tagShorthand.svg)
-
-### `bareLeafValue`
-
-Unscoped full-text search term matched against note title/filename, aliases, and body text.
-
-```ebnf
-BareLeafValue ::= QuotedString | RegexLiteral | DateTimeLiteral | Identifier
-```
-
-![bareLeafValue](./assets/bareLeafValue.svg)
 
 ### `valueLeaf`
 

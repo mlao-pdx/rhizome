@@ -2,7 +2,6 @@ import { Temporal } from '@js-temporal/polyfill';
 import { initEngineConfig } from './config';
 import {
 	FootnoteRegistry,
-	refBareScopeFootnote,
 	refDiagnosticFootnote,
 	refIntervalFootnote,
 	refPropertyFootnote,
@@ -327,14 +326,6 @@ export function explainQuery(
 			case 'NOT':
 				collectAstFlags(node.child);
 				return;
-			case 'TEXT_MATCH':
-				if (
-					node.matcher.kind === 'regex' &&
-					validateRegexLiteral(node.matcher.pattern, node.matcher.flags) === null
-				) {
-					invalidRegexNodes.add(node);
-				}
-				return;
 			case 'SCOPED_FILTER': {
 				if (node.rawScope !== '#' && !effectiveConfig.getScope(node.rawScope)) {
 					unknownScopeNodes.add(node);
@@ -598,25 +589,6 @@ export function explainQuery(
 					if (remainingDiagSuffix) {
 						bulletLines[headerIdx + 1] =
 							`${bulletLines[headerIdx + 1]}${remainingDiagSuffix}`;
-					}
-					return;
-				}
-				case 'TEXT_MATCH': {
-					const bareFn = refBareScopeFootnote(footnotes);
-					bulletLines.push(`${indent}- ${sliceCode}`);
-					if (node.matcher.kind === 'regex') {
-						const valid = !invalidRegexNodes.has(node);
-						const prefix = valid ? '' : '❌ ';
-						const link = formatDirectRegexLink(node.matcher, footnotes);
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
-						bulletLines.push(
-							`${indent}  ${prefix}Note metadata (${bareFn}) ${valid ? 'matches' : 'has invalid regex'} ${link}.${exactDiagSuffix}`,
-						);
-					} else {
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
-						bulletLines.push(
-							`${indent}  Note metadata (${bareFn}) contains ${formatInlineCode(node.matcher.value)} (case-insensitive).${exactDiagSuffix}`,
-						);
 					}
 					return;
 				}

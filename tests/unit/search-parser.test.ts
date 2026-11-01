@@ -21,7 +21,6 @@ import {
 	VIRTUAL_FILE_KEYS_LIST,
 	type LogicalNode,
 	type ScopedFilterNode,
-	type TextMatchNode,
 } from '../../src/core/search';
 
 describe('Invariant 1a: Lexer & SearchParser self-analysis smoke test', () => {
@@ -213,16 +212,20 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 		}
 	});
 
-	it('Conformance Test 3: disambiguates !draft vs file:-draft vs file:!draft / file:(!draft)', () => {
-		const docNeg = parseQuery('!draft');
+	it('Conformance Test 3: disambiguates !file:draft vs file:-draft vs file:!draft / file:(!draft)', () => {
+		const docNeg = parseQuery('!file:draft');
 		expect(docNeg.diagnostics).toEqual([]);
 		expect(docNeg.ast).toMatchObject({
 			type: 'NOT',
 			syntax: '!',
 			child: {
-				type: 'TEXT_MATCH',
-				rawText: 'draft',
-				matcher: { kind: 'string', value: 'draft', quoted: false },
+				type: 'SCOPED_FILTER',
+				scope: 'file',
+				rawScope: 'file',
+				expr: {
+					type: 'VALUE_LEAF',
+					matcher: { kind: 'string', value: 'draft', quoted: false },
+				},
 			},
 		});
 
@@ -414,7 +417,7 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 	});
 
 	it('sets parenthesized: true on parenthesized LogicalNode and preserves spans', () => {
-		const res = parseQuery('(a AND b) OR c');
+		const res = parseQuery('(tag:a AND tag:b) OR tag:c');
 		expect(res.diagnostics).toEqual([]);
 		expect(res.ast).toMatchObject({
 			type: 'LOGICAL',
@@ -424,11 +427,12 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 					type: 'LOGICAL',
 					operator: 'AND',
 					parenthesized: true,
-					span: { startOffset: 0, endOffset: 9, startLine: 1, startColumn: 1 },
+					span: { startOffset: 0, endOffset: 17, startLine: 1, startColumn: 1 },
 				},
 				{
-					type: 'TEXT_MATCH',
-					rawText: 'c',
+					type: 'SCOPED_FILTER',
+					scope: 'tag',
+					rawScope: 'tag',
 				},
 			],
 		});
@@ -437,15 +441,15 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 
 describe('Resource Limits & Syntax Error Boundaries', () => {
 	it('enforces MAX_QUERY_LENGTH (4096 chars succeeds; 4097 fails with SYNTAX_ERROR before lexing)', () => {
-		const exact4096 = 'a'.repeat(MAX_QUERY_LENGTH);
+		const exact4096 = `file:${'a'.repeat(MAX_QUERY_LENGTH - 5)}`;
 		const okRes = parseQuery(exact4096);
 		expect(okRes.diagnostics).toEqual([]);
 		expect(okRes.ast).toMatchObject({
-			type: 'TEXT_MATCH',
-			rawText: exact4096,
+			type: 'SCOPED_FILTER',
+			scope: 'file',
 		});
 
-		const over4097 = 'a'.repeat(MAX_QUERY_LENGTH + 1);
+		const over4097 = `file:${'a'.repeat(MAX_QUERY_LENGTH - 4)}`;
 		const errRes = parseQuery(over4097);
 		expect(errRes.ast).toBeNull();
 		expect(errRes.diagnostics).toHaveLength(1);
@@ -463,15 +467,15 @@ describe('Resource Limits & Syntax Error Boundaries', () => {
 
 	it('enforces MAX_SYNTACTIC_DEPTH = 32 across unary negation, parentheses, and value-level expressions', () => {
 		// Document-level unary negation at depth 32 succeeds; 33 fails
-		expect(parseQuery(`${'!'.repeat(MAX_SYNTACTIC_DEPTH)}a`).ast).not.toBeNull();
-		const neg33 = parseQuery(`${'!'.repeat(MAX_SYNTACTIC_DEPTH + 1)}a`);
+		expect(parseQuery(`${'!'.repeat(MAX_SYNTACTIC_DEPTH)}#a`).ast).not.toBeNull();
+		const neg33 = parseQuery(`${'!'.repeat(MAX_SYNTACTIC_DEPTH + 1)}#a`);
 		expect(neg33.ast).toBeNull();
 		expect(neg33.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
 
 		// Document-level parenthesized group at depth 32 succeeds; 33 fails
-		const paren32 = `${'('.repeat(MAX_SYNTACTIC_DEPTH)}a${')'.repeat(MAX_SYNTACTIC_DEPTH)}`;
+		const paren32 = `${'('.repeat(MAX_SYNTACTIC_DEPTH)}#a${')'.repeat(MAX_SYNTACTIC_DEPTH)}`;
 		expect(parseQuery(paren32).ast).not.toBeNull();
-		const paren33 = `${'('.repeat(MAX_SYNTACTIC_DEPTH + 1)}a${')'.repeat(MAX_SYNTACTIC_DEPTH + 1)}`;
+		const paren33 = `${'('.repeat(MAX_SYNTACTIC_DEPTH + 1)}#a${')'.repeat(MAX_SYNTACTIC_DEPTH + 1)}`;
 		const paren33Res = parseQuery(paren33);
 		expect(paren33Res.ast).toBeNull();
 		expect(paren33Res.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
@@ -483,7 +487,7 @@ describe('Resource Limits & Syntax Error Boundaries', () => {
 		expect(parseQuery(val33).ast).toBeNull();
 
 		// >32 sequential non-nested groups succeed because depth is decremented on exit
-		const sequential40 = Array.from({ length: 40 }, (_, i) => `(!term${i})`).join(' ');
+		const sequential40 = Array.from({ length: 40 }, (_, i) => `(!#term${i})`).join(' ');
 		const seqRes = parseQuery(sequential40);
 		expect(seqRes.diagnostics).toEqual([]);
 		expect(seqRes.ast).not.toBeNull();
@@ -562,14 +566,14 @@ describe('Resource Limits & Syntax Error Boundaries', () => {
 		}
 	});
 
-	it('emits WARN_UNQUOTED_MULTIWORD_SCOPE only for adjacent unquoted scope + bare term on the same line without explicit AND', () => {
-		const warnRes = parseQuery('headings:Action Items');
-		expect(warnRes.ast).not.toBeNull();
-		expect(warnRes.diagnostics).toEqual([
+	it('rejects unquoted multi-word scopes, lowercase boolean words, hyphen negations, and bare search terms/literals with SYNTAX_ERROR and actionable hints', () => {
+		const multiwordRes = parseQuery('headings:Action Items');
+		expect(multiwordRes.ast).toBeNull();
+		expect(multiwordRes.diagnostics).toEqual([
 			{
-				code: 'WARN_UNQUOTED_MULTIWORD_SCOPE',
-				severity: 'warning',
-				issue: '"Items" is searched as a separate term, not inside "headings:".',
+				code: 'SYNTAX_ERROR',
+				severity: 'error',
+				issue: '"Items" is not inside "headings:"; bare search terms are not supported.',
 				hint: 'Use headings:"Action Items"',
 				span: {
 					startOffset: 0,
@@ -580,30 +584,83 @@ describe('Resource Limits & Syntax Error Boundaries', () => {
 			},
 		]);
 
-		// Suppressed cases: explicit AND, quoted scope value, parenthesized scope, next line
-		for (const cleanQuery of [
-			'headings:Action AND Items',
-			'headings:"Action Items"',
-			'headings:Action\nItems',
-		]) {
-			const res = parseQuery(cleanQuery);
-			expect(res.ast).not.toBeNull();
-			expect(res.diagnostics).toEqual([]);
+		const aliasMultiwordRes = parseQuery('heading:Action Items');
+		expect(aliasMultiwordRes.ast).toBeNull();
+		expect(aliasMultiwordRes.diagnostics[0]).toMatchObject({
+			code: 'SYNTAX_ERROR',
+			issue: '"Items" is not inside "headings:"; bare search terms are not supported.',
+			hint: 'Use headings:"Action Items"',
+		});
+
+		const lowerBoolRes = parseQuery('#a and #b');
+		expect(lowerBoolRes.ast).toBeNull();
+		expect(lowerBoolRes.diagnostics).toEqual([
+			{
+				code: 'SYNTAX_ERROR',
+				severity: 'error',
+				issue: 'Lowercase "and" is not a valid logical operator.',
+				hint: 'Use uppercase "AND".',
+				span: {
+					startOffset: 3,
+					endOffset: 6,
+					startLine: 1,
+					startColumn: 4,
+				},
+			},
+		]);
+
+		const hyphenRes = parseQuery('-work');
+		expect(hyphenRes.ast).toBeNull();
+		expect(hyphenRes.diagnostics).toEqual([
+			{
+				code: 'SYNTAX_ERROR',
+				severity: 'error',
+				issue: 'Bare term "-work" is not allowed (hyphen negation is not supported).',
+				hint: 'Use "!" or "NOT" to negate a filter (e.g. "!tag:..." or "![prop]").',
+				span: {
+					startOffset: 0,
+					endOffset: 5,
+					startLine: 1,
+					startColumn: 1,
+				},
+			},
+		]);
+
+		const bareWordRes = parseQuery('roadmap');
+		expect(bareWordRes.ast).toBeNull();
+		expect(bareWordRes.diagnostics).toEqual([
+			{
+				code: 'SYNTAX_ERROR',
+				severity: 'error',
+				issue: 'Bare search term "roadmap" is not supported.',
+				hint: 'Specify a scope (e.g. "file:roadmap", "aliases:roadmap", "#roadmap") or a property filter ("[prop:roadmap]").',
+				span: {
+					startOffset: 0,
+					endOffset: 7,
+					startLine: 1,
+					startColumn: 1,
+				},
+			},
+		]);
+
+		for (const bareLit of ['"quoted"', '/regex/i', '2026-10-22', '@today', '[[WikiLink]]']) {
+			const litRes = parseQuery(bareLit);
+			expect(litRes.ast).toBeNull();
+			expect(litRes.diagnostics).toEqual([
+				{
+					code: 'SYNTAX_ERROR',
+					severity: 'error',
+					issue: `Bare search term ${bareLit} is not supported.`,
+					hint: `Specify a scope (e.g. "file:${bareLit}") or a property filter ("[prop:${bareLit}]").`,
+					span: {
+						startOffset: 0,
+						endOffset: bareLit.length,
+						startLine: 1,
+						startColumn: 1,
+					},
+				},
+			]);
 		}
-	});
-
-	it('emits WARN_UNQUOTED_MULTIWORD_SCOPE from AST structure alone (including custom/unverified scopes and parenthesized unquoted leaf)', () => {
-		const customScopeRes = parseQuery('task:Action Items');
-		expect(customScopeRes.ast).not.toBeNull();
-		expect(customScopeRes.diagnostics.map((d) => d.code)).toEqual([
-			'WARN_UNQUOTED_MULTIWORD_SCOPE',
-		]);
-
-		const parenLeafRes = parseQuery('headings:(Action) Items');
-		expect(parenLeafRes.ast).not.toBeNull();
-		expect(parenLeafRes.diagnostics.map((d) => d.code)).toEqual([
-			'WARN_UNQUOTED_MULTIWORD_SCOPE',
-		]);
 	});
 });
 
@@ -636,7 +693,7 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 	});
 
 	it('deeply freezes all AST nodes, children arrays, matchers, and spans via deepFreezeAST', () => {
-		const res = parseQuery('headings:(Intro OR /sum.*/i) AND ![status: = "active"] AND note');
+		const res = parseQuery('headings:(Intro OR /sum.*/i) AND ![status: = "active"] AND #note');
 		expect(res.ast).not.toBeNull();
 		const frozen = deepFreezeAST(res.ast!);
 
@@ -653,18 +710,25 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 		expect(Object.isFrozen(scoped.expr)).toBe(true);
 		expect(containsRegexLeaf(scoped.expr)).toBe(true);
 
-		const textNode = logical.children[2] as TextMatchNode;
-		expect(Object.isFrozen(textNode.matcher)).toBe(true);
+		const tagScoped = logical.children[2] as ScopedFilterNode;
+		const leafExpr = tagScoped.expr;
+		expect(Object.isFrozen(leafExpr)).toBe(true);
+		if (leafExpr.type !== 'VALUE_LEAF') throw new Error('Expected VALUE_LEAF');
+		expect(Object.isFrozen(leafExpr.matcher)).toBe(true);
 		expect(() => {
-			(textNode.matcher as { value: string }).value = 'mutated';
+			(leafExpr.matcher as { value: string }).value = 'mutated';
 		}).toThrow(TypeError);
 
 		expect(Object.isFrozen(deepFreezeAST({ type: 'MATCH_ALL' }))).toBe(true);
 	});
 
 	it('normalizes ASTs idempotently and flattens nested logical operators in normalizeAST', () => {
-		const q1 = parseQuery('((a AND b) AND c) AND !d AND #work AND ["Status": = 1]');
-		const q2 = parseQuery('a AND (b AND c) AND NOT d AND tag:work AND [status:=1]');
+		const q1 = parseQuery(
+			'((file:a AND file:b) AND file:c) AND !file:d AND #work AND ["Status": = 1]',
+		);
+		const q2 = parseQuery(
+			'file:a AND (file:b AND file:c) AND NOT file:d AND tag:work AND [status:=1]',
+		);
 		expect(q1.ast).not.toBeNull();
 		expect(q2.ast).not.toBeNull();
 
@@ -734,7 +798,9 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 			expect(res.diagnostics.some((d) => d.code === 'SYNTAX_ERROR')).toBe(true);
 		}
 
-		const validBraces = parseQuery('"[{\\"a\\": 1}]" AND /^a{2,4}$/ AND links:[[Note {1}]]');
+		const validBraces = parseQuery(
+			'file:"[{\\"a\\": 1}]" AND file:/^a{2,4}$/ AND links:[[Note {1}]]',
+		);
 		expect(validBraces.diagnostics.filter((d) => d.severity === 'error')).toEqual([]);
 		expect(validBraces.ast).not.toBeNull();
 	});

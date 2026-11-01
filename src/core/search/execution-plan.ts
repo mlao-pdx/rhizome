@@ -61,8 +61,6 @@ export type CompiledSearchNode =
 			readonly children: readonly CompiledSearchNode[];
 	  }
 	| { readonly type: 'NOT'; readonly child: CompiledSearchNode }
-	| { readonly type: 'TEXT_MATCH_REGEX'; readonly regex: RegExp }
-	| { readonly type: 'TEXT_MATCH_STRING'; readonly value: string }
 	| {
 			readonly type: 'SCOPED_FILTER';
 			readonly scopeDef: ScopeDefinition;
@@ -273,16 +271,6 @@ function compileSearchNode(
 				type: 'NOT',
 				child: compileSearchNode(ast.child, resolvedConfig, referenceTimeMs),
 			};
-		case 'TEXT_MATCH':
-			return ast.matcher.kind === 'regex'
-				? {
-						type: 'TEXT_MATCH_REGEX',
-						regex: compileRegexOrThrow(ast.matcher.pattern, ast.matcher.flags),
-					}
-				: {
-						type: 'TEXT_MATCH_STRING',
-						value: ast.matcher.value,
-					};
 		case 'SCOPED_FILTER': {
 			const scopeDef =
 				ast.rawScope === '#'

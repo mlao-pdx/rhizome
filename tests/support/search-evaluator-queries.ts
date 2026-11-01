@@ -179,7 +179,6 @@ const existsArb = fc
 	.map(([key, suffix]) => `[${key}${suffix}]`);
 const scopedArb = fc.tuple(scopeArb, valueExprArb).map(([scope, expr]) => `${scope}:(${expr})`);
 const atomArb = fc.oneof(
-	valueLeafArb,
 	fc.constant('#work/urgent'),
 	scopedArb,
 	existsArb,

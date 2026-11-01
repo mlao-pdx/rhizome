@@ -313,18 +313,27 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		}
 	});
 
-	it('matches bare text and regex against basename, path, aliases, and tags only', () => {
+	it('rejects bare text and regex queries while matching explicit file:, path:, aliases:, and tag: scopes', () => {
 		const config = makeConfig();
 		const cache: ObsidianMetadataCacheInput = {
 			frontmatter: { aliases: ['CleverAlias'], tags: ['#TopicTag'], label: 'OnlyInProperty' },
 			headings: [{ heading: 'OnlyInHeading', level: 1 }],
 		};
 		const docs = [makeDoc(config, 'DeepFolder/UniqueBase.md', cache)];
-		for (const q of 'uniquebase;deepfolder;cleveralias;topictag;/^CleverAlias$/'.split(';')) {
-			assertEval(docs, q, config, ['DeepFolder/UniqueBase.md']);
+		for (const bare of 'uniquebase;deepfolder;cleveralias;topictag;/^CleverAlias$/'.split(
+			';',
+		)) {
+			const res = compileQuery(bare, config, REF_MS);
+			expect(res.executable).toBe(false);
+			expect(res.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
 		}
-		assertEval(docs, 'onlyinproperty', config, []);
-		assertEval(docs, 'onlyinheading', config, []);
+		for (const scoped of 'file:uniquebase;path:deepfolder;aliases:cleveralias;tag:topictag;aliases:/^CleverAlias$/'.split(
+			';',
+		)) {
+			assertEval(docs, scoped, config, ['DeepFolder/UniqueBase.md']);
+		}
+		assertEval(docs, 'file:onlyinproperty', config, []);
+		assertEval(docs, 'aliases:onlyinheading', config, []);
 	});
 
 	it('collects diagnostics in exact document, occurrence, and value order across short-circuit branches without duplicates', () => {

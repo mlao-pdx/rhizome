@@ -26,7 +26,7 @@ describe('analyzeRhizomeCodeBlock & findRhizomeCodeBlocks', () => {
 			'{% # Outer inline comment %}',
 			'{%- query tasks explain -%}',
 			'  {% # Inner query comment %}',
-			'  tag:work AND (#urgent OR [score: >= 10]) [due: @today] /^sprint/i "quoted" links:[[Target]] bareword',
+			'  tag:work AND (#urgent OR [score: >= 10]) [due: @today] file:/^sprint/i aliases:"quoted" links:[[Target]] [score: != 5]',
 			'{%- endquery -%}',
 			'{% for item in tasks %}',
 			'  - {{ item.file.basename | upcase | truncate: 20, "..." }}',
@@ -55,10 +55,10 @@ describe('analyzeRhizomeCodeBlock & findRhizomeCodeBlocks', () => {
 		expect(kinds.has('query-wikilink')).toBe(true);
 		expect(kinds.has('query-identifier')).toBe(true);
 
-		// Hints for [[Target]] and bareword should be shifted into codeblock coordinates
+		// Hints for [[Target]] and [score: != 5] should be shifted into codeblock coordinates
 		const diagCodes = analysis.diagnostics.map((d) => d.code);
 		expect(diagCodes).toContain('HINT_WIKILINK_BRACKETS_IN_SCOPE');
-		expect(diagCodes).toContain('HINT_BARE_TEXT_NO_BODY');
+		expect(diagCodes).toContain('HINT_PROP_NEQ_EXISTENCE');
 		for (const diag of analysis.diagnostics) {
 			const slice = code.slice(diag.startOffset, diag.endOffset);
 			expect(slice.length).toBeGreaterThan(0);

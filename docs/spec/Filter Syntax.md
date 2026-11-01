@@ -9,7 +9,7 @@
 
 ### 1.1 Core Architectural Pillars
 
-1. **No Full-Text Body Search, `resolvedLinks`, or Backlinks**: Queries operate strictly against per-note file metadata (`TFile` attributes + normalized per-note `CachedMetadata` + properties). The DSL and normalizer do not ingest `MetadataCache.resolvedLinks` and do not support backlink queries (`backlink:`, `backlinks:`, `referencedLinks:`); only outgoing `links` and `embeds` recorded on the note itself are indexed. Bare words without an operator match against `file.basename`, `file.path`, `aliases`, and `tags` (and emit `HINT_BARE_TEXT_NO_BODY`).
+1. **No Full-Text Body Search, Bare-Text Search, `resolvedLinks`, or Backlinks**: Queries operate strictly against per-note file metadata (`TFile` attributes + normalized per-note `CachedMetadata` + properties). The DSL and normalizer do not ingest `MetadataCache.resolvedLinks` and do not support backlink queries (`backlink:`, `backlinks:`, `referencedLinks:`); only outgoing `links` and `embeds` recorded on the note itself are indexed. Every filter atom must specify an explicit target (`(...)`, `[property...]`, `scope:...`, or `#tag`); unscoped bare words or literals are rejected at compile time with `SYNTAX_ERROR` and an actionable hint.
 2. **Authorized Queries & Native ECMAScript `RegExp`**: This engine is intended for queries the vault owner has authorized for execution. It uses native ECMAScript regular expressions (`new RegExp(pattern, flags)` with stateless flags `i`, `m`, `s`, `u`) and deliberately provides no execution deadline or protection against pathological backtracking. Metadata strings are not length-bounded. Integrations must not treat imported or shared query text as trusted solely because it resides in a local vault.
 3. **Centralized, Runtime-Immutable Configuration & Normalization Fingerprinting (`initEngineConfig`)**:
    - Timezone validation, property-type registry normalization, and custom scope deduplication happen once in `initEngineConfig(rawConfig)`, returning a deeply frozen `ResolvedEngineConfig` closure.
@@ -228,8 +228,7 @@ export type SearchAST =
   | LogicalNode
   | NotNode
   | ScopedFilterNode
-  | PropertyFilterNode
-  | TextMatchNode;
+  | PropertyFilterNode;
 
 export interface MatchAllNode {
   readonly type: 'MATCH_ALL';
@@ -278,13 +277,6 @@ export interface PropertyFilterNode {
   readonly span?: SourceSpan;
 }
 
-export interface TextMatchNode {
-  readonly type: 'TEXT_MATCH';
-  readonly matcher: LeafMatcher;
-  readonly rawText: string;         // Original token text for linting
-  readonly span?: SourceSpan;
-}
-
 export type DiagnosticSeverity = 'error' | 'warning' | 'hint';
 
 export type DiagnosticCode =
@@ -293,13 +285,11 @@ export type DiagnosticCode =
   | 'ERROR_UNKNOWN_SCOPE'
   | 'ERROR_TYPE_MISMATCH'
   | 'ERROR_INVALID_OPERATOR_FOR_TYPE'
-  | 'WARN_UNQUOTED_MULTIWORD_SCOPE'
-  | 'WARN_LOWERCASE_BOOLEAN'
   | 'WARN_SINGLE_VALUE_CONTRADICTION'
   | 'HINT_PROP_NEQ_EXISTENCE'
+  | 'HINT_PROPERTY_MATCHES_SCOPE'
   | 'HINT_AMBIGUOUS_PRECEDENCE'
   | 'HINT_WIKILINK_BRACKETS_IN_SCOPE'
-  | 'HINT_BARE_TEXT_NO_BODY'
   | 'HINT_UNCLOSED_REGEX';
 
 export interface SearchDiagnostic {
@@ -616,7 +606,6 @@ Primary           ::= Parenthesized
                     | PropertyFilter
                     | ScopedOperator
                     | TagShorthand
-                    | BareLeafValue
 
 Parenthesized     ::= "(" OrExpression ")"
 
@@ -634,11 +623,6 @@ ValueNotExpr      ::= ( "NOT" | BangNot ) ValueNotExpr
 PropertyKey       ::= QuotedString | Identifier
 ScopeName         ::= Identifier
 TagShorthand      ::= TagLiteral
-
-BareLeafValue     ::= QuotedString
-                    | RegexLiteral
-                    | DateTimeLiteral
-                    | Identifier
 
 ValueLeaf         ::= QuotedString
                     | RegexLiteral
@@ -753,14 +737,11 @@ ValueLeaf         ::= QuotedString
 | `ERROR_UNKNOWN_SCOPE`             | `error`   | `ScopedFilterNode` (with `rawScope !== '#'`) not found via `resolvedConfig.getScope(rawScope)`.                                                                                                                                                                                             | Suggests closest scope via Levenshtein ($\le 2$) or synonym (`tags` $\to$ `tag`, `prop` $\to$ `[prop:]`).                                                         |
 | `ERROR_INVALID_OPERATOR_FOR_TYPE` | `error`   | Valid regex used with `=`, `!=`, `<`, `>`, `<=`, `>=` (any type) or with `:` on `checkbox`; or `<, >, <=, >=` used on `checkbox`. _(Checked before `ERROR_TYPE_MISMATCH`)._                                                                                                                 | `Operator "${op}" cannot be used with ${propType}/regex.`                                                                                                         |
 | `ERROR_TYPE_MISMATCH`             | `error`   | Non-regex leaf in `[key op val]` fails validation for `key`‘s resolved `ObsidianPropertyType` (excluding `REVERSED_RANGE`, which emits `SYNTAX_ERROR`).                                                                                                                                     | `"${val}" is not a valid ${propType} for property "${key}".`                                                                                                      |
-| `WARN_UNQUOTED_MULTIWORD_SCOPE`   | `warning` | Checked during CST-to-AST construction before flattening: an adjacent pair `(left, right)` joined without an explicit `AND` token where `left` is a `ScopedFilterNode` with an unquoted string leaf and `right` is a bare `TextMatchNode` on the same `startLine`.                          | `"${next}" is searched as a separate term, not inside "${scope}:".` Hint: `Use ${scope}:"${val} ${next}"`                                                         |
-| `WARN_LOWERCASE_BOOLEAN`          | `warning` | Bare unquoted `TextMatchNode` has `rawText` in `{"and", "or", "not"}` (case-insensitive, excluding exact uppercase).                                                                                                                                                                        | `Lowercase "${rawText}" is searched as literal text.` Hint: `Use uppercase "${rawText.toUpperCase()}".`                                                           |
 | `WARN_SINGLE_VALUE_CONTRADICTION` | `warning` | An `AND` node contains two direct equality predicates on the **same canonical single-valued field** (`ext:` / `[file.ext = ...]`, `[file.name = ...]`, `[file.basename = ...]`, `[file.path = ...]`, `[file.parent = ...]`) with different normalized target values.                        | `A single file cannot match both "${a}" and "${b}" on the same single-valued field.` Hint: `Did you mean "OR"?`                                                   |
 | `HINT_PROP_NEQ_EXISTENCE`         | `hint`    | Every `PropertyFilterNode` with `operator === '!='`.                                                                                                                                                                                                                                        | `"[${key} != ...]" requires "${key}" to exist.` Hint: `To exclude notes (including notes missing "${key}"), use "![${key} = ...]".`                               |
 | `HINT_AMBIGUOUS_PRECEDENCE`       | `hint`    | An `OR` `LogicalNode` has a child `AND` `LogicalNode` with `parenthesized !== true`.                                                                                                                                                                                                        | `Evaluated as "(A AND B) OR C".` Hint: `Add parentheses to make precedence explicit.`                                                                             |
 | `HINT_WIKILINK_BRACKETS_IN_SCOPE` | `hint`    | Every `WikiLinkValue` token lowered into a `VALUE_LEAF`.                                                                                                                                                                                                                                    | `Wikilink brackets "[[...]]" are not needed.` Hint: `Stripped "[[...]]" automatically.`                                                                           |
-| `HINT_BARE_TEXT_NO_BODY`          | `hint`    | Every document-level `TextMatchNode` (unless already flagged by `WARN_LOWERCASE_BOOLEAN` or `HINT_UNCLOSED_REGEX`).                                                                                                                                                                         | `Bare terms only search filenames, paths, aliases, and tags (note body is not indexed).`                                                                          |
-| `HINT_UNCLOSED_REGEX`             | `hint`    | Every unquoted string `LeafMatcher` starting with `'/'` (`value !== '//'`) in a regex-capable leaf position (`TextMatchNode`, `ScopedFilterNode`, or valid non-`checkbox` `PropertyFilterNode` with `operator === ':'`).                                                                    | `Unquoted "${rawValue}" starts with "/" and is searched as literal text.` Hint: `Add a closing "/" for a regular expression, or wrap in quotes for literal text.` |
+| `HINT_UNCLOSED_REGEX`             | `hint`    | Every unquoted string `LeafMatcher` starting with `'/'` (`value !== '//'`) in a regex-capable leaf position (`ScopedFilterNode` or valid non-`checkbox` `PropertyFilterNode` with `operator === ':'`).                                                                                      | `Unquoted "${rawValue}" starts with "/" and is searched as literal text.` Hint: `Add a closing "/" for a regular expression, or wrap in quotes for literal text.` |
 
 ---
 
@@ -840,9 +821,6 @@ export function deepFreezeAST(ast: SearchAST): SearchAST {
   if ('span' in ast && ast.span) Object.freeze(ast.span);
 
   switch (ast.type) {
-    case 'TEXT_MATCH':
-      Object.freeze(ast.matcher);
-      return Object.freeze(ast);
     case 'NOT':
       deepFreezeAST(ast.child);
       return Object.freeze(ast);
@@ -2049,14 +2027,6 @@ function evalAstNode(
         : ast.children.some((c) => evalAstNode(doc, c, resolvedConfig, referenceTimeMs));
     case 'NOT':
       return !evalAstNode(doc, ast.child, resolvedConfig, referenceTimeMs);
-    case 'TEXT_MATCH': {
-      const targets = [doc.file.basename, doc.file.path, ...doc.aliases, ...doc.tags];
-      return targets.some((t) =>
-        ast.matcher.kind === 'regex'
-          ? testRegex(t, ast.matcher)
-          : substringStringMatch(t, ast.matcher.value)
-      );
-    }
     case 'SCOPED_FILTER': {
       const def =
         ast.rawScope === '#'
@@ -2279,12 +2249,6 @@ export function normalizeAST(ast: SearchAST): SearchAST {
   switch (ast.type) {
     case 'MATCH_ALL':
       return { type: 'MATCH_ALL' };
-    case 'TEXT_MATCH':
-      return {
-        type: 'TEXT_MATCH',
-        matcher: { ...ast.matcher },
-        rawText: ''
-      };
     case 'NOT':
       return {
         type: 'NOT',
@@ -2371,7 +2335,7 @@ export function normalizeAST(ast: SearchAST): SearchAST {
      1. **Logical Arity**: `LogicalNode.children.length >= 2` and `VALUE_LOGICAL.children.length >= 2`; `MatchAllNode` only at root.
      2. **Operator/RHS Shape**: `operator === 'EXISTS'` has `valueExpr === undefined`; `operator === ':'` allows `VALUE_LOGICAL`, `VALUE_NOT`, or `VALUE_LEAF`; `=`, `!=`, `<`, `>`, `<=`, `>=` require a single non-regex `VALUE_LEAF`.
      3. **Scope Membership**: `ScopedFilterNode.scope` is a registered canonical scope name in `resolvedConfig`.
-     4. **Context-Specific String Printability (for Scopes, Bare Text & Property `:` Leaves)**: Unquoted string leaves (`quoted: false`) at bare document level or inside parenthesized `ValueOrExpr` match `/^[a-zA-Z_][a-zA-Z0-9_-]{0,15}$/` (excluding `"AND"`, `"OR"`, `"NOT"`); direct unparenthesized RHS leaves (`ValueLeaf`) also allow hyphen-prefixed identifiers (`-[a-zA-Z_][a-zA-Z0-9_-]{0,15}`). Quoted string leaves (`quoted: true`) are printed with `"` and escaped via `\"`, `\\`, `\n`, `\r`, `\t` (preserving `quoted` identically across print + parse).
+     4. **Context-Specific String Printability (for Scopes & Property `:` Leaves)**: Unquoted string leaves (`quoted: false`) inside parenthesized `ValueOrExpr` match `/^[a-zA-Z_][a-zA-Z0-9_-]{0,15}$/` (excluding `"AND"`, `"OR"`, `"NOT"`); direct unparenthesized RHS leaves (`ValueLeaf`) also allow hyphen-prefixed identifiers (`-[a-zA-Z_][a-zA-Z0-9_-]{0,15}`). Quoted string leaves (`quoted: true`) are printed with `"` and escaped via `\"`, `\\`, `\n`, `\r`, `\t` (preserving `quoted` identically across print + parse).
      5. **Type-Valid Comparison Leaves (Overrides Rule 4 for Property `=`, `!=`, `<`, `>`, `<=`, `>=`)**: Resolved via `resolveQueryPropertyType(key, resolvedConfig.propertyTypes)`: `'number'` uses unquoted `/^-?\d{1,6}(?:\.\d{1,3})?$/`; `'checkbox'` uses unquoted `"true"`/`"false"`; `'date'`/`'datetime'` uses temporal literals that pass `parseTemporalExpr(..., { allowYearOnly: true, allowRelative: true, timeZone: resolvedConfig.timeZone, referenceTimeMs: refMs }).ok === true`; text-like types use Rule 4.
      6. **Structural Printable Regex Leaves**: Generated structurally (not via random punctuation strings) from non-empty concatenations/alternations of alphanumeric literals, escaped metacharacters (`\.`, `\/`, `\-`), small character classes (`[a-z]`, `[0-9]`), and optional `^`/`$` anchors (excluding repetition quantifiers from the random generator so differential runs always terminate instantaneously), with unique flags from `"imsu"`, verified via `validateRegexLiteral(pattern, flags) !== null`.
      7. **Length & Depth Bounds**: Filtered so `printAST(ast).length <= 4096` and syntactic recursion depth (counting unary negations and parenthesized groups) is $\le 32$.
@@ -2396,7 +2360,7 @@ Unless otherwise noted, tests use `initEngineConfig({ timeZone: 'America/New_Yor
 
 1. **`tag:#work/urgent` & Bare `#work`** $\rightarrow$ Both compile with zero errors (`#work` has `rawScope: '#'`, `scope: 'tag'`); both match a note with `#work/urgent`.
 2. **`[score >= -10.5]`** $\rightarrow$ Parses `-10.5` via `ValueLeaf`; matches `score: -5`, rejects `score: -20`.
-3. **`!draft` vs `file:-draft` vs `file:!draft` / `file:(!draft)`** $\rightarrow$ `!draft` negates document-level `TEXT_MATCH("draft")`; `file:-draft` matches substring `"-draft"` in filename; `file:!draft` and `file:(!draft)` require at least one filename string (`name` or `basename`) not containing `"draft"`.
+3. **`!file:draft` vs `file:-draft` vs `file:!draft` / `file:(!draft)`** $\rightarrow$ `!file:draft` negates document-level `SCOPED_FILTER("file", "draft")`; `file:-draft` matches substring `"-draft"` in filename; `file:!draft` and `file:(!draft)` require at least one filename string (`name` or `basename`) not containing `"draft"`.
 4. **`path:"/projects/active"` vs `path:/projects/active` vs `path:Projects/Active/Archive`** $\rightarrow$ `path:"/projects/active"` and `path:Projects/Active/Archive` compile and match as string paths; unquoted `path:/projects/active` tokenizes `/projects/active` as `RegexLiteral` with invalid flags `active` and is rejected with `SYNTAX_ERROR` (`executable: false`).
 5. **`[meeting = 2026-10-22T14:00:00+02:00]`** $\rightarrow$ Tokenizes via anchor-free `DateTimeLiteral`; matches `2026-10-22T12:00:00.000Z`.
 6. **Invalid & Skipped Dates (Including Relative Offset Landing on Skipped Date)**:

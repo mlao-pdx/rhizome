@@ -160,11 +160,11 @@ describe('explainQuery', () => {
 	it('progressively shrinks query slices, distinguishes implicit vs explicit AND, uses italic emphasis, and emits numbered footnotes', () => {
 		const cfg = makeConfig();
 		const query =
-			'folder:projects AND #work/auth tag:(#urgent !#archived) [priority: >= 2] [status: != "done"] !( [done: = true] OR "draft" )';
+			'folder:projects AND #work/auth tag:(#urgent !#archived) [priority: >= 2] [status: != "done"] !( [done: = true] OR file:"draft" )';
 		const md = explainQuery(query, cfg, REF_TIME_MS);
 
 		expect(md).toContain(`- **Query**: \`${query}\``);
-		expect(md).toContain('- **Status**: *Executable* with 0 errors, 0 warnings, 2 hints.');
+		expect(md).toContain('- **Status**: *Executable* with 0 errors, 0 warnings, 1 hint.');
 		expect(md).toContain(`- \`${query}\``);
 		expect(md).toContain('Matches notes where *all* of the following hold (`AND`):');
 		// Scope alias + numbered footnote
@@ -196,14 +196,14 @@ describe('explainQuery', () => {
 		expect(md).not.toContain('(`!=`,');
 		// Note-level NOT and OR shrinking
 		expect(md).toContain(
-			'- `!( [done: = true] OR "draft" )`\n    Excludes notes matching (`!` / `NOT`):',
+			'- `!( [done: = true] OR file:"draft" )`\n    Excludes notes matching (`!` / `NOT`):',
 		);
 		expect(md).toContain(
-			'  - `( [done: = true] OR "draft" )`\n      Matches notes where *any* of the following hold (`OR`):',
+			'  - `( [done: = true] OR file:"draft" )`\n      Matches notes where *any* of the following hold (`OR`):',
 		);
 		expect(md).toContain('    - `[done: = true]`\n        `done`[^8] is `true`.');
 		expect(md).toContain(
-			'    - `"draft"`\n        Note metadata ([^9]) contains `draft` (case-insensitive). · [^10]',
+			'    - `file:"draft"`\n        At least one `file`[^9] contains `draft` (case-insensitive).',
 		);
 
 		// Diagnostics section immediately follows Logic Breakdown
@@ -216,8 +216,6 @@ describe('explainQuery', () => {
 
 		expect(md).toContain('> [!info] Hint 1: `HINT_PROP_NEQ_EXISTENCE`');
 		expect(md).toContain('‼️[status: != "done"]‼️');
-		expect(md).toContain('> [!info] Hint 2: `HINT_BARE_TEXT_NO_BODY`');
-		expect(md).toContain('‼️"draft"‼️');
 
 		// Concept Reference places the Mermaid diagram first, followed by numbered footnote definitions
 		const refSection = md.slice(refIdx);
@@ -225,7 +223,7 @@ describe('explainQuery', () => {
 		const firstFootnoteIdx = refSection.indexOf('[^1]: ');
 		expect(mermaidIdx).toBeGreaterThan(-1);
 		expect(firstFootnoteIdx).toBeGreaterThan(mermaidIdx);
-		for (let i = 1; i <= 10; i++) {
+		for (let i = 1; i <= 9; i++) {
 			expect(refSection).toMatch(new RegExp(`^\\[\\^${i}\\]: `, 'm'));
 		}
 		expect(refSection).toContain('title [Half-Open) Interval Comparison Matches');
@@ -254,7 +252,7 @@ describe('explainQuery', () => {
 	it('renders regex values as direct links to regex101 with flavor=javascript, regex, and flags preselected', () => {
 		const cfg = makeConfig();
 		const md = explainQuery(
-			'/^roadmap/i path:/^projects\\// [priority:/^10$/] [status:/todo|doing/i]',
+			'file:/^roadmap/i path:/^projects\\// [priority:/^10$/] [status:/todo|doing/i]',
 			cfg,
 			REF_TIME_MS,
 		);
@@ -267,9 +265,9 @@ describe('explainQuery', () => {
 		expect(md).toContain(`[\`/^roadmap/i\`](${roadmapUrl})[^4]`);
 		expect(md).toContain(`[\`/^projects\\//\`](${projectsUrl})[^4]`);
 		expect(md).toContain(
-			`\`priority\`[^7] has raw text matching [\`/^10$/\`](${prioUrl})[^4].`,
+			`\`priority\`[^6] has raw text matching [\`/^10$/\`](${prioUrl})[^4].`,
 		);
-		expect(md).toContain(`\`status\`[^8] matches [\`/todo|doing/i\`](${statusUrl})[^4].`);
+		expect(md).toContain(`\`status\`[^7] matches [\`/todo|doing/i\`](${statusUrl})[^4].`);
 		expect(md).toContain('[^4]: **Regular Expression Evaluation**');
 	});
 
