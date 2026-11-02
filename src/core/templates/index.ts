@@ -4,6 +4,8 @@ export * from './query-tag';
 export * from './temporal-drop';
 export * from './temporal-range-tokenizer';
 export * from './temporal-liquid-extensions';
+export * from './payload-filters';
+export * from './aggregate-filter';
 export * from './template-context';
 export * from './template-engine';
 export * from './template-analyzer';

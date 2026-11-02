@@ -270,18 +270,26 @@ export function isVacuousOccurrence(val: unknown): boolean {
 	return val === null || val === undefined || val === '';
 }
 
-function mergeKeyValue(
+/**
+ * Merges a key-value pair onto `out` using the shared Collision Resolution Rule:
+ * - Vacuous top-level values (`null`, `undefined`, `""`) normalize to `null` and act as
+ *   identity elements on collision (`null ⊕ "a" = "a"`, `"a" ⊕ null = "a"`, `null ⊕ null = null`).
+ * - Array values are shallow-copied and immediately mark `key` in `promotedKeys`, preserving
+ *   any internal `null` or `""` elements verbatim.
+ * - Two non-vacuous occurrences for the same `key` promote the target value to an array and append.
+ */
+export function mergeKeyValue(
 	out: Record<string, unknown>,
 	promotedKeys: Set<string>,
 	key: string,
-	incoming: SanitizedScalar | readonly SanitizedScalar[] | undefined,
+	incoming: unknown,
 ): void {
 	const rhs = isVacuousOccurrence(incoming) ? null : incoming;
 
 	// Case 1: First time seeing this key on `out`
 	if (!(key in out)) {
 		if (Array.isArray(rhs)) {
-			out[key] = [...(rhs as readonly SanitizedScalar[])];
+			out[key] = [...(rhs as readonly unknown[])];
 			promotedKeys.add(key);
 		} else {
 			out[key] = rhs;
@@ -299,7 +307,7 @@ function mergeKeyValue(
 	// Case 3: Existing value is vacuous (and not a promoted array) -> incoming replaces it without promoting
 	if (!promotedKeys.has(key) && lhs === null) {
 		if (Array.isArray(rhs)) {
-			out[key] = [...(rhs as readonly SanitizedScalar[])];
+			out[key] = [...(rhs as readonly unknown[])];
 			promotedKeys.add(key);
 		} else {
 			out[key] = rhs;
@@ -314,7 +322,7 @@ function mergeKeyValue(
 	}
 	const targetArr = out[key] as unknown[];
 	if (Array.isArray(rhs)) {
-		for (const item of rhs as readonly SanitizedScalar[]) {
+		for (const item of rhs as readonly unknown[]) {
 			targetArr.push(item);
 		}
 	} else {
