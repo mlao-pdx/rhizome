@@ -346,6 +346,7 @@ describe('Vault Query Runner Property Invariants', () => {
 								expect(Object.keys(m)).toEqual([
 									'file',
 									'aliases',
+									'aliasLocations',
 									'tags',
 									'tagLocations',
 									'headings',
@@ -353,6 +354,7 @@ describe('Vault Query Runner Property Invariants', () => {
 									'embeds',
 									'blocks',
 									'properties',
+									'propertyLocations',
 								]);
 								expect('normalizationFingerprint' in m).toBe(false);
 								expect('propertyOccurrences' in m).toBe(false);

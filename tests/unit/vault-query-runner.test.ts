@@ -238,13 +238,14 @@ describe('runVaultQuery', () => {
 		expect(match.tagLocations).toEqual([
 			{
 				tag: 'work',
-				source: 'body',
+				source: 'inline',
 				origin: '[[tasks/task-1.md|task-1]]',
 			},
 		]);
 		expect(Object.keys(match)).toEqual([
 			'file',
 			'aliases',
+			'aliasLocations',
 			'tags',
 			'tagLocations',
 			'headings',
@@ -252,6 +253,7 @@ describe('runVaultQuery', () => {
 			'embeds',
 			'blocks',
 			'properties',
+			'propertyLocations',
 		]);
 		expect('normalizationFingerprint' in match).toBe(false);
 		expect('propertyOccurrences' in match).toBe(false);

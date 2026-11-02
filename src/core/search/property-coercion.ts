@@ -264,10 +264,69 @@ export function resolveQueryPropertyType(
 }
 
 /**
+ * Returns `true` when a top-level property occurrence value is vacuous (`null`, `undefined`, or `""`).
+ */
+export function isVacuousOccurrence(val: unknown): boolean {
+	return val === null || val === undefined || val === '';
+}
+
+function mergeKeyValue(
+	out: Record<string, unknown>,
+	promotedKeys: Set<string>,
+	key: string,
+	incoming: SanitizedScalar | readonly SanitizedScalar[] | undefined,
+): void {
+	const rhs = isVacuousOccurrence(incoming) ? null : incoming;
+
+	// Case 1: First time seeing this key on `out`
+	if (!(key in out)) {
+		if (Array.isArray(rhs)) {
+			out[key] = [...(rhs as readonly SanitizedScalar[])];
+			promotedKeys.add(key);
+		} else {
+			out[key] = rhs;
+		}
+		return;
+	}
+
+	// Case 2: Incoming value is vacuous (null / undefined / "") -> no-op
+	if (rhs === null) {
+		return;
+	}
+
+	const lhs = out[key];
+
+	// Case 3: Existing value is vacuous (and not a promoted array) -> incoming replaces it without promoting
+	if (!promotedKeys.has(key) && lhs === null) {
+		if (Array.isArray(rhs)) {
+			out[key] = [...(rhs as readonly SanitizedScalar[])];
+			promotedKeys.add(key);
+		} else {
+			out[key] = rhs;
+		}
+		return;
+	}
+
+	// Case 4: Both existing and incoming are non-vacuous -> promote (if not already) and append
+	if (!promotedKeys.has(key)) {
+		out[key] = [lhs];
+		promotedKeys.add(key);
+	}
+	const targetArr = out[key] as unknown[];
+	if (Array.isArray(rhs)) {
+		for (const item of rhs as readonly SanitizedScalar[]) {
+			targetArr.push(item);
+		}
+	} else {
+		targetArr.push(rhs);
+	}
+}
+
+/**
  * Builds the `propertyKeys` and null-prototype `properties` views from `propertyOccurrences`.
- * Excludes `FORBIDDEN_KEYS` and `OMITTED_PROPERTY_VIEW_KEYS` (`tag`, `tags`, `alias`, `aliases`,
- * `◊internalrhizome`), defensively copies single-occurrence array values, and promotes
- * multi-occurrence keys into 1-level concatenated arrays.
+ * Preserves trimmed authored key casing (`rawKey.trim()`), excludes `FORBIDDEN_KEYS` and
+ * `OMITTED_PROPERTY_VIEW_KEYS` (`tag`, `tags`, `alias`, `aliases`, `◊internalrhizome`),
+ * defensively copies array values, and merges same-key collisions using the Collision Resolution Rule.
  */
 export function buildPropertiesViews(occurrences: readonly PropertyOccurrence[]): {
 	propertyKeys: string[];
@@ -277,28 +336,22 @@ export function buildPropertiesViews(occurrences: readonly PropertyOccurrence[])
 	const out = Object.create(null) as Record<string, unknown>;
 	const promotedKeys = new Set<string>();
 
-	for (const { key, rawValue } of occurrences) {
-		if (FORBIDDEN_KEYS.has(key) || OMITTED_PROPERTY_VIEW_KEYS.has(key)) continue;
-		if (!(key in out)) {
-			propertyKeys.push(key);
-			if (Array.isArray(rawValue)) {
-				out[key] = [...rawValue];
-				promotedKeys.add(key);
-			} else {
-				out[key] = rawValue;
-			}
-		} else {
-			if (!promotedKeys.has(key)) {
-				out[key] = [out[key]];
-				promotedKeys.add(key);
-			}
-			const targetArr = out[key] as unknown[];
-			if (Array.isArray(rawValue)) {
-				for (const item of rawValue) targetArr.push(item);
-			} else {
-				targetArr.push(rawValue);
-			}
+	for (const { key, rawKey, rawValue } of occurrences) {
+		const propKey = (rawKey ?? key).trim();
+		const lowerKey = key.trim().toLowerCase();
+		if (
+			!propKey ||
+			!lowerKey ||
+			FORBIDDEN_KEYS.has(propKey) ||
+			FORBIDDEN_KEYS.has(lowerKey) ||
+			OMITTED_PROPERTY_VIEW_KEYS.has(lowerKey)
+		) {
+			continue;
 		}
+		if (!(propKey in out)) {
+			propertyKeys.push(propKey);
+		}
+		mergeKeyValue(out, promotedKeys, propKey, rawValue);
 	}
 
 	return { propertyKeys, properties: out };

@@ -2,6 +2,8 @@ import {
 	buildPropertiesViews,
 	coercePropertyValue,
 	FORBIDDEN_KEYS,
+	isVacuousOccurrence,
+	OMITTED_PROPERTY_VIEW_KEYS,
 	resolveUserPropertyType,
 	sanitizeLineNumber,
 	sanitizeScalar,
@@ -11,9 +13,11 @@ import { MAX_SAFE_EPOCH_MS } from './temporal';
 import type {
 	DocumentDiagnostic,
 	DocumentDiagnosticCode,
+	NormalizedAliasLocation,
 	NormalizedDocument,
 	NormalizedHeading,
 	NormalizedLink,
+	NormalizedPropertyLocation,
 	NormalizedTagLocation,
 	PropertyOccurrence,
 	ResolvedEngineConfig,
@@ -243,7 +247,7 @@ function validateIntegerTimestampMs(val: number, fieldName: string): number {
 
 function normalizeLinkItem(
 	l: ObsidianLinkCacheInput,
-	source: 'body' | 'frontmatter' | 'embed',
+	source: 'frontmatter' | 'inline' | 'embed',
 	sourcePath: string,
 	origin: string,
 	resolveLinkPath: ResolveLinkPathFn | undefined,
@@ -362,8 +366,16 @@ export function normalizeObsidianMetadata(
 		rawPosition?: ObsidianPosInput | null,
 	): void => {
 		if (source === 'frontmatter' && rawKey === 'position') return;
-		const key = rawKey.trim().toLowerCase();
-		if (!key || FORBIDDEN_KEYS.has(key) || FORBIDDEN_KEYS.has(rawKey)) return;
+		const trimmedKey = rawKey.trim();
+		const key = trimmedKey.toLowerCase();
+		if (
+			!key ||
+			FORBIDDEN_KEYS.has(key) ||
+			FORBIDDEN_KEYS.has(trimmedKey) ||
+			FORBIDDEN_KEYS.has(rawKey)
+		) {
+			return;
+		}
 
 		const line = sanitizeLineNumber(rawLine);
 		const propertyType = resolveUserPropertyType(key, propertyTypes);
@@ -446,29 +458,43 @@ export function normalizeObsidianMetadata(
 
 	const { propertyKeys, properties } = buildPropertiesViews(propertyOccurrences);
 
-	const aliases: string[] = [];
-	for (const occ of propertyOccurrences) {
-		if (occ.key === 'aliases' || occ.key === 'alias') {
-			for (const tv of occ.typedValues) {
-				if (tv.kind === 'text') aliases.push(tv.value);
-			}
-		}
-	}
-
+	// Note: Obsidian's native WikiLink display-value suggestions (`[[Note|Alias]]`) only inspect
+	// YAML frontmatter `aliases`. Inline `alias`/`aliases` properties are indexed read-only into
+	// `aliases` and `aliasLocations` here; copying inline aliases into frontmatter will be
+	// provided as an explicit user-invoked command rather than an automatic background mutation.
+	const aliasSet = new Set<string>();
+	const aliasLocations: NormalizedAliasLocation[] = [];
 	const tagSet = new Set<string>();
 	const tagLocations: NormalizedTagLocation[] = [];
+	const propertyLocations: NormalizedPropertyLocation[] = [];
+
 	for (let i = 0; i < propertyOccurrences.length; i++) {
 		const occ = propertyOccurrences[i]!;
+		const occOrigin =
+			occ.source === 'frontmatter'
+				? originResolver.noteOrigin
+				: originResolver.resolve(occurrencePositions[i]);
+
+		if (occ.key === 'aliases' || occ.key === 'alias') {
+			for (const tv of occ.typedValues) {
+				if (tv.kind === 'text') {
+					aliasSet.add(tv.value);
+					aliasLocations.push({
+						alias: tv.value,
+						source: occ.source,
+						origin: occOrigin,
+					});
+				}
+			}
+			continue;
+		}
+
 		if (occ.key === 'tags' || occ.key === 'tag') {
-			const occOrigin =
-				occ.source === 'frontmatter'
-					? originResolver.noteOrigin
-					: originResolver.resolve(occurrencePositions[i]);
 			for (const tv of occ.typedValues) {
 				if (tv.kind === 'text') {
 					const stripped = stripTagHash(tv.value);
 					if (stripped) {
-						tagSet.add(stripped.toLowerCase());
+						tagSet.add(stripped);
 						tagLocations.push({
 							tag: stripped,
 							source: occ.source,
@@ -477,15 +503,41 @@ export function normalizeObsidianMetadata(
 					}
 				}
 			}
+			continue;
 		}
+
+		const propKey = occ.rawKey.trim();
+		if (
+			!propKey ||
+			FORBIDDEN_KEYS.has(propKey) ||
+			FORBIDDEN_KEYS.has(occ.key) ||
+			OMITTED_PROPERTY_VIEW_KEYS.has(occ.key)
+		) {
+			continue;
+		}
+
+		const locValue: SanitizedScalar | SanitizedScalar[] = Array.isArray(occ.rawValue)
+			? [...occ.rawValue]
+			: isVacuousOccurrence(occ.rawValue)
+				? null
+				: occ.rawValue;
+		propertyLocations.push({
+			property: propKey,
+			value: locValue,
+			source: occ.source,
+			origin: occOrigin,
+		});
 	}
+
+	const aliases = Array.from(aliasSet);
+
 	for (const t of cache?.tags ?? []) {
 		const stripped = stripTagHash(t.tag);
 		if (stripped) {
-			tagSet.add(stripped.toLowerCase());
+			tagSet.add(stripped);
 			tagLocations.push({
 				tag: stripped,
-				source: 'body',
+				source: 'inline',
 				origin: originResolver.resolve(t.position),
 			});
 		}
@@ -511,7 +563,7 @@ export function normalizeObsidianMetadata(
 		...(cache?.links ?? []).map((l) =>
 			normalizeLinkItem(
 				l,
-				'body',
+				'inline',
 				tfile.path,
 				originResolver.resolve(l.position),
 				resolveLinkPath,
@@ -548,6 +600,7 @@ export function normalizeObsidianMetadata(
 			size,
 		},
 		aliases,
+		aliasLocations,
 		tags,
 		tagLocations,
 		headings,
@@ -557,6 +610,7 @@ export function normalizeObsidianMetadata(
 		propertyOccurrences,
 		propertyKeys,
 		properties,
+		propertyLocations,
 		diagnostics,
 	};
 }

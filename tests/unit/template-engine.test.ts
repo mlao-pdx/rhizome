@@ -526,6 +526,9 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 						size: 1024,
 					},
 					aliases: ['Project Alpha', 'PA'],
+					aliasLocations: [
+						{ alias: 'Project Alpha', source: 'frontmatter', origin: '[[Alpha]]' },
+					],
 					tags: ['project', 'active'],
 					tagLocations: [{ tag: 'project', source: 'frontmatter', origin: '[[Alpha]]' }],
 					headings: [{ text: 'Overview', level: 1 }],
@@ -533,6 +536,14 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 					embeds: [],
 					blocks: ['summary-block'],
 					properties: { status: 'in-progress', priority: 1 },
+					propertyLocations: [
+						{
+							property: 'status',
+							value: 'in-progress',
+							source: 'frontmatter',
+							origin: '[[Alpha]]',
+						},
+					],
 				},
 			],
 			myFirstQuery: [{ file: { basename: 'Task 1' } }, { file: { basename: 'Task 2' } }],

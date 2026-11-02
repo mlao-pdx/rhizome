@@ -26,6 +26,18 @@ function createFixtureDoc(): NormalizedDocument {
 			size: 2048,
 		},
 		aliases: ['Q4 Sprint', 'Active Roadmap'],
+		aliasLocations: [
+			{
+				alias: 'Q4 Sprint',
+				source: 'frontmatter',
+				origin: '[[Projects/Active/Sprint-12.md|Sprint-12]]',
+			},
+			{
+				alias: 'Active Roadmap',
+				source: 'frontmatter',
+				origin: '[[Projects/Active/Sprint-12.md|Sprint-12]]',
+			},
+		],
 		tags: ['project', 'work/urgent'],
 		tagLocations: [
 			{
@@ -35,7 +47,7 @@ function createFixtureDoc(): NormalizedDocument {
 			},
 			{
 				tag: 'work/urgent',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Active/Sprint-12.md#Overview|Sprint-12]]',
 			},
 		],
@@ -50,7 +62,7 @@ function createFixtureDoc(): NormalizedDocument {
 				resolvedPath: 'People/Team/Alice.md',
 				subpath: '#Bio',
 				displayText: 'Alice Lead',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Active/Sprint-12.md#Overview|Sprint-12]]',
 			},
 			{
@@ -87,6 +99,7 @@ function createFixtureDoc(): NormalizedDocument {
 		propertyOccurrences: [],
 		propertyKeys: [],
 		properties: Object.create(null) as Record<string, unknown>,
+		propertyLocations: [],
 		diagnostics: [],
 	};
 }

@@ -8,10 +8,12 @@ import {
 	hasInternalRhizomeFlag,
 	initEngineConfig,
 	INTERNAL_RHIZOME_CODES,
+	type NormalizedAliasLocation,
 	type NormalizedDocument,
 	type NormalizedFileInfo,
 	type NormalizedHeading,
 	type NormalizedLink,
+	type NormalizedPropertyLocation,
 	type NormalizedTagLocation,
 	normalizeObsidianMetadata,
 	type PreparedQuery,
@@ -62,6 +64,7 @@ export type VaultQueryCallback = (result: VaultQueryResult) => void | Promise<vo
 export interface VaultQueryMatch {
 	readonly file: NormalizedFileInfo;
 	readonly aliases: string[];
+	readonly aliasLocations: NormalizedAliasLocation[];
 	readonly tags: string[];
 	readonly tagLocations: NormalizedTagLocation[];
 	readonly headings: NormalizedHeading[];
@@ -69,6 +72,7 @@ export interface VaultQueryMatch {
 	readonly embeds: NormalizedLink[];
 	readonly blocks: string[];
 	readonly properties: Record<string, unknown>;
+	readonly propertyLocations: NormalizedPropertyLocation[];
 }
 
 /**
@@ -85,6 +89,7 @@ export function toVaultQueryMatch(doc: NormalizedDocument): VaultQueryMatch {
 	return {
 		file: doc.file,
 		aliases: doc.aliases,
+		aliasLocations: doc.aliasLocations,
 		tags: doc.tags,
 		tagLocations: doc.tagLocations,
 		headings: doc.headings,
@@ -92,6 +97,7 @@ export function toVaultQueryMatch(doc: NormalizedDocument): VaultQueryMatch {
 		embeds: doc.embeds,
 		blocks: doc.blocks,
 		properties: doc.properties,
+		propertyLocations: doc.propertyLocations,
 	};
 }
 

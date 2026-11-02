@@ -176,13 +176,26 @@ export interface NormalizedLink {
 	resolvedPath: string | null; // Vault path via resolveLinkPath(), or null if unresolved
 	subpath: string; // "#Heading" or "^block", or ""
 	displayText: string;
-	source: 'body' | 'frontmatter' | 'embed';
+	source: 'frontmatter' | 'inline' | 'embed';
 	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
 }
 
 export interface NormalizedTagLocation {
 	tag: string; // Authored-case tag with leading '#' stripped
-	source: 'frontmatter' | 'inline' | 'body';
+	source: 'frontmatter' | 'inline';
+	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
+}
+
+export interface NormalizedAliasLocation {
+	alias: string; // Authored-case alias string
+	source: 'frontmatter' | 'inline';
+	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
+}
+
+export interface NormalizedPropertyLocation {
+	property: string; // Trimmed authored-case property key
+	value: SanitizedScalar | SanitizedScalar[]; // Sanitized per-occurrence value (vacuous scalar -> null)
+	source: 'frontmatter' | 'inline';
 	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
 }
 
@@ -190,16 +203,18 @@ export interface NormalizedDocument {
 	/** Fingerprint of the `ResolvedEngineConfig` (`timeZone` + `propertyTypes`) used to normalize this document */
 	normalizationFingerprint: string;
 	file: NormalizedFileInfo;
-	aliases: string[];
-	tags: string[]; // Lowercased, '#'-stripped, deduplicated, sorted set of tags across all occurrences
-	tagLocations: NormalizedTagLocation[]; // Full occurrence stream preserving authored casing, duplicates, and order (frontmatter -> inline -> body)
+	aliases: string[]; // Authored-case, deduplicated aliases in first-seen order across all occurrences
+	aliasLocations: NormalizedAliasLocation[]; // Full occurrence stream preserving authored casing, duplicates, and order (frontmatter -> inline)
+	tags: string[]; // Authored-case, '#'-stripped, deduplicated, sorted set of tags across all occurrences
+	tagLocations: NormalizedTagLocation[]; // Full occurrence stream preserving authored casing, duplicates, and order (frontmatter -> inline)
 	headings: NormalizedHeading[];
-	links: NormalizedLink[]; // Outgoing links (frontmatterLinks + body links, excluding embeds)
+	links: NormalizedLink[]; // Outgoing links (frontmatterLinks + inline links, excluding embeds)
 	embeds: NormalizedLink[]; // Outgoing embeds
 	blocks: string[]; // Authored-case block IDs with any leading '^' stripped
 	propertyOccurrences: PropertyOccurrence[]; // Cache-level occurrence stream
-	propertyKeys: string[]; // Exact first-seen order of normalized property keys
-	properties: Record<string, unknown>; // Null-prototype O(1) lookup map with per-key local occurrence order
+	propertyKeys: string[]; // Exact first-seen order of trimmed authored property keys
+	properties: Record<string, unknown>; // Null-prototype O(1) lookup map with authored keys and Collision Resolution Rule
+	propertyLocations: NormalizedPropertyLocation[]; // Full occurrence stream of non-omitted properties with origin
 	diagnostics: DocumentDiagnostic[]; // Non-fatal document property diagnostics
 }
 

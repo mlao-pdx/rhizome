@@ -191,6 +191,16 @@ class XxHash64Accumulator {
 		this.updateNumber(file.size);
 
 		this.updateStringArray(match.aliases);
+
+		const aliasLocs = match.aliasLocations;
+		this.updateTag(0x22, aliasLocs.length);
+		for (let i = 0; i < aliasLocs.length; i++) {
+			const loc = aliasLocs[i]!;
+			this.updateString(loc.alias);
+			this.updateString(loc.source);
+			this.updateString(loc.origin);
+		}
+
 		this.updateStringArray(match.tags);
 
 		const tagLocs = match.tagLocations;
@@ -246,6 +256,16 @@ class XxHash64Accumulator {
 
 		this.updateStringArray(match.blocks);
 		this.updateValue(match.properties);
+
+		const propLocs = match.propertyLocations;
+		this.updateTag(0x27, propLocs.length);
+		for (let i = 0; i < propLocs.length; i++) {
+			const loc = propLocs[i]!;
+			this.updateString(loc.property);
+			this.updateValue(loc.value);
+			this.updateString(loc.source);
+			this.updateString(loc.origin);
+		}
 	}
 
 	digest(): Digest64 {

@@ -242,7 +242,7 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		expect(result['activeProjects']?.[0]?.tagLocations).toEqual([
 			{
 				tag: 'project',
-				source: 'body',
+				source: 'inline',
 				origin: '[[notes/alpha.md|alpha]]',
 			},
 		]);

@@ -251,7 +251,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					inlineProps,
 				);
 
-				// 1. propertyKeys equals deduplicated sequence of non-omitted occ.key in exact first-appearance order
+				// 1. propertyKeys equals deduplicated sequence of non-omitted occ.rawKey.trim() in exact first-appearance order
 				const omittedKeys = new Set([
 					'tag',
 					'tags',
@@ -261,38 +261,68 @@ describe('search metadata normalizer & property coercion invariants', () => {
 				]);
 				const expectedKeys: string[] = [];
 				const occsByKey = new Map<string, typeof doc.propertyOccurrences>();
+				let nonOmittedOccCount = 0;
 				for (const occ of doc.propertyOccurrences) {
+					const propKey = occ.rawKey.trim();
 					if (omittedKeys.has(occ.key)) {
+						expect(doc.properties[propKey]).toBeUndefined();
 						expect(doc.properties[occ.key]).toBeUndefined();
 						continue;
 					}
-					if (!occsByKey.has(occ.key)) {
-						expectedKeys.push(occ.key);
-						occsByKey.set(occ.key, []);
+					nonOmittedOccCount++;
+					if (!occsByKey.has(propKey)) {
+						expectedKeys.push(propKey);
+						occsByKey.set(propKey, []);
 					}
-					occsByKey.get(occ.key)!.push(occ);
+					occsByKey.get(propKey)!.push(occ);
 				}
 				expect(doc.propertyKeys).toEqual(expectedKeys);
+				expect(doc.propertyLocations.length).toBe(nonOmittedOccCount);
 
-				// 2. Single-occurrence vs multi-occurrence aggregation & defensive copying
+				// 2. Vacuous-aware Collision Resolution Rule & defensive copying
 				for (const k of doc.propertyKeys) {
 					const occs = occsByKey.get(k)!;
-					if (occs.length === 1) {
-						const singleOcc = occs[0]!;
-						expect(doc.properties[k]).toEqual(singleOcc.rawValue);
-						if (Array.isArray(singleOcc.rawValue)) {
-							expect(doc.properties[k]).not.toBe(singleOcc.rawValue);
-						}
-					} else {
-						const expectedConcat: unknown[] = [];
-						for (const occ of occs) {
-							if (Array.isArray(occ.rawValue)) {
-								expectedConcat.push(...occ.rawValue);
+					let expectedVal: unknown = undefined;
+					let promoted = false;
+					for (const occ of occs) {
+						const rhs =
+							occ.rawValue === null ||
+							occ.rawValue === undefined ||
+							occ.rawValue === ''
+								? null
+								: occ.rawValue;
+						if (expectedVal === undefined) {
+							if (Array.isArray(rhs)) {
+								expectedVal = [...rhs];
+								promoted = true;
 							} else {
-								expectedConcat.push(occ.rawValue);
+								expectedVal = rhs;
+							}
+						} else if (rhs === null) {
+							// vacuous incoming is a no-op
+						} else if (!promoted && expectedVal === null) {
+							if (Array.isArray(rhs)) {
+								expectedVal = [...rhs];
+								promoted = true;
+							} else {
+								expectedVal = rhs;
+							}
+						} else {
+							if (!promoted) {
+								expectedVal = [expectedVal];
+								promoted = true;
+							}
+							const arr = expectedVal as unknown[];
+							if (Array.isArray(rhs)) {
+								arr.push(...rhs);
+							} else {
+								arr.push(rhs);
 							}
 						}
-						expect(doc.properties[k]).toEqual(expectedConcat);
+					}
+					expect(doc.properties[k]).toEqual(expectedVal);
+					if (occs.length === 1 && Array.isArray(occs[0]!.rawValue)) {
+						expect(doc.properties[k]).not.toBe(occs[0]!.rawValue);
 					}
 				}
 
@@ -524,7 +554,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					]);
 					expect('stat' in doc.file).toBe(false);
 
-					// 1. tags: non-empty, no leading '#', lowercased, deduplicated, sorted set
+					// 1. tags: non-empty, no leading '#', authored-case, deduplicated, sorted set
 					const expectedFmTags = fmTags
 						.map((t) => stripTagHash(t))
 						.filter((t) => t.length > 0);
@@ -532,16 +562,13 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						.map((t) => stripTagHash(t.tag))
 						.filter((t) => t.length > 0);
 					const expectedTagSet = Array.from(
-						new Set(
-							[...expectedFmTags, ...expectedCacheTags].map((t) => t.toLowerCase()),
-						),
+						new Set([...expectedFmTags, ...expectedCacheTags]),
 					).sort();
 					expect(doc.tags).toEqual(expectedTagSet);
 					for (let i = 0; i < doc.tags.length; i++) {
 						const t = doc.tags[i]!;
 						expect(t.length).toBeGreaterThan(0);
 						expect(t.startsWith('#')).toBe(false);
-						expect(t).toBe(t.toLowerCase());
 						if (i > 0) {
 							expect(doc.tags[i - 1]! < t).toBe(true);
 						}
@@ -787,42 +814,56 @@ describe('search metadata normalizer & property coercion invariants', () => {
 
 					const noteOrigin = `[[${doc.file.path}|${doc.file.basename}]]`;
 
-					// Invariant 1: doc.links orders frontmatterLinks before body links,
+					// Invariant 1: doc.links orders frontmatterLinks before inline links,
 					// and every frontmatter link has origin === noteOrigin
 					expect(doc.links.length).toBe(fmLinks.length + bodyLinks.length);
-					let seenBodyLink = false;
+					let seenInlineLink = false;
 					for (const l of doc.links) {
 						if (l.source === 'frontmatter') {
-							expect(seenBodyLink).toBe(false);
+							expect(seenInlineLink).toBe(false);
 							expect(l.origin).toBe(noteOrigin);
 						} else {
-							expect(l.source).toBe('body');
-							seenBodyLink = true;
+							expect(l.source).toBe('inline');
+							seenInlineLink = true;
 						}
 					}
 
-					// Invariant 2: doc.tags is the lowercased sorted set projection of doc.tagLocations, which maintains monotonic source order
+					// Invariant 2: doc.tags is the authored-case sorted set projection of doc.tagLocations,
+					// and doc.aliases is the authored-case deduplicated projection of doc.aliasLocations
 					expect(doc.tags).toEqual(
-						Array.from(
-							new Set(doc.tagLocations.map((tl) => tl.tag.toLowerCase())),
-						).sort(),
+						Array.from(new Set(doc.tagLocations.map((tl) => tl.tag))).sort(),
+					);
+					expect(doc.aliases).toEqual(
+						Array.from(new Set(doc.aliasLocations.map((al) => al.alias))),
 					);
 
-					const sourceOrder = { frontmatter: 0, inline: 1, body: 2 } as const;
-					let maxSourceRank = 0;
-					for (const tl of doc.tagLocations) {
-						const rank = sourceOrder[tl.source];
-						expect(rank).toBeGreaterThanOrEqual(maxSourceRank);
-						maxSourceRank = rank;
-						if (tl.source === 'frontmatter') {
-							expect(tl.origin).toBe(noteOrigin);
+					const sourceOrder = { frontmatter: 0, inline: 1 } as const;
+					for (const stream of [
+						doc.tagLocations,
+						doc.aliasLocations,
+						doc.propertyLocations,
+					]) {
+						let maxSourceRank = 0;
+						for (const item of stream) {
+							const rank = sourceOrder[item.source];
+							expect(rank).toBeGreaterThanOrEqual(maxSourceRank);
+							maxSourceRank = rank;
+							if (item.source === 'frontmatter') {
+								expect(item.origin).toBe(noteOrigin);
+							}
 						}
 					}
 
-					// Every origin on links, embeds, and tagLocations is a valid wikilink without unsafe subpath characters
+					// Every origin on links, embeds, tagLocations, aliasLocations, and propertyLocations is a valid wikilink without unsafe subpath characters
 					const prefix = `[[${doc.file.path}`;
 					const suffix = `|${doc.file.basename}]]`;
-					const allItems = [...doc.links, ...doc.embeds, ...doc.tagLocations];
+					const allItems = [
+						...doc.links,
+						...doc.embeds,
+						...doc.tagLocations,
+						...doc.aliasLocations,
+						...doc.propertyLocations,
+					];
 					for (const item of allItems) {
 						expect(item.origin.startsWith(prefix)).toBe(true);
 						expect(item.origin.endsWith(suffix)).toBe(true);
@@ -840,7 +881,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						}
 					}
 
-					// Invariant 3: Tight Deduplicated Valid Origin Pool Closure & Full Item Coverage (links, embeds, inline/body tagLocations)
+					// Invariant 3: Tight Deduplicated Valid Origin Pool Closure & Full Item Coverage
 					const standaloneResolver = createOriginWikiLinkResolver(
 						doc.file.path,
 						doc.file.basename,
@@ -892,7 +933,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						expect(doc.embeds[i]!.origin).toBe(expected);
 					}
 
-					// Verify inline and body tagLocations origins match their source positions
+					// Verify inline tagLocations origins match their source positions (inline tag/tags properties followed by cache.tags)
 					const expectedInlineTagOrigins: string[] = [];
 					for (const inline of inlineProps) {
 						const key = inline.key.trim().toLowerCase();
@@ -911,10 +952,9 @@ describe('search metadata normalizer & property coercion invariants', () => {
 							}
 						}
 					}
-					const expectedBodyTagOrigins: string[] = [];
 					for (const bt of bodyTags) {
 						if (stripTagHash(bt.tag)) {
-							expectedBodyTagOrigins.push(standaloneResolver.resolve(bt.position));
+							expectedInlineTagOrigins.push(standaloneResolver.resolve(bt.position));
 						}
 					}
 					expect(
@@ -922,11 +962,6 @@ describe('search metadata normalizer & property coercion invariants', () => {
 							.filter((tl) => tl.source === 'inline')
 							.map((tl) => tl.origin),
 					).toEqual(expectedInlineTagOrigins);
-					expect(
-						doc.tagLocations
-							.filter((tl) => tl.source === 'body')
-							.map((tl) => tl.origin),
-					).toEqual(expectedBodyTagOrigins);
 
 					for (const item of allItems) {
 						expect(allowedOriginPool.has(item.origin)).toBe(true);

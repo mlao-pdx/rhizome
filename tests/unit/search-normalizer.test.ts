@@ -229,7 +229,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				resolvedPath: 'Notes/A.md',
 				subpath: '#Overview',
 				displayText: '#Overview',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Notes/A.md|A]]',
 			},
 			{
@@ -238,7 +238,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				resolvedPath: 'Notes/A.md',
 				subpath: '^summary-block',
 				displayText: 'Summary',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Notes/A.md|A]]',
 			},
 			{
@@ -247,7 +247,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				resolvedPath: 'People/Team/Alice.md',
 				subpath: '#Bio',
 				displayText: 'Alice',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Notes/A.md|A]]',
 			},
 			{
@@ -256,7 +256,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				resolvedPath: null,
 				subpath: '',
 				displayText: 'MissingNote',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Notes/A.md|A]]',
 			},
 		]);
@@ -418,20 +418,21 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		);
 
 		expect(doc.file.parent).toBe('');
-		expect(doc.tags).toEqual(['extra-tag', 'inline-tag', 'project', 'work/urgent']);
+		expect(doc.tags).toEqual(['Project', 'extra-tag', 'inline-tag', 'work/urgent']);
 		expect(doc.tagLocations).toEqual([
 			{ tag: 'Project', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
 			{ tag: 'work/urgent', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
 			{ tag: 'work/urgent', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
 			{ tag: 'extra-tag', source: 'inline', origin: '[[RootNote.md|RootNote]]' },
-			{ tag: 'work/urgent', source: 'body', origin: '[[RootNote.md|RootNote]]' },
-			{ tag: 'inline-tag', source: 'body', origin: '[[RootNote.md|RootNote]]' },
+			{ tag: 'work/urgent', source: 'inline', origin: '[[RootNote.md|RootNote]]' },
+			{ tag: 'inline-tag', source: 'inline', origin: '[[RootNote.md|RootNote]]' },
 		]);
 		expect(doc.properties['tags']).toBeUndefined();
 		expect(doc.properties['tag']).toBeUndefined();
 		expect(doc.properties['aliases']).toBeUndefined();
 		expect(doc.properties['alias']).toBeUndefined();
 		expect(doc.propertyKeys).toEqual([]);
+		expect(doc.propertyLocations).toEqual([]);
 		expect(doc.propertyOccurrences.find((o) => o.key === 'tags')?.rawValue).toEqual([
 			'Project',
 			'work/urgent',
@@ -439,6 +440,11 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		]);
 		expect(doc.propertyOccurrences.find((o) => o.key === 'tag')?.rawValue).toBe('extra-tag');
 		expect(doc.aliases).toEqual(['First Alias', '42', 'Second Alias']);
+		expect(doc.aliasLocations).toEqual([
+			{ alias: 'First Alias', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
+			{ alias: '42', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
+			{ alias: 'Second Alias', source: 'inline', origin: '[[RootNote.md|RootNote]]' },
+		]);
 		expect(doc.headings).toEqual([
 			{ text: 'H1', level: 1 },
 			{ text: 'H6', level: 6 },
@@ -590,6 +596,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 
 		for (const field of [
 			'aliases',
+			'aliasLocations',
 			'tags',
 			'tagLocations',
 			'headings',
@@ -598,6 +605,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			'blocks',
 			'propertyKeys',
 			'properties',
+			'propertyLocations',
 		] as const) {
 			const desc = Object.getOwnPropertyDescriptor(doc, field);
 			expect(desc).toBeDefined();
@@ -632,6 +640,9 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		expect(doc.propertyOccurrences[0]?.rawValue).not.toBe(fmList);
 		expect(doc.properties['categories']).not.toBe(fmList);
 		expect(doc.properties['categories']).not.toBe(doc.propertyOccurrences[0]?.rawValue);
+		expect(doc.propertyLocations[0]?.value).not.toBe(fmList);
+		expect(doc.propertyLocations[0]?.value).not.toBe(doc.propertyOccurrences[0]?.rawValue);
+		expect(doc.propertyLocations[0]?.value).not.toBe(doc.properties['categories']);
 
 		// Mutating caller inputs must not affect the normalized document
 		inputStat.size = 999999;
@@ -639,13 +650,15 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		expect(doc.file.size).toBe(512);
 		expect(doc.propertyOccurrences[0]?.rawValue).toEqual(['alpha', 'beta']);
 		expect(doc.properties['categories']).toEqual(['alpha', 'beta']);
+		expect(doc.propertyLocations[0]?.value).toEqual(['alpha', 'beta']);
 
 		// Mutating doc.properties[key] array must not corrupt doc.propertyOccurrences[0].rawValue
 		(doc.properties['categories'] as unknown[]).push('mutated-view');
 		expect(doc.propertyOccurrences[0]?.rawValue).toEqual(['alpha', 'beta']);
+		expect(doc.propertyLocations[0]?.value).toEqual(['alpha', 'beta']);
 	});
 
-	it('orders frontmatterLinks before body links and resolves 3-tier origin wikilinks across links, embeds, and tagLocations', () => {
+	it('orders frontmatterLinks before inline links and resolves 3-tier origin wikilinks across links, embeds, tagLocations, aliasLocations, and propertyLocations', () => {
 		const config = getStandardConfig();
 		const pos = (startOffset: number, endOffset: number) => ({
 			start: { line: 1, col: 0, offset: startOffset },
@@ -657,6 +670,8 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			{
 				frontmatter: {
 					tags: ['#fm-tag'],
+					aliases: ['FM Alias', 'Shared Alias'],
+					Owner: 'Alice',
 				},
 				frontmatterLinks: [
 					{ link: 'FmTarget1', displayText: 'FM 1', position: pos(120, 130) },
@@ -704,10 +719,22 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 					line: 20,
 					position: pos(115, 125),
 				},
+				{
+					key: 'alias',
+					value: ['Shared Alias', 'White Wizard'],
+					line: 22,
+					position: pos(118, 128),
+				},
+				{
+					key: 'Owner',
+					value: 'Bob',
+					line: 24,
+					position: pos(72, 82),
+				},
 			],
 		);
 
-		// 1. Links order: frontmatterLinks first, then body links
+		// 1. Links order: frontmatterLinks first, then inline links
 		expect(
 			doc.links.map((l) => ({ link: l.link, source: l.source, origin: l.origin })),
 		).toEqual([
@@ -723,42 +750,42 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			},
 			{
 				link: 'BeforeHeading',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Plan.md|Plan]]',
 			},
 			{
 				link: 'InHeading',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
 			},
 			{
 				link: 'InNestedBlock',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
 			},
 			{
 				link: 'SpanningOutOfBlock',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
 			},
 			{
 				link: 'StartingBeforeBlock',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
 			},
 			{
 				link: 'UnderUnsafeHeading',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Plan.md|Plan]]',
 			},
 			{
 				link: 'UnderPipeHeading',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Plan.md|Plan]]',
 			},
 			{
 				link: 'InUnsafeBlockUnderCleanHeading',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Plan.md#Final Section|Plan]]',
 			},
 		]);
@@ -776,7 +803,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			},
 		]);
 
-		// 3. Tags (lowercased sorted set) & tagLocations (authored casing and appearance order: frontmatter -> inline -> body)
+		// 3. Tags (authored-case sorted set) & tagLocations (authored casing and appearance order: frontmatter -> inline)
 		expect(doc.tags).toEqual([
 			'body-block',
 			'body-fallback',
@@ -809,24 +836,72 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			},
 			{
 				tag: 'body-block',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
 			},
 			{
 				tag: 'body-heading',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
 			},
 			{
 				tag: 'body-fallback',
-				source: 'body',
+				source: 'inline',
 				origin: '[[Projects/Plan.md|Plan]]',
 			},
 		]);
 
-		// 4. Bounded unique origin pool across the entire document
+		// 4. Aliases (deduplicated first-seen order) & aliasLocations (full occurrence stream)
+		expect(doc.aliases).toEqual(['FM Alias', 'Shared Alias', 'White Wizard']);
+		expect(doc.aliasLocations).toEqual([
+			{
+				alias: 'FM Alias',
+				source: 'frontmatter',
+				origin: '[[Projects/Plan.md|Plan]]',
+			},
+			{
+				alias: 'Shared Alias',
+				source: 'frontmatter',
+				origin: '[[Projects/Plan.md|Plan]]',
+			},
+			{
+				alias: 'Shared Alias',
+				source: 'inline',
+				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
+			},
+			{
+				alias: 'White Wizard',
+				source: 'inline',
+				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
+			},
+		]);
+
+		// 5. Properties & propertyLocations (authored key casing + collision resolution)
+		expect(doc.properties['Owner']).toEqual(['Alice', 'Bob']);
+		expect(doc.propertyLocations).toEqual([
+			{
+				property: 'Owner',
+				value: 'Alice',
+				source: 'frontmatter',
+				origin: '[[Projects/Plan.md|Plan]]',
+			},
+			{
+				property: 'Owner',
+				value: 'Bob',
+				source: 'inline',
+				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
+			},
+		]);
+
+		// 6. Bounded unique origin pool across the entire document
 		const distinctOrigins = new Set(
-			[...doc.links, ...doc.embeds, ...doc.tagLocations].map((item) => item.origin),
+			[
+				...doc.links,
+				...doc.embeds,
+				...doc.tagLocations,
+				...doc.aliasLocations,
+				...doc.propertyLocations,
+			].map((item) => item.origin),
 		);
 		expect(distinctOrigins).toEqual(
 			new Set([
@@ -837,6 +912,58 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				'[[Projects/Plan.md#^outer-block|Plan]]',
 			]),
 		);
+	});
+
+	it('resolves vacuous property collisions (null, empty string, undefined) without wrapping null into lists while preserving array-internal nulls', () => {
+		const config = getStandardConfig();
+		const doc = normalizeObsidianMetadata(
+			makeFile(),
+			{
+				frontmatter: {
+					onlyEmptyString: '',
+					emptyThenNull: '',
+					nullThenEmpty: null,
+					nullThenScalar: null,
+					scalarThenEmpty: 'kept',
+					nullThenTwoScalars: null,
+					nullThenArrayThenScalar: '',
+					arrayWithNull: [null, 'a', ''],
+				},
+			},
+			config,
+			[
+				{ key: 'emptyThenNull', value: null, line: 1 },
+				{ key: 'nullThenEmpty', value: '', line: 2 },
+				{ key: 'nullThenScalar', value: 'resolved', line: 3 },
+				{ key: 'scalarThenEmpty', value: '', line: 4 },
+				{ key: 'nullThenTwoScalars', value: 'first', line: 5 },
+				{ key: 'nullThenTwoScalars', value: 'second', line: 6 },
+				{ key: 'nullThenArrayThenScalar', value: ['x'], line: 7 },
+				{ key: 'nullThenArrayThenScalar', value: 'y', line: 8 },
+				{ key: 'arrayWithNull', value: 'b', line: 9 },
+			],
+		);
+
+		expect(doc.properties['onlyEmptyString']).toBeNull();
+		expect(doc.properties['emptyThenNull']).toBeNull();
+		expect(doc.properties['nullThenEmpty']).toBeNull();
+		expect(doc.properties['nullThenScalar']).toBe('resolved');
+		expect(doc.properties['scalarThenEmpty']).toBe('kept');
+		expect(doc.properties['nullThenTwoScalars']).toEqual(['first', 'second']);
+		expect(doc.properties['nullThenArrayThenScalar']).toEqual(['x', 'y']);
+		expect(doc.properties['arrayWithNull']).toEqual([null, 'a', '', 'b']);
+
+		// In propertyLocations, top-level vacuous scalars normalize to null while arrays preserve internal elements
+		expect(
+			doc.propertyLocations
+				.filter((pl) => pl.property === 'nullThenScalar')
+				.map((pl) => pl.value),
+		).toEqual([null, 'resolved']);
+		expect(
+			doc.propertyLocations
+				.filter((pl) => pl.property === 'arrayWithNull')
+				.map((pl) => pl.value),
+		).toEqual([[null, 'a', ''], 'b']);
 	});
 
 	it('precomputes per-note origin lookup table with createOriginWikiLinkResolver and handles partial Pos mocks and tie-breakers', () => {

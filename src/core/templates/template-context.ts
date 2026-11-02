@@ -111,8 +111,9 @@ export function extractUserQueryMap(
 
 /**
  * Constructs the root LiquidJS scope object for Pass 2 rendering:
- * - Spreads the hosting note's 9 normalized fields (`file`, `aliases`, `tags`, `tagLocations`,
- *   `headings`, `links`, `embeds`, `blocks`, `properties`) from `rawPayload['◊host'][0]` onto the root.
+ * - Spreads the hosting note's 11 normalized fields (`file`, `aliases`, `aliasLocations`, `tags`,
+ *   `tagLocations`, `headings`, `links`, `embeds`, `blocks`, `properties`, `propertyLocations`)
+ *   from `rawPayload['◊host'][0]` onto the root.
  * - Exposes user query results under `query.<name>` (excluding `'◊'`-prefixed internal keys).
  * - Exposes `vault`, `tz`, `language`, and `platform.*` at the root.
  * - Exposes all built-in relative temporal literals (`now`, `today`, `today-7d`, `yesterday+3d`,
@@ -144,6 +145,10 @@ export function buildRhizomeTemplateContext(
 		file: hostMatch && 'file' in hostMatch ? hostMatch.file : null,
 		aliases:
 			hostMatch && Array.isArray(hostMatch.aliases) ? hostMatch.aliases : EMPTY_FROZEN_ARRAY,
+		aliasLocations:
+			hostMatch && Array.isArray(hostMatch.aliasLocations)
+				? hostMatch.aliasLocations
+				: EMPTY_FROZEN_ARRAY,
 		tags: hostMatch && Array.isArray(hostMatch.tags) ? hostMatch.tags : EMPTY_FROZEN_ARRAY,
 		tagLocations:
 			hostMatch && Array.isArray(hostMatch.tagLocations)
@@ -162,6 +167,10 @@ export function buildRhizomeTemplateContext(
 			hostMatch && hostMatch.properties && typeof hostMatch.properties === 'object'
 				? hostMatch.properties
 				: EMPTY_FROZEN_PROPERTIES,
+		propertyLocations:
+			hostMatch && Array.isArray(hostMatch.propertyLocations)
+				? hostMatch.propertyLocations
+				: EMPTY_FROZEN_ARRAY,
 		query: extractUserQueryMap(rawPayload),
 		vault,
 		tz: timeZone,
