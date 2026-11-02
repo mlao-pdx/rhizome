@@ -50,8 +50,13 @@ export interface AggregateTotalMetrics {
 	total_interval: [number, number] | TemporalDrop | null;
 }
 
+interface GroupedAttributeSelector {
+	readonly outputKey: string;
+	readonly segmentPaths: (readonly string[])[];
+}
+
 interface AttributeAccumulator {
-	readonly selector: ParsedPathSelector;
+	readonly group: GroupedAttributeSelector;
 	domain: AttributeDomain;
 	valueCount: number;
 	numSum: number;
@@ -60,11 +65,36 @@ interface AttributeAccumulator {
 	tempMin: TemporalDrop | null;
 	tempMax: TemporalDrop | null;
 	tempFinestGrain: DisplayGrain | null;
+	cachedNumInterval: [number, number] | null;
+	cachedTempInterval: TemporalDrop | null;
 }
 
-function createAttributeAccumulator(selector: ParsedPathSelector): AttributeAccumulator {
+function groupSelectorsByOutputKey(
+	selectors: readonly ParsedPathSelector[],
+): GroupedAttributeSelector[] {
+	const groups: GroupedAttributeSelector[] = [];
+	const byKey = new Map<string, GroupedAttributeSelector>();
+
+	for (const sel of selectors) {
+		const existing = byKey.get(sel.outputKey);
+		if (existing) {
+			existing.segmentPaths.push(sel.segments);
+		} else {
+			const group: GroupedAttributeSelector = {
+				outputKey: sel.outputKey,
+				segmentPaths: [sel.segments],
+			};
+			byKey.set(sel.outputKey, group);
+			groups.push(group);
+		}
+	}
+
+	return groups;
+}
+
+function createAttributeAccumulator(group: GroupedAttributeSelector): AttributeAccumulator {
 	return {
-		selector,
+		group,
 		domain: 'unknown',
 		valueCount: 0,
 		numSum: 0,
@@ -73,6 +103,8 @@ function createAttributeAccumulator(selector: ParsedPathSelector): AttributeAccu
 		tempMin: null,
 		tempMax: null,
 		tempFinestGrain: null,
+		cachedNumInterval: null,
+		cachedTempInterval: null,
 	};
 }
 
@@ -174,18 +206,30 @@ function foldNumberIntoAccumulator(acc: AttributeAccumulator, val: number): void
 	acc.valueCount += 1;
 	const nextSum = acc.numSum + val;
 	acc.numSum = nextSum === 0 ? 0 : nextSum;
-	if (val < acc.numMin) acc.numMin = val;
-	if (val > acc.numMax) acc.numMax = val;
+	let boundsChanged = false;
+	if (val < acc.numMin) {
+		acc.numMin = val;
+		boundsChanged = true;
+	}
+	if (val > acc.numMax) {
+		acc.numMax = val;
+		boundsChanged = true;
+	}
+	if (boundsChanged) {
+		acc.cachedNumInterval = null;
+	}
 }
 
 function foldTemporalIntoAccumulator(acc: AttributeAccumulator, drop: TemporalDrop): void {
 	acc.valueCount += 1;
+	let boundsChanged = false;
 	if (
 		acc.tempMin === null ||
 		drop.start < acc.tempMin.start ||
 		(drop.start === acc.tempMin.start && drop.end < acc.tempMin.end)
 	) {
 		acc.tempMin = drop;
+		boundsChanged = true;
 	}
 	if (
 		acc.tempMax === null ||
@@ -193,35 +237,44 @@ function foldTemporalIntoAccumulator(acc: AttributeAccumulator, drop: TemporalDr
 		(drop.end === acc.tempMax.end && drop.start > acc.tempMax.start)
 	) {
 		acc.tempMax = drop;
+		boundsChanged = true;
 	}
-	acc.tempFinestGrain =
+	const nextGrain =
 		acc.tempFinestGrain === null
 			? drop.grain
 			: finestDisplayGrain(acc.tempFinestGrain, drop.grain);
+	if (nextGrain !== acc.tempFinestGrain) {
+		acc.tempFinestGrain = nextGrain;
+		boundsChanged = true;
+	}
+	if (boundsChanged) {
+		acc.cachedTempInterval = null;
+	}
 }
 
-interface SnapshotMetrics {
-	readonly value_count: number;
-	readonly sum: number | null;
-	readonly average: number | null;
-	readonly min: number | TemporalDrop | null;
-	readonly max: number | TemporalDrop | null;
-	readonly interval: [number, number] | TemporalDrop | null;
-}
-
-function snapshotAccumulator(
+function buildStepMetricsFromAccumulator(
 	acc: AttributeAccumulator,
+	indexCount: number,
+	totalIndexCount: number,
 	timeZone: string,
 	referenceTimeMs: number,
-): SnapshotMetrics {
+): AggregateStepMetrics {
 	if (acc.valueCount === 0 || acc.domain === 'unknown') {
 		return {
+			index_count: indexCount,
 			value_count: 0,
 			sum: null,
 			average: null,
 			min: null,
 			max: null,
 			interval: null,
+			total_index_count: totalIndexCount,
+			total_value_count: 0,
+			total_sum: null,
+			total_average: null,
+			total_min: null,
+			total_max: null,
+			total_interval: null,
 		};
 	}
 
@@ -231,33 +284,54 @@ function snapshotAccumulator(
 		const average = rawAvg === 0 ? 0 : rawAvg;
 		const min = acc.numMin === 0 ? 0 : acc.numMin;
 		const max = acc.numMax === 0 ? 0 : acc.numMax;
+		if (acc.cachedNumInterval === null) {
+			acc.cachedNumInterval = [min, max];
+		}
 		return {
+			index_count: indexCount,
 			value_count: acc.valueCount,
 			sum,
 			average,
 			min,
 			max,
-			interval: [min, max],
+			interval: acc.cachedNumInterval,
+			total_index_count: totalIndexCount,
+			total_value_count: 0,
+			total_sum: null,
+			total_average: null,
+			total_min: null,
+			total_max: null,
+			total_interval: null,
 		};
 	}
 
 	const minDrop = acc.tempMin!;
 	const maxDrop = acc.tempMax!;
 	const grain = acc.tempFinestGrain ?? minDrop.grain;
-	const interval = buildCoveringTemporalInterval(
-		minDrop,
-		maxDrop,
-		grain,
-		timeZone,
-		referenceTimeMs,
-	);
+	if (acc.cachedTempInterval === null) {
+		acc.cachedTempInterval = buildCoveringTemporalInterval(
+			minDrop,
+			maxDrop,
+			grain,
+			timeZone,
+			referenceTimeMs,
+		);
+	}
 	return {
+		index_count: indexCount,
 		value_count: acc.valueCount,
 		sum: null,
 		average: null,
 		min: minDrop,
 		max: maxDrop,
-		interval,
+		interval: acc.cachedTempInterval,
+		total_index_count: totalIndexCount,
+		total_value_count: 0,
+		total_sum: null,
+		total_average: null,
+		total_min: null,
+		total_max: null,
+		total_interval: null,
 	};
 }
 
@@ -277,75 +351,85 @@ export function aggregateFilter(
 	const unwrappedInput = unwrapLiquidValue(input);
 	const rows: readonly unknown[] = Array.isArray(unwrappedInput) ? unwrappedInput : [];
 	const selectors = parsePickOrAggSelectors(args);
+	const groupedSelectors = groupSelectorsByOutputKey(selectors);
 	const totalIndexCount = rows.length;
 
-	const accumulators = selectors.map((sel) => createAttributeAccumulator(sel));
-	const stepSnapshotsPerRow: SnapshotMetrics[][] = [];
+	const accumulators = groupedSelectors.map((group) => createAttributeAccumulator(group));
+	const stepsByRow: AggregateStepMetrics[][] = [];
 
-	// Pass 1: Single scan across all rows, unrolling array values per attribute
+	// Pass 1: Single scan across all rows, folding all segmentPaths per grouped outputKey
 	for (let i = 0; i < totalIndexCount; i++) {
 		const row = rows[i];
-		const rowSnaps: SnapshotMetrics[] = [];
+		const indexCount = i + 1;
+		const rowSteps: AggregateStepMetrics[] = [];
 		for (let s = 0; s < accumulators.length; s++) {
 			const acc = accumulators[s]!;
-			const rawVal = readDeepPath(row, acc.selector.segments);
-			const candidates = Array.isArray(rawVal) ? rawVal : [rawVal];
-			for (const candidate of candidates) {
-				feedCandidateIntoAccumulator(acc, candidate, timeZone, referenceTimeMs);
+			for (const segments of acc.group.segmentPaths) {
+				const rawVal = readDeepPath(row, segments);
+				if (Array.isArray(rawVal)) {
+					for (const candidate of rawVal) {
+						feedCandidateIntoAccumulator(acc, candidate, timeZone, referenceTimeMs);
+					}
+				} else {
+					feedCandidateIntoAccumulator(acc, rawVal, timeZone, referenceTimeMs);
+				}
 			}
-			rowSnaps.push(snapshotAccumulator(acc, timeZone, referenceTimeMs));
+			rowSteps.push(
+				buildStepMetricsFromAccumulator(
+					acc,
+					indexCount,
+					totalIndexCount,
+					timeZone,
+					referenceTimeMs,
+				),
+			);
 		}
-		stepSnapshotsPerRow.push(rowSnaps);
+		stepsByRow.push(rowSteps);
 	}
 
-	// Compute whole-array `total_*` summary per attribute
-	const totalMetricsByAttr: AggregateTotalMetrics[] = accumulators.map((acc) => {
-		const finalSnap = snapshotAccumulator(acc, timeZone, referenceTimeMs);
+	// Compute whole-array `total_*` summary per attribute from final accumulator state
+	const totalMetricsByAttr: AggregateTotalMetrics[] = accumulators.map((acc, s) => {
+		const finalStep =
+			totalIndexCount > 0
+				? stepsByRow[totalIndexCount - 1]![s]!
+				: buildStepMetricsFromAccumulator(
+						acc,
+						0,
+						totalIndexCount,
+						timeZone,
+						referenceTimeMs,
+					);
 		return {
 			total_index_count: totalIndexCount,
-			total_value_count: finalSnap.value_count,
-			total_sum: finalSnap.sum,
-			total_average: finalSnap.average,
-			total_min: finalSnap.min,
-			total_max: finalSnap.max,
-			total_interval: finalSnap.interval,
+			total_value_count: finalStep.value_count,
+			total_sum: finalStep.sum,
+			total_average: finalStep.average,
+			total_min: finalStep.min,
+			total_max: finalStep.max,
+			total_interval: finalStep.interval,
 		};
 	});
 
-	// Pass 2: Assemble indexable result array with per-index and root summary maps
+	// Pass 2: Back-patch `total_*` in-place on each stepMetrics and assemble result
 	const result = [] as unknown as unknown[] & Record<string, unknown>;
+	const isSingleAttr = accumulators.length === 1;
 
 	for (let i = 0; i < totalIndexCount; i++) {
 		const indexCount = i + 1;
-		const stepObj: Record<string, unknown> = {
-			index_count: indexCount,
-			total_index_count: totalIndexCount,
-		};
-		const rowSnaps = stepSnapshotsPerRow[i]!;
+		const stepObj: Record<string, unknown> = {};
+		const rowSteps = stepsByRow[i]!;
 
 		for (let s = 0; s < accumulators.length; s++) {
-			const attrKey = accumulators[s]!.selector.outputKey;
-			const snap = rowSnaps[s]!;
+			const stepMetrics = rowSteps[s]!;
 			const totals = totalMetricsByAttr[s]!;
-			const stepMetrics: AggregateStepMetrics = {
-				index_count: indexCount,
-				value_count: snap.value_count,
-				sum: snap.sum,
-				average: snap.average,
-				min: snap.min,
-				max: snap.max,
-				interval: snap.interval,
-				total_index_count: totals.total_index_count,
-				total_value_count: totals.total_value_count,
-				total_sum: totals.total_sum,
-				total_average: totals.total_average,
-				total_min: totals.total_min,
-				total_max: totals.total_max,
-				total_interval: totals.total_interval,
-			};
-			stepObj[attrKey] = stepMetrics;
+			stepMetrics.total_value_count = totals.total_value_count;
+			stepMetrics.total_sum = totals.total_sum;
+			stepMetrics.total_average = totals.total_average;
+			stepMetrics.total_min = totals.total_min;
+			stepMetrics.total_max = totals.total_max;
+			stepMetrics.total_interval = totals.total_interval;
 
-			if (accumulators.length === 1) {
+			if (isSingleAttr) {
 				stepObj.value_count = stepMetrics.value_count;
 				stepObj.sum = stepMetrics.sum;
 				stepObj.average = stepMetrics.average;
@@ -361,25 +445,34 @@ export function aggregateFilter(
 			}
 		}
 
+		for (let s = 0; s < accumulators.length; s++) {
+			const attrKey = accumulators[s]!.group.outputKey;
+			stepObj[attrKey] = rowSteps[s]!;
+		}
+
+		stepObj.index_count = indexCount;
+		stepObj.total_index_count = totalIndexCount;
+
 		result.push(stepObj);
 	}
 
-	result.total_index_count = totalIndexCount;
+	if (isSingleAttr) {
+		const totals = totalMetricsByAttr[0]!;
+		result.total_value_count = totals.total_value_count;
+		result.total_sum = totals.total_sum;
+		result.total_average = totals.total_average;
+		result.total_min = totals.total_min;
+		result.total_max = totals.total_max;
+		result.total_interval = totals.total_interval;
+	}
 
 	for (let s = 0; s < accumulators.length; s++) {
-		const attrKey = accumulators[s]!.selector.outputKey;
+		const attrKey = accumulators[s]!.group.outputKey;
 		const totals = totalMetricsByAttr[s]!;
 		result[attrKey] = { ...totals };
-
-		if (accumulators.length === 1) {
-			result.total_value_count = totals.total_value_count;
-			result.total_sum = totals.total_sum;
-			result.total_average = totals.total_average;
-			result.total_min = totals.total_min;
-			result.total_max = totals.total_max;
-			result.total_interval = totals.total_interval;
-		}
 	}
+
+	result.total_index_count = totalIndexCount;
 
 	return result;
 }

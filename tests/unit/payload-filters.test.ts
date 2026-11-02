@@ -336,6 +336,132 @@ describe('Payload-Shaping & Aggregation Filters (pick, prune, merge, aggregate/a
 				total_interval: null,
 			});
 		});
+
+		it('folds multiple selectors targeting the same outputKey into a single accumulator and activates single-attribute shorthand', () => {
+			const rows = [
+				{ a: { amount: 10 }, b: { amount: [20, null] } },
+				{ a: { amount: null }, b: { amount: 30 } },
+			];
+
+			const agg = aggregateFilter(rows, 'a.amount', 'b.amount');
+			expect(agg).toHaveLength(2);
+			expect(agg.total_index_count).toBe(2);
+			expect(agg.total_value_count).toBe(3);
+			expect(agg.total_sum).toBe(60);
+			expect(agg.total_average).toBe(20);
+			expect(agg.total_min).toBe(10);
+			expect(agg.total_max).toBe(30);
+			expect(agg.total_interval).toEqual([10, 30]);
+			expect(agg.amount).toEqual({
+				total_index_count: 2,
+				total_value_count: 3,
+				total_sum: 60,
+				total_average: 20,
+				total_min: 10,
+				total_max: 30,
+				total_interval: [10, 30],
+			});
+
+			const step0 = agg[0] as Record<string, unknown>;
+			expect(step0.index_count).toBe(1);
+			expect(step0.value_count).toBe(2);
+			expect(step0.sum).toBe(30);
+			expect(step0.average).toBe(15);
+			expect(step0.interval).toEqual([10, 20]);
+
+			const step1 = agg[1] as Record<string, unknown>;
+			expect(step1.index_count).toBe(2);
+			expect(step1.value_count).toBe(3);
+			expect(step1.sum).toBe(60);
+			expect(step1.average).toBe(20);
+			expect(step1.interval).toEqual([10, 30]);
+		});
+
+		it('protects explicit attribute maps and row index counters from single-attribute shorthand key collisions', () => {
+			const sumRows = [{ sum: 10 }, { sum: 20 }];
+			const aggSum = aggregateFilter(sumRows, 'sum');
+			expect(aggSum.total_index_count).toBe(2);
+			expect(aggSum.total_value_count).toBe(2);
+			expect(aggSum.total_sum).toBe(30);
+			expect(aggSum.sum).toEqual({
+				total_index_count: 2,
+				total_value_count: 2,
+				total_sum: 30,
+				total_average: 15,
+				total_min: 10,
+				total_max: 20,
+				total_interval: [10, 20],
+			});
+			const sumStep0 = aggSum[0] as Record<string, unknown>;
+			expect(sumStep0.index_count).toBe(1);
+			expect(sumStep0.value_count).toBe(1);
+			expect(sumStep0.average).toBe(10);
+			expect(sumStep0.sum).toEqual({
+				index_count: 1,
+				value_count: 1,
+				sum: 10,
+				average: 10,
+				min: 10,
+				max: 10,
+				interval: [10, 10],
+				total_index_count: 2,
+				total_value_count: 2,
+				total_sum: 30,
+				total_average: 15,
+				total_min: 10,
+				total_max: 20,
+				total_interval: [10, 20],
+			});
+
+			const idxRows = [{ index_count: 100 }, { index_count: 200 }];
+			const aggIdx = aggregateFilter(idxRows, 'index_count');
+			expect(aggIdx.total_index_count).toBe(2);
+			expect(aggIdx.total_sum).toBe(300);
+			expect(aggIdx.index_count).toEqual({
+				total_index_count: 2,
+				total_value_count: 2,
+				total_sum: 300,
+				total_average: 150,
+				total_min: 100,
+				total_max: 200,
+				total_interval: [100, 200],
+			});
+			const idxStep0 = aggIdx[0] as Record<string, unknown>;
+			const idxStep1 = aggIdx[1] as Record<string, unknown>;
+			expect(idxStep0.index_count).toBe(1);
+			expect(idxStep1.index_count).toBe(2);
+			expect(idxStep0.sum).toBe(100);
+			expect(idxStep1.sum).toBe(300);
+		});
+
+		it('caches and reuses numeric and TemporalDrop intervals across steps when bounds and grain do not change', () => {
+			const rows = [
+				{ amount: 10, due: '2026-03-01..2026-03-10' },
+				{ amount: 50, due: '2026-03-20' },
+				{ amount: 25, due: '2026-03-05' },
+				{ amount: null, due: null },
+			];
+
+			const agg = aggregateFilter(rows, 'amount', 'due');
+			const step1 = agg[1] as {
+				amount: { interval: unknown };
+				due: { interval: unknown };
+			};
+			const step2 = agg[2] as {
+				amount: { interval: unknown };
+				due: { interval: unknown };
+			};
+			const step3 = agg[3] as {
+				amount: { interval: unknown };
+				due: { interval: unknown };
+			};
+
+			// Steps 1, 2, and 3 all share the exact same [10, 50] tuple and TemporalDrop instance
+			expect(step1.amount.interval).toBe(step2.amount.interval);
+			expect(step2.amount.interval).toBe(step3.amount.interval);
+			expect(step1.due.interval).toBe(step2.due.interval);
+			expect(step2.due.interval).toBe(step3.due.interval);
+		});
 	});
 
 	describe('percentage / percent filter', () => {

@@ -164,21 +164,24 @@ export function readDeepPath(root: unknown, segments: readonly string[]): unknow
 	return current === undefined ? null : current;
 }
 
+const sharedPromotedKeys = new Set<string>();
+
 function pickFromObject(
 	item: unknown,
 	selectors: readonly ParsedPathSelector[],
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
-	const promotedKeys = new Set<string>();
 	const u = unwrapLiquidValue(item);
 	if (!isPlainRecord(u)) {
 		return out;
 	}
+	sharedPromotedKeys.clear();
 	for (const { segments, outputKey } of selectors) {
 		if (FORBIDDEN_KEYS.has(outputKey)) continue;
 		const val = readDeepPath(u, segments);
-		mergeKeyValue(out, promotedKeys, outputKey, val);
+		mergeKeyValue(out, sharedPromotedKeys, outputKey, val);
 	}
+	sharedPromotedKeys.clear();
 	return out;
 }
 
@@ -267,17 +270,18 @@ export function pruneFilter(input: unknown, ...args: unknown[]): unknown {
 
 function mergeObjects(objs: readonly unknown[]): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
-	const promotedKeys = new Set<string>();
+	sharedPromotedKeys.clear();
 
 	for (const rawObj of objs) {
 		const u = unwrapLiquidValue(rawObj);
 		if (!isPlainRecord(u)) continue;
 		for (const key of Object.keys(u)) {
 			if (FORBIDDEN_KEYS.has(key)) continue;
-			mergeKeyValue(out, promotedKeys, key, unwrapLiquidValue(u[key]));
+			mergeKeyValue(out, sharedPromotedKeys, key, unwrapLiquidValue(u[key]));
 		}
 	}
 
+	sharedPromotedKeys.clear();
 	return out;
 }
 

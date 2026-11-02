@@ -165,6 +165,40 @@ describe('Payload-Shaping & Aggregation Filter Property Invariants', () => {
 		);
 	});
 
+	it('Multi-Selector Same-outputKey Equivalence Invariant: agg("a as v", "b as v") matches agg("v") on [{ v: [a, b] }]', async () => {
+		const scalarNumOrNullArb = fc.oneof(
+			fc.constant(null),
+			fc.constant(''),
+			fc.integer({ min: -5000, max: 5000 }),
+		);
+
+		await assertProperty(
+			'templates/payload-filters__aggregate-same-outputkey-equivalence',
+			fc.property(
+				fc.array(fc.tuple(scalarNumOrNullArb, scalarNumOrNullArb), {
+					minLength: 0,
+					maxLength: 12,
+				}),
+				(pairs) => {
+					const splitRows = pairs.map(([a, b]) => ({ a, b }));
+					const combinedRows = pairs.map(([a, b]) => ({ v: [a, b] }));
+
+					const aggSplit = aggregateFilter(splitRows, 'a as v', 'b as v');
+					const aggCombined = aggregateFilter(combinedRows, 'v');
+
+					expect(aggSplit).toEqual(aggCombined);
+					expect(aggSplit.v).toEqual(aggCombined.v);
+					expect(aggSplit.total_value_count).toBe(aggCombined.total_value_count);
+					expect(aggSplit.total_sum).toBe(aggCombined.total_sum);
+					expect(aggSplit.total_average).toBe(aggCombined.total_average);
+					expect(aggSplit.total_min).toBe(aggCombined.total_min);
+					expect(aggSplit.total_max).toBe(aggCombined.total_max);
+					expect(aggSplit.total_interval).toEqual(aggCombined.total_interval);
+				},
+			),
+		);
+	});
+
 	it('Percentage Safety Invariant: percentage returns null iff either input is non-numeric or total is 0, and finite number otherwise', async () => {
 		const numOrBadArb = fc.oneof(
 			fc.double({ min: -1e5, max: 1e5, noNaN: true, noDefaultInfinity: true }),
