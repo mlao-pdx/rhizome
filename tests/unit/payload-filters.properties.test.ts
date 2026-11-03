@@ -2,10 +2,15 @@ import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
 	aggregateFilter,
+	compareRhizomeValues,
+	groupByFilter,
+	isVacuousSortOrGroupValue,
 	mergeFilter,
 	percentageFilter,
 	pickFilter,
 	pruneFilter,
+	sortFilter,
+	sortNaturalFilter,
 } from '../../src/core/templates';
 import { assertProperty } from '../support/assertProperty';
 
@@ -223,6 +228,113 @@ describe('Payload-Shaping & Aggregation Filter Property Invariants', () => {
 					expect(Number.isFinite(res)).toBe(true);
 				}
 			}),
+		);
+	});
+
+	it('Sort Total-Order & NULLS LAST Invariant: compareRhizomeValues is antisymmetric, transitive, and places vacuous values last in both asc and desc', async () => {
+		const mixedValueArb = fc.oneof(
+			fc.constant(null),
+			fc.constant(undefined),
+			fc.constant(''),
+			fc.constant([]),
+			fc.constant({}),
+			fc.boolean(),
+			fc.double({ min: -1000, max: 1000, noNaN: true, noDefaultInfinity: true }),
+			fc.string({ minLength: 1, maxLength: 12 }),
+			fc.constantFrom(
+				'2026-01-01',
+				'2026-01-01..2026-01-31',
+				'Note 2',
+				'Note 10',
+				'Éclair',
+				'eclair',
+			),
+			fc.array(scalarValueArb, { minLength: 1, maxLength: 3 }),
+		);
+
+		await assertProperty(
+			'templates/payload-filters__sort-total-order-and-nulls-last',
+			fc.property(
+				mixedValueArb,
+				mixedValueArb,
+				mixedValueArb,
+				fc.constantFrom<'asc' | 'desc'>('asc', 'desc'),
+				fc.boolean(),
+				(a, b, c, dir, natural) => {
+					const opts = { natural, language: 'en' };
+					const ab = compareRhizomeValues(a, b, dir, opts);
+					const ba = compareRhizomeValues(b, a, dir, opts);
+					const bc = compareRhizomeValues(b, c, dir, opts);
+					const ac = compareRhizomeValues(a, c, dir, opts);
+
+					// Antisymmetry: sign(cmp(a, b)) + sign(cmp(b, a)) === 0
+					expect(Math.sign(ab) + Math.sign(ba)).toBe(0);
+
+					// Transitivity: if a <= b and b <= c then a <= c (and strict if either is strict)
+					if (ab <= 0 && bc <= 0) {
+						expect(ac).toBeLessThanOrEqual(0);
+						if (ab < 0 || bc < 0) {
+							expect(ac).toBeLessThan(0);
+						}
+					}
+
+					// NULLS LAST in both asc and desc
+					const sorted = (natural ? sortNaturalFilter : sortFilter)(
+						[{ v: a }, { v: b }, { v: c }],
+						`v ${dir}`,
+					) as { v: unknown }[];
+					let seenVacuous = false;
+					for (const row of sorted) {
+						const vac = isVacuousSortOrGroupValue(row.v);
+						if (seenVacuous) {
+							expect(vac).toBe(true);
+						}
+						if (vac) {
+							seenVacuous = true;
+						}
+					}
+				},
+			),
+		);
+	});
+
+	it('Temporal Widening Subsumption Permutation Invariant: any permutation of covered days and covering range produces the same widened bucket name and preserves relative arrival order', async () => {
+		const baseEntries = [
+			{ id: 0, due: '2026-10-01' },
+			{ id: 1, due: '2026-10-15' },
+			{ id: 2, due: '2026-10-28' },
+			{ id: 3, due: '2026-10-01..2026-10-31' },
+		];
+
+		await assertProperty(
+			'templates/payload-filters__group-by-temporal-subsumption-permutation',
+			fc.property(
+				fc.shuffledSubarray(baseEntries, { minLength: 4, maxLength: 4 }),
+				(perm) => {
+					const groups = groupByFilter(perm, 'due');
+					expect(groups).toHaveLength(1);
+					expect(String(groups[0]?.name)).toBe('2026-10-01..2026-10-31');
+					expect(groups[0]?.size).toBe(4);
+					expect(groups[0]?.items).toEqual(perm);
+				},
+			),
+		);
+	});
+
+	it('Deep-Target Pick Immutability Invariant: pick with deep target paths never mutates nested input records', async () => {
+		await assertProperty(
+			'templates/payload-filters__deep-pick-immutability',
+			fc.property(
+				fc.array(recordArb, { minLength: 1, maxLength: 6 }),
+				safeKeyArb,
+				safeKeyArb,
+				(rows, k1, k2) => {
+					const nestedRows = rows.map((r) => ({ nested: r }));
+					const snapshot = JSON.stringify(nestedRows);
+					pickFilter(nestedRows, 'nested', `nested.${k1} as nested.${k2}`);
+					expect(JSON.stringify(nestedRows)).toBe(snapshot);
+				},
+			),
 		);
 	});
 });

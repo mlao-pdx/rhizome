@@ -906,4 +906,44 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		});
 		expect(res.markdown).toBe('Host=ZeroQueryHost | Prop=reference');
 	});
+
+	it('evaluates recursive parenthesized filtered expressions in filter args, tags, conditionals, and trailing property/index chains', async () => {
+		const res = await renderRhizomeTemplate(
+			[
+				'{%- query notes -%}tag:note{%- endquery -%}',
+				'append={{ "Note: " | append: (file.basename | upcase) }}',
+				'{% assign a = 3 %}{% assign b = 5 %}',
+				'nested={{ ((a | plus: 1) | times: (b | minus: 1)) }}',
+				'for_sorted={% for n in (query.notes | sort: "file.basename") %}{{ n.file.basename }};{% endfor %}',
+				'if_cond={% if (file.basename | downcase) == "readme" %}matched{% else %}nope{% endif %}',
+				'chain={{ (query.notes | sort: "file.stat.mtime desc")[0].file.basename }}',
+			].join('\n'),
+			{
+				runQueries: async () => ({
+					'◊host': [
+						{
+							file: { basename: 'ReadMe' },
+						},
+					],
+					notes: [
+						{ file: { basename: 'Beta', stat: { mtime: 100 } } },
+						{ file: { basename: 'Gamma', stat: { mtime: 300 } } },
+						{ file: { basename: 'Alpha', stat: { mtime: 200 } } },
+					],
+				}),
+				explainQuery: async () => '',
+				runtimeContext: {
+					sourcePath: 'ReadMe.md',
+				},
+			},
+		);
+
+		expect(res.ok).toBe(true);
+		expect(res.diagnostics).toEqual([]);
+		expect(res.markdown).toContain('append=Note: README');
+		expect(res.markdown).toContain('nested=16');
+		expect(res.markdown).toContain('for_sorted=Alpha;Beta;Gamma;');
+		expect(res.markdown).toContain('if_cond=matched');
+		expect(res.markdown).toContain('chain=Gamma');
+	});
 });

@@ -1,5 +1,16 @@
 import { MAX_SAFE_EPOCH_MS, parseSingleTemporalAtom } from '@core/search';
-import { type Context, Drop, Token, TokenKind, Tokenizer } from 'liquidjs';
+import {
+	type Context,
+	Drop,
+	Filter,
+	type FilterImplOptions,
+	filters,
+	type Liquid,
+	Token,
+	TokenKind,
+	Tokenizer,
+	Value,
+} from 'liquidjs';
 import {
 	combineTemporalRange,
 	MAX_RANGE_STEPS,
@@ -7,7 +18,7 @@ import {
 	TemporalDrop,
 	unwrapLiquidValue,
 } from './temporal-drop';
-import { readContextTemporalMeta } from './temporal-liquid-extensions';
+import { readContextLiquidInstance, readContextTemporalMeta } from './temporal-liquid-extensions';
 
 const DAY_ANCHOR_NAME_RE = /^(?:today|yesterday|tomorrow|(?:last|this|next)day)$/i;
 const PLUS_DAY_OFFSET_SUFFIX_RE = /^\+\d+d?(?![a-zA-Z0-9_-])/i;
@@ -238,7 +249,133 @@ class RangeLhsDrop extends Drop {
 	}
 }
 
+class FilteredValueDrop extends Drop {
+	private readonly filteredToken: ReturnType<Tokenizer['readFilteredValue']>;
+	private cachedLiquid: Liquid | undefined;
+	private cachedValue: Value | undefined;
+
+	public constructor(filteredToken: ReturnType<Tokenizer['readFilteredValue']>) {
+		super();
+		this.filteredToken = filteredToken;
+		return wrapDropAsMethodMissingProxy(this) as this;
+	}
+
+	public override liquidMethodMissing(...args: [prop?: unknown, ctx?: Context]): unknown {
+		const ctx = args.length >= 2 ? args[1] : undefined;
+		if (!ctx) return undefined;
+		const liquid = readContextLiquidInstance(ctx);
+		if (liquid) {
+			if (this.cachedLiquid !== liquid || !this.cachedValue) {
+				this.cachedLiquid = liquid;
+				this.cachedValue = new Value(this.filteredToken, liquid);
+			}
+			return this.cachedValue.value(ctx, false);
+		}
+		return this.evaluateFallback(ctx);
+	}
+
+	private *evaluateFallback(ctx: Context): Generator<unknown, unknown, unknown> {
+		let val: unknown = yield this.filteredToken.initial.evaluate(ctx, false);
+		for (const filterToken of this.filteredToken.filters) {
+			const filterImpl = (filters as Record<string, FilterImplOptions | undefined>)[
+				filterToken.name
+			];
+			const filter = new Filter(filterToken, filterImpl, undefined as unknown as Liquid);
+			val = yield filter.render(val, ctx);
+		}
+		return val;
+	}
+}
+
 class ConcreteToken extends Token {}
+
+function createFilteredValueEvaluationToken(
+	input: string,
+	begin: number,
+	end: number,
+	filteredToken: ReturnType<Tokenizer['readFilteredValue']>,
+	file: string | undefined,
+): Token {
+	const starterToken = new ConcreteToken(
+		TokenKind.Literal,
+		input,
+		begin,
+		begin,
+		file,
+	) as Token & { content: unknown };
+	starterToken.content = new FilteredValueDrop(filteredToken);
+
+	const triggerToken = new ConcreteToken(
+		TokenKind.Literal,
+		input,
+		begin,
+		begin,
+		file,
+	) as Token & { content: unknown };
+	triggerToken.content = '';
+
+	const propAccessToken = new ConcreteToken(
+		TokenKind.PropertyAccess,
+		input,
+		begin,
+		end,
+		file,
+	) as Token & { variable: Token; props: Token[] };
+	propAccessToken.variable = starterToken;
+	propAccessToken.props = [triggerToken];
+	return propAccessToken;
+}
+
+function scanParenthesizedSlice(
+	input: string,
+	openParenIdx: number,
+	limit: number,
+): { closeParenIdx: number; hasTopLevelRangeDots: boolean; hasTopLevelPipe: boolean } {
+	let depth = 1;
+	let quote: string | null = null;
+	let escaped = false;
+	let hasTopLevelRangeDots = false;
+	let hasTopLevelPipe = false;
+
+	for (let i = openParenIdx + 1; i < limit; i++) {
+		const ch = input[i]!;
+		if (quote !== null) {
+			if (escaped) {
+				escaped = false;
+			} else if (ch === '\\') {
+				escaped = true;
+			} else if (ch === quote) {
+				quote = null;
+			}
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch;
+			continue;
+		}
+		if (ch === '(') {
+			depth++;
+			continue;
+		}
+		if (ch === ')') {
+			depth--;
+			if (depth === 0) {
+				return { closeParenIdx: i, hasTopLevelRangeDots, hasTopLevelPipe };
+			}
+			continue;
+		}
+		if (depth === 1) {
+			if (ch === '|') {
+				hasTopLevelPipe = true;
+			} else if (!hasTopLevelPipe && ch === '.' && i + 1 < limit && input[i + 1] === '.') {
+				hasTopLevelRangeDots = true;
+				i++;
+			}
+		}
+	}
+
+	return { closeParenIdx: -1, hasTopLevelRangeDots, hasTopLevelPipe };
+}
 
 function createRangeEvaluationToken(
 	input: string,
@@ -321,23 +458,55 @@ export function installTemporalTokenizerExtensions(): void {
 		this.skipBlank();
 		const begin = this.p;
 		if (this.peek() !== '(') return undefined;
-		this.advance(1);
-		const lhs = origReadValue.call(this);
-		this.assert(lhs, () => `unexpected token ${this.snapshot()}, value expected`);
-		this.skipBlank();
-		this.assert(this.read() === '.' && this.read() === '.', 'invalid range syntax');
-		const rhs = origReadValue.call(this);
-		this.assert(rhs, () => `unexpected token ${this.snapshot()}, value expected`);
-		this.skipBlank();
-		this.assert(this.read() === ')', 'invalid range syntax');
-		return createRangeEvaluationToken(
+
+		const { closeParenIdx, hasTopLevelRangeDots, hasTopLevelPipe } = scanParenthesizedSlice(
+			this.input,
+			begin,
+			this.N,
+		);
+		this.assert(closeParenIdx !== -1, 'parenthesized expression not closed');
+
+		if (hasTopLevelRangeDots && !hasTopLevelPipe) {
+			this.advance(1);
+			const lhs = origReadValue.call(this);
+			this.assert(lhs, () => `unexpected token ${this.snapshot()}, value expected`);
+			this.skipBlank();
+			this.assert(this.read() === '.' && this.read() === '.', 'invalid range syntax');
+			const rhs = origReadValue.call(this);
+			this.assert(rhs, () => `unexpected token ${this.snapshot()}, value expected`);
+			this.skipBlank();
+			this.assert(this.read() === ')', 'invalid range syntax');
+			return createRangeEvaluationToken(
+				this.input,
+				begin,
+				this.p,
+				lhs!,
+				rhs!,
+				this.file,
+				true,
+			) as unknown as ReturnType<Tokenizer['readRange']>;
+		}
+
+		const subTokenizer = new Tokenizer(this.input, {}, this.file, [begin + 1, closeParenIdx]);
+		const selfInternals = this as unknown as { opTrie: unknown; literalTrie: unknown };
+		const subInternals = subTokenizer as unknown as { opTrie: unknown; literalTrie: unknown };
+		subInternals.opTrie = selfInternals.opTrie;
+		subInternals.literalTrie = selfInternals.literalTrie;
+
+		const filteredValueToken = subTokenizer.readFilteredValue();
+		subTokenizer.skipBlank();
+		subTokenizer.assert(
+			subTokenizer.end(),
+			() => `unexpected token ${subTokenizer.snapshot()}`,
+		);
+
+		this.p = closeParenIdx + 1;
+		return createFilteredValueEvaluationToken(
 			this.input,
 			begin,
 			this.p,
-			lhs!,
-			rhs!,
+			filteredValueToken,
 			this.file,
-			true,
 		) as unknown as ReturnType<Tokenizer['readRange']>;
 	};
 

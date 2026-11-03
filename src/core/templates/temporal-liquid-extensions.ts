@@ -21,6 +21,39 @@ import { installTemporalTokenizerExtensions } from './temporal-range-tokenizer';
 export const TEMPORAL_CONTEXT_META_SYMBOL = Symbol.for('rhizome.temporalContextMeta');
 
 /**
+ * Symbol key used to attach the owning `Liquid` instance onto `liquid.options` (`ctx.opts`)
+ * so `FilteredValueDrop` and collection filter evaluators can resolve registered filters.
+ */
+export const LIQUID_INSTANCE_SYMBOL = Symbol.for('rhizome.liquidInstance');
+
+/**
+ * Attaches `liquid` onto `liquid.options` under `LIQUID_INSTANCE_SYMBOL`.
+ */
+export function attachLiquidInstanceToOptions(liquid: Liquid): void {
+	const opts = liquid.options as unknown as Record<PropertyKey, unknown>;
+	if (opts && typeof opts === 'object' && opts[LIQUID_INSTANCE_SYMBOL] !== liquid) {
+		Object.defineProperty(opts, LIQUID_INSTANCE_SYMBOL, {
+			value: liquid,
+			enumerable: false,
+			configurable: true,
+			writable: true,
+		});
+	}
+}
+
+/**
+ * Reads the owning `Liquid` instance from a LiquidJS `Context` (`ctx.opts`), if attached.
+ */
+export function readContextLiquidInstance(ctx: Context | undefined): Liquid | undefined {
+	if (!ctx) return undefined;
+	const opts = (ctx as unknown as { opts?: Record<PropertyKey, unknown> }).opts;
+	const candidate = opts?.[LIQUID_INSTANCE_SYMBOL];
+	return candidate && typeof candidate === 'object' && 'filters' in candidate
+		? (candidate as Liquid)
+		: undefined;
+}
+
+/**
  * Pinned temporal evaluation metadata attached to the root template context.
  */
 export interface TemporalContextMeta {
@@ -29,10 +62,32 @@ export interface TemporalContextMeta {
 }
 
 /**
- * Validates that `raw` is a supported IANA time zone identifier, falling back to `'UTC'`
- * when `raw` is empty, non-string, or rejected by `@js-temporal/polyfill`.
+ * Resolves the host system's local IANA time zone identifier, falling back to `'UTC'`
+ * if unavailable or rejected by `@js-temporal/polyfill`.
+ */
+export function resolveDefaultSystemTimeZone(): string {
+	try {
+		const sysTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+		if (typeof sysTz === 'string' && sysTz.trim().length > 0) {
+			const trimmed = sysTz.trim();
+			Temporal.Instant.fromEpochMilliseconds(0).toZonedDateTimeISO(trimmed);
+			return trimmed;
+		}
+	} catch {
+		// Fall back to 'UTC'
+	}
+	return 'UTC';
+}
+
+/**
+ * Validates that `raw` is a supported IANA time zone identifier:
+ * - When `raw === undefined`, defaults to the local system time zone (`resolveDefaultSystemTimeZone()`).
+ * - When `raw` is provided but empty, non-string, or rejected by `@js-temporal/polyfill`, falls back to `'UTC'`.
  */
 export function resolveValidTimeZone(raw: unknown): string {
+	if (raw === undefined) {
+		return resolveDefaultSystemTimeZone();
+	}
 	if (typeof raw !== 'string') {
 		return 'UTC';
 	}
@@ -67,7 +122,7 @@ function isTemporalContextMeta(val: unknown): val is TemporalContextMeta {
  */
 export function readContextTemporalMeta(ctx: Context | undefined): TemporalContextMeta {
 	if (!ctx) {
-		return { timeZone: 'UTC', referenceTimeMs: Date.now() };
+		return { timeZone: resolveDefaultSystemTimeZone(), referenceTimeMs: Date.now() };
 	}
 
 	const ctxInternal = ctx as unknown as {
@@ -173,6 +228,7 @@ export function createRhizomeLiquidOperators(): typeof defaultOperators {
  */
 export function registerTemporalLiquidExtensions(liquid: Liquid): void {
 	installTemporalTokenizerExtensions();
+	attachLiquidInstanceToOptions(liquid);
 
 	const normalizeDateInput = (
 		v: unknown,

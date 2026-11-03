@@ -392,9 +392,13 @@ export function combineTemporalRange(
 }
 
 export {
+	attachLiquidInstanceToOptions,
 	createRhizomeLiquidOperators,
+	LIQUID_INSTANCE_SYMBOL,
+	readContextLiquidInstance,
 	readContextTemporalMeta,
 	registerTemporalLiquidExtensions,
+	resolveDefaultSystemTimeZone,
 	resolveValidTimeZone,
 	TEMPORAL_CONTEXT_META_SYMBOL,
 	type TemporalContextMeta,

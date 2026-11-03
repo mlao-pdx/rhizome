@@ -1,17 +1,21 @@
-import { isVacuousOccurrence, parseTemporalExpr } from '@core/search';
-import type { Context } from 'liquidjs';
-import { type ParsedPathSelector, parsePickOrAggSelectors, readDeepPath } from './payload-filters';
+import { isVacuousOccurrence } from '@core/search';
 import {
-	coerceNumericEndpointToTemporalDrop,
+	evaluateSelectorOnItem,
+	type LiquidFilterThis,
+	type ParsedPathSelector,
+	parsePickOrAggSelectors,
+} from './selector-evaluator';
+import { coerceToTemporalGroupDrop } from './sort-group-filters';
+import {
 	type DisplayGrain,
 	finestDisplayGrain,
 	formatEpochMsAtGrain,
-	normalizeRelativeTemporalString,
 	parseFiniteRangeNumber,
 	readContextTemporalMeta,
 	TemporalDrop,
 	unwrapLiquidValue,
 } from './temporal-drop';
+import { coerceNumericEndpointToTemporalDrop } from './temporal-range-tokenizer';
 
 type AttributeDomain = 'unknown' | 'number' | 'temporal';
 
@@ -52,7 +56,7 @@ export interface AggregateTotalMetrics {
 
 interface GroupedAttributeSelector {
 	readonly outputKey: string;
-	readonly segmentPaths: (readonly string[])[];
+	readonly selectors: ParsedPathSelector[];
 }
 
 interface AttributeAccumulator {
@@ -78,11 +82,11 @@ function groupSelectorsByOutputKey(
 	for (const sel of selectors) {
 		const existing = byKey.get(sel.outputKey);
 		if (existing) {
-			existing.segmentPaths.push(sel.segments);
+			existing.selectors.push(sel);
 		} else {
 			const group: GroupedAttributeSelector = {
 				outputKey: sel.outputKey,
-				segmentPaths: [sel.segments],
+				selectors: [sel],
 			};
 			byKey.set(sel.outputKey, group);
 			groups.push(group);
@@ -180,23 +184,10 @@ function feedCandidateIntoAccumulator(
 			}
 		}
 		if (acc.domain !== 'number') {
-			const trimmed = c.trim();
-			if (trimmed.length > 0) {
-				const parsed = parseTemporalExpr(normalizeRelativeTemporalString(trimmed), {
-					allowYearOnly: true,
-					allowRelative: true,
-					timeZone,
-					referenceTimeMs,
-				});
-				if (parsed.ok) {
-					const temp = TemporalDrop.fromDateInterval(
-						parsed.interval,
-						timeZone,
-						referenceTimeMs,
-					);
-					acc.domain = 'temporal';
-					foldTemporalIntoAccumulator(acc, temp);
-				}
+			const temp = coerceToTemporalGroupDrop(c, timeZone, referenceTimeMs);
+			if (temp) {
+				acc.domain = 'temporal';
+				foldTemporalIntoAccumulator(acc, temp);
 			}
 		}
 	}
@@ -341,7 +332,7 @@ function buildStepMetricsFromAccumulator(
  * deep-dotted attributes, returning an indexable array with summary properties attached.
  */
 export function aggregateFilter(
-	this: { context?: Context } | void,
+	this: LiquidFilterThis | void,
 	input: unknown,
 	...args: unknown[]
 ): unknown[] & Record<string, unknown> {
@@ -357,15 +348,15 @@ export function aggregateFilter(
 	const accumulators = groupedSelectors.map((group) => createAttributeAccumulator(group));
 	const stepsByRow: AggregateStepMetrics[][] = [];
 
-	// Pass 1: Single scan across all rows, folding all segmentPaths per grouped outputKey
+	// Pass 1: Single scan across all rows, folding all selectors per grouped outputKey
 	for (let i = 0; i < totalIndexCount; i++) {
 		const row = rows[i];
 		const indexCount = i + 1;
 		const rowSteps: AggregateStepMetrics[] = [];
 		for (let s = 0; s < accumulators.length; s++) {
 			const acc = accumulators[s]!;
-			for (const segments of acc.group.segmentPaths) {
-				const rawVal = readDeepPath(row, segments);
+			for (const sel of acc.group.selectors) {
+				const rawVal = evaluateSelectorOnItem(row, sel, this);
 				if (Array.isArray(rawVal)) {
 					for (const candidate of rawVal) {
 						feedCandidateIntoAccumulator(acc, candidate, timeZone, referenceTimeMs);

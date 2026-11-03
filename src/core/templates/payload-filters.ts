@@ -1,126 +1,38 @@
-import { FORBIDDEN_KEYS, mergeKeyValue } from '@core/search';
-import type { Context, Liquid } from 'liquidjs';
+import { FORBIDDEN_KEYS } from '@core/search';
+import type { Context, FilterImplOptions, Liquid } from 'liquidjs';
 import { aggregateFilter } from './aggregate-filter';
-import { parseFiniteRangeNumber, TemporalDrop, unwrapLiquidValue } from './temporal-drop';
+import {
+	findFilter,
+	findIndexFilter,
+	hasFilter,
+	mapFilter,
+	rejectFilter,
+	sumFilter,
+	uniqFilter,
+	whereFilter,
+} from './collection-filters';
+import {
+	evaluateSelectorOnItem,
+	isPlainRecord,
+	type LiquidFilterThis,
+	type ParsedPathSelector,
+	parsePickOrAggSelectors,
+	registerFallbackFilter,
+	safeMergeKeyValue,
+	shallowClonePlainRecord,
+	splitCleanSegments,
+	writeDeepTargetValue,
+} from './selector-evaluator';
+import { groupByFilter, sortFilter, sortNaturalFilter } from './sort-group-filters';
+import {
+	attachLiquidInstanceToOptions,
+	parseFiniteRangeNumber,
+	unwrapLiquidValue,
+} from './temporal-drop';
 
 /**
- * Parsed deep-path selector for `pick` and `aggregate` (`agg`), mapping a non-empty
- * sequence of case-sensitive path `segments` to its target `outputKey` (either the
- * leaf segment or an explicit `"<path> as <alias>"` rename).
- */
-export interface ParsedPathSelector {
-	readonly segments: readonly string[];
-	readonly outputKey: string;
-}
-
-const AS_ALIAS_RE = /^(.*?)\s+as\s+([^\s.]+)$/i;
-
-/**
- * Returns `true` when `val` (after `unwrapLiquidValue`) is a non-null plain object
- * or record (including `Object.create(null)` frontmatter maps), excluding arrays,
- * `TemporalDrop`, `Date`, and `RegExp`.
- */
-export function isPlainRecord(val: unknown): val is Record<string, unknown> {
-	const u = unwrapLiquidValue(val);
-	return (
-		u !== null &&
-		typeof u === 'object' &&
-		!Array.isArray(u) &&
-		!(u instanceof TemporalDrop) &&
-		!(u instanceof Date) &&
-		!(u instanceof RegExp)
-	);
-}
-
-function splitCleanSegments(rawPath: string): string[] | null {
-	const trimmed = rawPath.trim();
-	if (trimmed.length === 0) return null;
-	const parts = trimmed.split('.');
-	const segments: string[] = [];
-	for (const part of parts) {
-		const seg = part.trim();
-		if (seg.length === 0 || FORBIDDEN_KEYS.has(seg)) {
-			return null;
-		}
-		segments.push(seg);
-	}
-	return segments.length > 0 ? segments : null;
-}
-
-function parseSingleSelectorString(raw: string): ParsedPathSelector | null {
-	const trimmed = raw.trim();
-	if (trimmed.length === 0) return null;
-
-	const asMatch = AS_ALIAS_RE.exec(trimmed);
-	if (asMatch) {
-		const rawPath = asMatch[1] ?? '';
-		const alias = (asMatch[2] ?? '').trim();
-		if (alias.length === 0 || FORBIDDEN_KEYS.has(alias)) {
-			return null;
-		}
-		const segments = splitCleanSegments(rawPath);
-		if (!segments) return null;
-		return Object.freeze({ segments: Object.freeze(segments), outputKey: alias });
-	}
-
-	const segments = splitCleanSegments(trimmed);
-	if (!segments) return null;
-	const leaf = segments[segments.length - 1]!;
-	return Object.freeze({ segments: Object.freeze(segments), outputKey: leaf });
-}
-
-/**
- * Parses variadic filter arguments for `pick` and `aggregate` (`agg`), supporting:
- * - String selectors: `"file.basename"`, `"properties.status as state"`
- * - Array arguments containing string selectors (e.g., `pick: keys_array`)
- * - LiquidJS named-argument `[alias, path]` 2-tuples when `alias` has no dots and is a valid key
- */
-export function parsePickOrAggSelectors(args: readonly unknown[]): ParsedPathSelector[] {
-	const selectors: ParsedPathSelector[] = [];
-
-	const visitArg = (arg: unknown, allowNamedTuple: boolean): void => {
-		const u = unwrapLiquidValue(arg);
-		if (typeof u === 'string') {
-			const parsed = parseSingleSelectorString(u);
-			if (parsed) selectors.push(parsed);
-			return;
-		}
-		if (Array.isArray(u)) {
-			// Detect a LiquidJS named argument tuple `[key, val]` only at the top-level arg list
-			// when `u[0]` has no dots/spaces and `u[1]` is a string path without ` as `.
-			if (
-				allowNamedTuple &&
-				u.length === 2 &&
-				typeof u[0] === 'string' &&
-				typeof u[1] === 'string' &&
-				!/[\s.]/.test(u[0].trim()) &&
-				!AS_ALIAS_RE.test(u[0]) &&
-				!AS_ALIAS_RE.test(u[1]) &&
-				u[1].includes('.')
-			) {
-				const alias = u[0].trim();
-				const segments = splitCleanSegments(u[1]);
-				if (alias.length > 0 && !FORBIDDEN_KEYS.has(alias) && segments) {
-					selectors.push(
-						Object.freeze({ segments: Object.freeze(segments), outputKey: alias }),
-					);
-					return;
-				}
-			}
-			for (const item of u) {
-				visitArg(item, false);
-			}
-		}
-	};
-
-	for (const arg of args) {
-		visitArg(arg, true);
-	}
-	return selectors;
-}
-
-/**
- * Parses variadic filter arguments for `prune` into an array of case-sensitive path segment arrays.
+ * Parses variadic filter arguments for `prune` into an array of case-sensitive `<deep.path>`
+ * segment arrays (rejecting strings with filter pipelines or `as` target clauses).
  */
 export function parsePrunePaths(args: readonly unknown[]): (readonly string[])[] {
 	const paths: (readonly string[])[] = [];
@@ -128,9 +40,11 @@ export function parsePrunePaths(args: readonly unknown[]): (readonly string[])[]
 	const visitArg = (arg: unknown): void => {
 		const u = unwrapLiquidValue(arg);
 		if (typeof u === 'string') {
-			const asMatch = AS_ALIAS_RE.exec(u.trim());
-			const rawPath = asMatch ? (asMatch[1] ?? '') : u;
-			const segments = splitCleanSegments(rawPath);
+			const trimmed = u.trim();
+			if (/[\s|]/.test(trimmed)) {
+				return;
+			}
+			const segments = splitCleanSegments(trimmed);
 			if (segments) {
 				paths.push(Object.freeze(segments));
 			}
@@ -149,66 +63,52 @@ export function parsePrunePaths(args: readonly unknown[]): (readonly string[])[]
 	return paths;
 }
 
-/**
- * Walks `segments` case-sensitively on `root`, returning `null` if any intermediate step
- * is missing, non-record, or in `FORBIDDEN_KEYS`, and normalizing `undefined` to `null`.
- */
-export function readDeepPath(root: unknown, segments: readonly string[]): unknown {
-	let current: unknown = unwrapLiquidValue(root);
-	for (const seg of segments) {
-		if (FORBIDDEN_KEYS.has(seg) || !isPlainRecord(current) || !(seg in current)) {
-			return null;
-		}
-		current = unwrapLiquidValue(current[seg]);
-	}
-	return current === undefined ? null : current;
-}
-
-const sharedPromotedKeys = new Set<string>();
-
 function pickFromObject(
 	item: unknown,
 	selectors: readonly ParsedPathSelector[],
+	filterThis: LiquidFilterThis | void,
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
 	const u = unwrapLiquidValue(item);
 	if (!isPlainRecord(u)) {
 		return out;
 	}
-	sharedPromotedKeys.clear();
-	for (const { segments, outputKey } of selectors) {
-		if (FORBIDDEN_KEYS.has(outputKey)) continue;
-		const val = readDeepPath(u, segments);
-		mergeKeyValue(out, sharedPromotedKeys, outputKey, val);
+	const promotedByContainer = new Map<Record<string, unknown>, Set<string>>();
+	const clonedContainers = new Set<Record<string, unknown>>([out]);
+
+	for (const selector of selectors) {
+		if (FORBIDDEN_KEYS.has(selector.outputKey)) continue;
+		const val = evaluateSelectorOnItem(u, selector, filterThis);
+		writeDeepTargetValue(
+			out,
+			promotedByContainer,
+			clonedContainers,
+			selector.outputSegments,
+			val,
+		);
 	}
-	sharedPromotedKeys.clear();
 	return out;
 }
 
 /**
- * Liquid `pick` filter: extracts one or more root or deep-dotted paths from an object
- * (or each object in an array of objects) into a new flat plain object.
- * Resolves same-leaf collisions via the shared vacuous-aware `mergeKeyValue` rule.
+ * Liquid `pick` filter: extracts one or more root or deep-dotted paths (with optional
+ * `| <filterPipeline>` and `as <target.deep.path>`) from an object or array of objects
+ * into a new plain object, resolving same-leaf collisions via `mergeKeyValue`.
  */
-export function pickFilter(input: unknown, ...args: unknown[]): unknown {
+export function pickFilter(
+	this: LiquidFilterThis | void,
+	input: unknown,
+	...args: unknown[]
+): unknown {
 	const selectors = parsePickOrAggSelectors(args);
 	const unwrapped = unwrapLiquidValue(input);
 	if (Array.isArray(unwrapped)) {
-		return unwrapped.map((el) => pickFromObject(el, selectors));
+		return unwrapped.map((el) => pickFromObject(el, selectors, this));
 	}
 	if (isPlainRecord(unwrapped)) {
-		return pickFromObject(unwrapped, selectors);
+		return pickFromObject(unwrapped, selectors, this);
 	}
 	return {};
-}
-
-function shallowClonePlainRecord(obj: Record<string, unknown>): Record<string, unknown> {
-	const clone: Record<string, unknown> = {};
-	for (const key of Object.keys(obj)) {
-		if (FORBIDDEN_KEYS.has(key)) continue;
-		clone[key] = obj[key];
-	}
-	return clone;
 }
 
 function prunePathFromObject(
@@ -221,7 +121,7 @@ function prunePathFromObject(
 		return clone;
 	}
 	const head = segments[depth]!;
-	if (FORBIDDEN_KEYS.has(head) || !(head in clone)) {
+	if (FORBIDDEN_KEYS.has(head) || !Object.prototype.hasOwnProperty.call(clone, head)) {
 		return clone;
 	}
 	if (depth === segments.length - 1) {
@@ -268,20 +168,22 @@ export function pruneFilter(input: unknown, ...args: unknown[]): unknown {
 	return {};
 }
 
+const sharedMergePromotedKeys = new Set<string>();
+
 function mergeObjects(objs: readonly unknown[]): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
-	sharedPromotedKeys.clear();
+	sharedMergePromotedKeys.clear();
 
 	for (const rawObj of objs) {
 		const u = unwrapLiquidValue(rawObj);
 		if (!isPlainRecord(u)) continue;
 		for (const key of Object.keys(u)) {
 			if (FORBIDDEN_KEYS.has(key)) continue;
-			mergeKeyValue(out, sharedPromotedKeys, key, unwrapLiquidValue(u[key]));
+			safeMergeKeyValue(out, sharedMergePromotedKeys, key, unwrapLiquidValue(u[key]));
 		}
 	}
 
-	sharedPromotedKeys.clear();
+	sharedMergePromotedKeys.clear();
 	return out;
 }
 
@@ -354,26 +256,82 @@ export function percentageFilter(value: unknown, total: unknown): number | null 
 	return pct === 0 ? 0 : pct;
 }
 
+const REMOVED_EXP_FILTERS: readonly string[] = Object.freeze([
+	'group_by_exp',
+	'where_exp',
+	'reject_exp',
+	'find_exp',
+	'find_index_exp',
+	'has_exp',
+]);
+
+function seedFallbackFilters(): void {
+	const entries: readonly [string, (...args: unknown[]) => unknown][] = [
+		['pick', pickFilter],
+		['prune', pruneFilter],
+		['merge', mergeFilter],
+		['percentage', percentageFilter],
+		['percent', percentageFilter],
+		['aggregate', aggregateFilter],
+		['agg', aggregateFilter],
+		['sort', sortFilter],
+		['sort_natural', sortNaturalFilter],
+		['group_by', groupByFilter],
+		['where', whereFilter],
+		['reject', rejectFilter],
+		['find', findFilter],
+		['find_index', findIndexFilter],
+		['has', hasFilter],
+		['map', mapFilter],
+		['uniq', uniqFilter],
+		['sum', sumFilter],
+	];
+	for (const [name, fn] of entries) {
+		registerFallbackFilter(name, fn as FilterImplOptions);
+	}
+}
+
+seedFallbackFilters();
+
 /**
- * Registers Rhizome's payload-shaping and aggregation filters (`pick`, `prune`, `merge`,
- * `aggregate`, `agg`, `percentage`, and `percent`) on `liquid`.
+ * Registers Rhizome's payload-shaping, aggregation, sorting, grouping, and collection
+ * filters on `liquid`, and removes the redundant `*_exp` filters.
  */
 export function registerPayloadLiquidFilters(liquid: Liquid): void {
-	liquid.registerFilter('pick', pickFilter);
+	attachLiquidInstanceToOptions(liquid);
+
+	for (const expFilterName of REMOVED_EXP_FILTERS) {
+		delete (liquid.filters as Record<string, unknown>)[expFilterName];
+	}
+
+	const bindContextFilter = (
+		fn: (this: LiquidFilterThis, input: unknown, ...args: unknown[]) => unknown,
+	) => {
+		return function (
+			this: { context: Context; liquid: Liquid },
+			input: unknown,
+			...args: unknown[]
+		) {
+			return fn.call(this, input, ...args);
+		};
+	};
+
+	liquid.registerFilter('pick', bindContextFilter(pickFilter));
 	liquid.registerFilter('prune', pruneFilter);
 	liquid.registerFilter('merge', mergeFilter);
 	liquid.registerFilter('percentage', percentageFilter);
 	liquid.registerFilter('percent', percentageFilter);
-	liquid.registerFilter(
-		'aggregate',
-		function (this: { context: Context }, input: unknown, ...args: unknown[]) {
-			return aggregateFilter.call(this, input, ...args);
-		},
-	);
-	liquid.registerFilter(
-		'agg',
-		function (this: { context: Context }, input: unknown, ...args: unknown[]) {
-			return aggregateFilter.call(this, input, ...args);
-		},
-	);
+	liquid.registerFilter('aggregate', bindContextFilter(aggregateFilter));
+	liquid.registerFilter('agg', bindContextFilter(aggregateFilter));
+	liquid.registerFilter('sort', bindContextFilter(sortFilter));
+	liquid.registerFilter('sort_natural', bindContextFilter(sortNaturalFilter));
+	liquid.registerFilter('group_by', bindContextFilter(groupByFilter));
+	liquid.registerFilter('where', bindContextFilter(whereFilter));
+	liquid.registerFilter('reject', bindContextFilter(rejectFilter));
+	liquid.registerFilter('find', bindContextFilter(findFilter));
+	liquid.registerFilter('find_index', bindContextFilter(findIndexFilter));
+	liquid.registerFilter('has', bindContextFilter(hasFilter));
+	liquid.registerFilter('map', bindContextFilter(mapFilter));
+	liquid.registerFilter('uniq', bindContextFilter(uniqFilter));
+	liquid.registerFilter('sum', bindContextFilter(sumFilter));
 }
