@@ -127,8 +127,7 @@ export class RhizomeSettingTab extends PluginSettingTab {
 	 * @remarks
 	 * (obsidian-idiom, 2026-10-30) Overridden so declarative `control` bindings
 	 * persist through `this.plugin.saveSettings()` (`PluginDataStore`) rather
-	 * than Obsidian's default `this.plugin.saveData(this.plugin.settings)`,
-	 * which would overwrite the top-level `vaultInstanceId` key in `data.json`.
+	 * than Obsidian's default `this.plugin.saveData(this.plugin.settings)`.
 	 */
 	override async setControlValue(key: keyof RhizomeSettings, value: unknown): Promise<void> {
 		this.plugin.settings = mergeSettings(DEFAULT_SETTINGS, {

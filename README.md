@@ -14,20 +14,6 @@ auditing, and the TSDoc `@remarks` convention.
 
 See [Design principles](docs/principles.md) for the 7 guiding choices this project ships with.
 
-## Persistence
-
-Rhizome ships [Dexie](https://dexie.org) as its persistence layer —
-the supported API over IndexedDB, never raw IndexedDB used directly.
-`src/ports/persistence-port.ts` is the technology-agnostic shape
-`src/core` depends on; `src/adapters/dexie-persistence-adapter.ts`
-implements it (see the `dexie-persistence-adapter` skill for schema and
-transaction patterns). Everything persisted is a rebuildable derived
-cache — never a source of truth — in a database addressed to this plugin
-and this vault location and verified against a per-vault identity; see
-`docs/dev/indexeddb-database-identity.md` for the naming/identity scheme.
-Everything Rhizome persists goes through this port and adapter — nothing
-touches raw IndexedDB.
-
 ## Support policy
 
 - Supports both desktop and mobile (`isDesktopOnly: false`, Obsidian `1.14.0+`).

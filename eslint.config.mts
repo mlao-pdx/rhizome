@@ -50,6 +50,12 @@ export default defineConfig(
 	},
 	...obsidianmd.configs.recommended,
 	{
+		files: ['tests/**/*.ts', 'vitest.config.ts', 'vitest.properties.config.ts'],
+		rules: {
+			'import/no-nodejs-modules': 'off',
+		},
+	},
+	{
 		files: ['**/*.ts'],
 		plugins: {
 			tsdoc,

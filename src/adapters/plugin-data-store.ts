@@ -6,7 +6,6 @@ import {
 } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import type { RhizomeSettings } from '../settings';
-import { isValidVaultInstanceId, mintVaultInstanceId } from './database-identity';
 import { isLogLevel } from './logger-format';
 
 /**
@@ -17,28 +16,22 @@ import { isLogLevel } from './logger-format';
  */
 
 /**
- * The full persisted shape of `data.json`. `vaultInstanceId` lives under a
- * separate top-level key, not inside the user-settings object, so a
- * "restore defaults" or settings migration can never regenerate it.
- *
- * @see docs/dev/indexeddb-database-identity.md
+ * The full persisted shape of `data.json`.
  */
 export interface PluginData {
 	settings: RhizomeSettings;
-	vaultInstanceId?: string;
 }
 
 export class PluginDataStore {
 	private cached: PluginData | undefined;
 	private readInFlight: Promise<PluginData> | undefined;
-	private ensureInFlight: Promise<string> | undefined;
 
 	/**
 	 * Serializes every `data.json` write through one promise chain.
 	 *
 	 * @remarks
-	 * (design, 2026-09-01) `saveData` rewrites the whole file, so an
-	 * unserialized settings save and identity mint can clobber each other.
+	 * (design, 2026-09-01) `saveData` rewrites the whole file, so concurrent
+	 * settings saves could clobber each other without serialization.
 	 * Mirrors the `writeQueue` precedent in `obsidian-logger-adapter.ts`,
 	 * except failures propagate to the awaiting caller (a rejected write
 	 * must be visible, not swallowed) while the chain itself stays alive
@@ -62,35 +55,6 @@ export class PluginDataStore {
 	/** Persists the full settings object through the serialized write queue. */
 	saveSettings(settings: RhizomeSettings): Promise<void> {
 		return this.enqueueWrite((data) => ({ ...data, settings }));
-	}
-
-	/**
-	 * Returns a valid stored `vaultInstanceId`, or mints one, persists it,
-	 * and returns it.
-	 *
-	 * @remarks
-	 * (design, 2026-09-01) The in-flight promise is memoized so concurrent
-	 * first calls mint exactly once, and cleared on settlement so a failed
-	 * mint can be retried. Persistence happens **before** the promise
-	 * resolves: the authoritative identity must be durable before any
-	 * database work (see `docs/dev/indexeddb-database-identity.md`).
-	 */
-	ensureVaultInstanceId(): Promise<string> {
-		this.ensureInFlight ??= this.ensureVaultInstanceIdOnce().finally(() => {
-			this.ensureInFlight = undefined;
-		});
-		return this.ensureInFlight;
-	}
-
-	private async ensureVaultInstanceIdOnce(): Promise<string> {
-		const data = await this.read();
-		if (isValidVaultInstanceId(data.vaultInstanceId)) {
-			return data.vaultInstanceId;
-		}
-		const minted = mintVaultInstanceId();
-		await this.enqueueWrite((current) => ({ ...current, vaultInstanceId: minted }));
-		this.logger?.log('debug', 'Minted new vaultInstanceId', { source: 'datastore' });
-		return minted;
 	}
 
 	private read(): Promise<PluginData> {
@@ -143,12 +107,8 @@ export class PluginDataStore {
  */
 function parsePluginData(raw: unknown, defaults: RhizomeSettings): PluginData {
 	if (raw !== null && typeof raw === 'object' && 'settings' in raw) {
-		const obj = raw as { settings?: unknown; vaultInstanceId?: unknown };
-		const data: PluginData = { settings: mergeSettings(defaults, obj.settings) };
-		if (isValidVaultInstanceId(obj.vaultInstanceId)) {
-			data.vaultInstanceId = obj.vaultInstanceId;
-		}
-		return data;
+		const obj = raw as { settings?: unknown };
+		return { settings: mergeSettings(defaults, obj.settings) };
 	}
 	return { settings: mergeSettings(defaults, raw) };
 }

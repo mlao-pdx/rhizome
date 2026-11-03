@@ -125,9 +125,6 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
 - Design principles: `docs/principles.md`.
 - Example file structure, common task code snippets, UI copy/UX
   guidelines: `obsidian-plugin-patterns` skill.
-- IndexedDB database naming and identity (address vs identity, the
-  `{pluginId}/{databaseId}/{vaultRootHash}` pattern, verification and
-  crash-consistency ordering): `docs/dev/indexeddb-database-identity.md`.
 - Diagnostic logging contract for routines (`LoggerPort`, mandatory vs
   optional table columns, `meta.source` naming, `‼️...‼️` sensitivity
   markers, and `◊InternalRhizome` frontmatter flags):

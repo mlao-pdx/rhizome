@@ -98,7 +98,6 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		const plugin = createPlugin();
 		plugin.loadData = async () => ({
 			settings: { loggingEnabled: false, logLevel: 'warn' },
-			vaultInstanceId: 'vault-id-1234',
 		});
 		const savedData: unknown[] = [];
 		plugin.saveData = async (data: unknown) => {
@@ -153,16 +152,14 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 				: Boolean(logLevelItem.control.disabled);
 		expect(isLogLevelDisabled()).toBe(true);
 
-		// Folder path normalization and PluginDataStore persistence (preserving vaultInstanceId)
+		// Folder path normalization and PluginDataStore persistence
 		expect(settingTab.getControlValue('templatesFolder')).toBe('◊Rhizome/templates');
 		await settingTab.setControlValue('templatesFolder', '  /Custom/Templates/ ');
 		expect(settingTab.getControlValue('templatesFolder')).toBe('Custom/Templates');
 		const lastSaved = savedData.at(-1) as {
 			settings: RhizomeSettings;
-			vaultInstanceId?: string;
 		};
 		expect(lastSaved.settings.templatesFolder).toBe('Custom/Templates');
-		expect(lastSaved.vaultInstanceId).toBe('vault-id-1234');
 
 		await settingTab.setControlValue('partialsFolder', '  /Custom/Partials/ ');
 		expect(settingTab.getControlValue('partialsFolder')).toBe('Custom/Partials');

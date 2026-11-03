@@ -13,14 +13,13 @@ See `docs/dev/tsdoc-conventions.md` for the doc-comment format (`@see`/
 
 ## Current adapters
 
-| Adapter                                  | Implements        | Wraps                                                                                                                                                                         |
-| ---------------------------------------- | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ObsidianLoggerAdapter`                  | `LoggerPort`      | `Vault.adapter` (`DataAdapter`), writing segmented Markdown tables under `◊Rhizome/logs/<epoch>.md`                                                                           |
-| `DexiePersistenceAdapter`                | `PersistencePort` | Dexie over IndexedDB, at an address scoped to the plugin and vault location — see `docs/dev/indexeddb-database-identity.md`                                                   |
-| `vault-query-runner.ts`                  | —                 | `App.vault` (`getMarkdownFiles`, `adapter.read` on `types.json`) and `App.metadataCache` (`getFileCache`, `getFirstLinkpathDest`) to run search queries against the vault     |
-| `active-query-roster.ts`                 | —                 | `runVaultQuery` to maintain active reactive `plugin.query(..., onUpdate)` subscribers, deduplicate query strings across subscribers, and diff payload hashes on vault changes |
-| `rhizome-codeblock.ts`                   | —                 | `MarkdownRenderer.render` and `MarkdownRenderChild` to execute `renderRhizomeTemplate` inside fenced `rhizome` Markdown codeblocks                                            |
-| `codemirror/rhizome-editor-extension.ts` | —                 | CodeMirror 6 `ViewPlugin` and `hoverTooltip` to highlight Liquid + query DSL syntax and render inline diagnostic tooltips inside fenced `rhizome` codeblocks                  |
+| Adapter                                  | Implements   | Wraps                                                                                                                                                                         |
+| ---------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ObsidianLoggerAdapter`                  | `LoggerPort` | `Vault.adapter` (`DataAdapter`), writing segmented Markdown tables under `◊Rhizome/logs/<epoch>.md`                                                                           |
+| `vault-query-runner.ts`                  | —            | `App.vault` (`getMarkdownFiles`, `adapter.read` on `types.json`) and `App.metadataCache` (`getFileCache`, `getFirstLinkpathDest`) to run search queries against the vault     |
+| `active-query-roster.ts`                 | —            | `runVaultQuery` to maintain active reactive `plugin.query(..., onUpdate)` subscribers, deduplicate query strings across subscribers, and diff payload hashes on vault changes |
+| `rhizome-codeblock.ts`                   | —            | `MarkdownRenderer.render` and `MarkdownRenderChild` to execute `renderRhizomeTemplate` inside fenced `rhizome` Markdown codeblocks                                            |
+| `codemirror/rhizome-editor-extension.ts` | —            | CodeMirror 6 `ViewPlugin` and `hoverTooltip` to highlight Liquid + query DSL syntax and render inline diagnostic tooltips inside fenced `rhizome` codeblocks                  |
 
 ## Pure helpers
 
@@ -28,13 +27,7 @@ Logic split out of the adapters with zero `obsidian`/`dexie` import so it is
 unit-testable without mocking anything:
 
 - `logger-format.ts` — formatting/level-filtering for the logger adapter.
-- `persistence-db-name.ts` — derives the persistence database address
-  (`{pluginId}/{databaseId}/{vaultRootHash}`).
-- `database-identity.ts` — the identity record shape/validation, id
-  minting, and the bootstrap decision table.
-- `database-bootstrap.ts` — the identity-verified bootstrap sequence the
-  Dexie adapter runs lazily on first use.
-- `plugin-data-store.ts` — owns the `data.json` shape (settings plus
-  `vaultInstanceId`) and is the only caller of `Plugin.saveData`.
+- `plugin-data-store.ts` — owns the `data.json` shape (`settings`) and is
+  the only caller of `Plugin.saveData`.
 
 See `src/ports/README.md` for the design rationale.

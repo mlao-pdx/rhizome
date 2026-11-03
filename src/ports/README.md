@@ -17,16 +17,14 @@ implements that interface against the real Obsidian API or Dexie schema.
 
 ## Current ports
 
-| Port              | Wraps                                       | Notes                                                                                |
-| ----------------- | ------------------------------------------- | ------------------------------------------------------------------------------------ |
-| `PersistencePort` | Dexie/IndexedDB schema                      | Dexie is the project's chosen API layer over IndexedDB — nothing uses raw IndexedDB. |
-| `LoggerPort`      | vault-file writes for developer diagnostics | Opt-in, silent by default — see below.                                               |
+| Port         | Wraps                                       | Notes                                  |
+| ------------ | ------------------------------------------- | -------------------------------------- |
+| `LoggerPort` | vault-file writes for developer diagnostics | Opt-in, silent by default — see below. |
 
 ## Current adapters
 
 `src/adapters/` holds implementations, living outside `src/core`/`src/ports`
-per the rule below: `ObsidianLoggerAdapter` implements `LoggerPort`, and
-`DexiePersistenceAdapter` implements `PersistencePort`.
+per the rule below: `ObsidianLoggerAdapter` implements `LoggerPort`.
 
 ## `LoggerPort` design rationale
 

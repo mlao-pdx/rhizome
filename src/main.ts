@@ -1,16 +1,8 @@
-import {
-	type App,
-	type CachedMetadata,
-	FileSystemAdapter,
-	Plugin,
-	type TAbstractFile,
-	TFile,
-} from 'obsidian';
+import { type App, type CachedMetadata, Plugin, type TAbstractFile, TFile } from 'obsidian';
 import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
 import { isPathInTemplateFolders, type TemplateFolderConfig } from '@core/templates';
 import { ActiveQueryRoster } from './adapters/active-query-roster';
 import { createRhizomeEditorExtension } from './adapters/codemirror/rhizome-editor-extension';
-import { DexiePersistenceAdapter } from './adapters/dexie-persistence-adapter';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
 import { PluginDataStore } from './adapters/plugin-data-store';
 import { processRhizomeCodeBlock } from './adapters/rhizome-codeblock';
@@ -58,7 +50,6 @@ export default class RhizomePlugin extends Plugin {
 	declare settings: RhizomeSettings;
 	loggerAdapter!: ObsidianLoggerAdapter;
 	dataStore!: PluginDataStore;
-	persistence!: DexiePersistenceAdapter;
 	activeQueryRoster!: ActiveQueryRoster;
 
 	override async onload() {
@@ -85,25 +76,6 @@ export default class RhizomePlugin extends Plugin {
 			source: 'lifecycle',
 			version: this.manifest.version,
 		});
-
-		// 'cache' is this plugin's databaseId — part of the IndexedDB
-		// address and stable like manifest.id: renaming it orphans every
-		// user's existing database (docs/dev/indexeddb-database-identity.md).
-		// No I/O happens here: bootstrap is deferred until first use.
-		const vaultAdapter = this.app.vault.adapter;
-		if (!(vaultAdapter instanceof FileSystemAdapter)) {
-			// Cannot happen: this plugin is desktop-only
-			// (`manifest.json` sets `isDesktopOnly: true`).
-			throw new Error('Expected a FileSystemAdapter vault adapter');
-		}
-		this.persistence = new DexiePersistenceAdapter(
-			this.manifest.id,
-			'cache',
-			vaultAdapter.getBasePath(),
-			() => this.dataStore.ensureVaultInstanceId(),
-			this.loggerAdapter,
-		);
-		this.register(() => this.persistence.close());
 
 		this.activeQueryRoster = new ActiveQueryRoster(this.app, this.loggerAdapter);
 		this.register(() => this.activeQueryRoster.clear());
