@@ -149,6 +149,8 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
 ## Where to look next
 
 - Design principles: `docs/principles.md`.
+- Language development principles (query and template languages):
+  `docs/language-principles.md`.
 - Example file structure, common task code snippets, UI copy/UX
   guidelines: `obsidian-plugin-patterns` skill.
 - Diagnostic logging contract for routines (`LoggerPort`, mandatory vs
