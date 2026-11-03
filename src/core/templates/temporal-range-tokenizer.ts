@@ -429,7 +429,7 @@ export function installTemporalTokenizerExtensions(): void {
 
 	const tokenizerProto = Tokenizer.prototype as unknown as {
 		readIdentifier: (this: Tokenizer) => ReturnType<Tokenizer['readIdentifier']>;
-		readRange: (this: Tokenizer) => ReturnType<Tokenizer['readRange']>;
+		readGroupOrRange: (this: Tokenizer) => ReturnType<Tokenizer['readGroupOrRange']>;
 		readValue: (this: Tokenizer) => ReturnType<Tokenizer['readValue']>;
 	};
 
@@ -454,7 +454,7 @@ export function installTemporalTokenizerExtensions(): void {
 
 	const origReadValue = tokenizerProto.readValue;
 
-	tokenizerProto.readRange = function (this: Tokenizer) {
+	tokenizerProto.readGroupOrRange = function (this: Tokenizer) {
 		this.skipBlank();
 		const begin = this.p;
 		if (this.peek() !== '(') return undefined;
@@ -484,7 +484,7 @@ export function installTemporalTokenizerExtensions(): void {
 				rhs!,
 				this.file,
 				true,
-			) as unknown as ReturnType<Tokenizer['readRange']>;
+			) as unknown as ReturnType<Tokenizer['readGroupOrRange']>;
 		}
 
 		const subTokenizer = new Tokenizer(this.input, {}, this.file, [begin + 1, closeParenIdx]);
@@ -507,7 +507,7 @@ export function installTemporalTokenizerExtensions(): void {
 			this.p,
 			filteredValueToken,
 			this.file,
-		) as unknown as ReturnType<Tokenizer['readRange']>;
+		) as unknown as ReturnType<Tokenizer['readGroupOrRange']>;
 	};
 
 	tokenizerProto.readValue = function (this: Tokenizer) {

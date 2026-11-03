@@ -271,7 +271,10 @@ export function createVaultLiquidFs(
 		resolve(dir: string, file: string, ext: string): string {
 			return normalizeRelativeFilePath(dir, file, ext);
 		},
-		contains(root: string, file: string): boolean {
+		contains(root: string, file: string): Promise<boolean> {
+			return Promise.resolve(isContainedInVaultFolder(root, file, folders.configDir));
+		},
+		containsSync(root: string, file: string): boolean {
 			return isContainedInVaultFolder(root, file, folders.configDir);
 		},
 		async exists(filepath: string): Promise<boolean> {

@@ -2,7 +2,7 @@ import esbuild from 'esbuild';
 import process from 'process';
 import path from 'node:path';
 import { builtinModules } from 'node:module';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { generateRailroadDocs } from './scripts/generate-railroad.mjs';
 
@@ -110,12 +110,14 @@ const context = await esbuild.context({
 	},
 	treeShaking: true,
 	outfile: 'main.js',
+	metafile: true,
 	minify: prod,
 	plugins: [railroadDocsPlugin, reloadPlugin],
 });
 
 if (prod) {
-	await context.rebuild();
+	const result = await context.rebuild();
+	writeFileSync('meta.json', JSON.stringify(result.metafile, null, 2));
 	process.exit(0);
 } else {
 	await context.watch();

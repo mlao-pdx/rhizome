@@ -3,9 +3,9 @@
 An index and template engine for Obsidian.
 
 Built on a hexagon architecture: `src/core` (pure domain logic) and
-`src/ports` (technology-agnostic interfaces) never import `obsidian` or
-`dexie` at runtime; `src/adapters` implements those ports against the real
-Obsidian API and Dexie. Rhizome retains Vitest (unit + property/fast-check
+`src/ports` (technology-agnostic interfaces) never import `obsidian` at
+runtime; `src/adapters` implements those ports against the real Obsidian API
+and browser IndexedDB. Rhizome retains Vitest (unit + property/fast-check
 tiers), Prettier, ESLint (including the boundary rule enforcing the
 hexagon), esbuild, `__DEV__`-gated dev-only code, Husky git hooks, license
 auditing, and the TSDoc `@remarks` convention.
@@ -82,7 +82,7 @@ Lint runs on [ESLint](https://eslint.org/); config lives in
 - `eslint-config-prettier` disables stylistic rules that Prettier owns —
   don't fight Prettier formatting via ESLint; run `npm run format` instead.
 - `src/core/**` and `src/ports/**` have a project-specific
-  `no-restricted-imports` rule banning `obsidian`/`dexie` imports (see
+  `no-restricted-imports` rule banning `obsidian` imports (see
   `src/core/README.md` for the architectural rationale). This is the one
   rule an LLM contributor must never suppress with `eslint-disable` —
   fix the import boundary instead.

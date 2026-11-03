@@ -25,6 +25,8 @@ jobs:
         run: |
           npm ci
           npm run build
+          npm run check:licenses
+          npm run audit:bundle
 
       - name: Check for optional styles
         id: styles

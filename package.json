@@ -29,7 +29,9 @@
     "test:properties": "vitest run --config vitest.properties.config.ts",
     "test:properties:watch": "vitest --config vitest.properties.config.ts",
     "test:promote": "node scripts/promote-fast-check.mjs",
-    "check:licenses": "node scripts/check-licenses.mjs"
+    "check:licenses": "node scripts/check-licenses.mjs",
+    "audit:bundle": "node scripts/audit-bundle.mjs",
+    "preversion": "npm run build && npm run lint && npm run check:licenses && npm test && npm run audit:bundle"
   },
   "keywords": [
     "obsidian",
@@ -42,33 +44,32 @@
     "*.{ts,tsx,js,mjs,mts,cts,json,md,yml,yaml,css}": "prettier --write"
   },
   "devDependencies": {
-    "@codemirror/state": "6.7.6",
-    "@codemirror/view": "6.43.13",
-    "@eslint/js": "9.39.4",
-    "@types/node": "22.19.17",
-    "@vitest/coverage-v8": "4.1.10",
-    "esbuild": "0.25.5",
-    "eslint": "9.39.4",
-    "eslint-config-prettier": "10.1.8",
-    "eslint-plugin-obsidianmd": "0.1.8",
-    "eslint-plugin-tsdoc": "0.5.2",
-    "fake-indexeddb": "6.2.5",
-    "fast-check": "4.9.0",
-    "globals": "17.6.0",
-    "husky": "9.1.7",
-    "jiti": "2.7.0",
-    "license-checker-rseidelsohn": "5.0.1",
-    "lint-staged": "17.3.0",
-    "obsidian": "1.14.4",
-    "prettier": "3.9.6",
-    "typescript": "5.9.3",
-    "typescript-eslint": "8.59.2",
-    "vitest": "4.1.10"
+    "@codemirror/state": "^6.7.6",
+    "@codemirror/view": "^6.43.13",
+    "@eslint/js": "^9.39.4",
+    "@types/node": "^22.19.17",
+    "@vitest/coverage-v8": "^4.1.10",
+    "esbuild": "^0.25.5",
+    "eslint": "^9.39.4",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-obsidianmd": "^0.4.2",
+    "eslint-plugin-tsdoc": "^0.5.2",
+    "fake-indexeddb": "^6.2.5",
+    "fast-check": "^4.9.0",
+    "globals": "^17.6.0",
+    "husky": "^9.1.7",
+    "jiti": "^2.7.0",
+    "license-checker-rseidelsohn": "^5.0.1",
+    "lint-staged": "^17.3.0",
+    "obsidian": "^1.14.4",
+    "prettier": "^3.9.6",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.59.2",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
     "@js-temporal/polyfill": "0.5.1",
     "chevrotain": "13.2.0",
-    "dexie": "4.4.4",
-    "liquidjs": "10.24.0"
+    "liquidjs": "10.30.1"
   }
 }

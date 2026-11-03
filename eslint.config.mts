@@ -20,6 +20,7 @@ export default defineConfig(
 		'scripts/promote-fast-check.mjs',
 		'scripts/check-licenses.mjs',
 		'scripts/generate-railroad.mjs',
+		'scripts/audit-bundle.mjs',
 	]),
 	{
 		languageOptions: {
@@ -53,6 +54,7 @@ export default defineConfig(
 		files: ['tests/**/*.ts', 'vitest.config.ts', 'vitest.properties.config.ts'],
 		rules: {
 			'import/no-nodejs-modules': 'off',
+			'obsidianmd/no-nodejs-modules': 'off',
 		},
 	},
 	{
@@ -78,11 +80,6 @@ export default defineConfig(
 							message:
 								'src/core and src/ports must not import obsidian at runtime — depend on a @ports/* interface instead.',
 						},
-						{
-							group: ['dexie', 'dexie/*'],
-							message:
-								'src/core and src/ports must not import dexie at runtime — depend on a @ports/* interface instead.',
-						},
 					],
 				},
 			],
@@ -91,7 +88,7 @@ export default defineConfig(
 	{
 		// `fake-indexeddb` is a test-only shim. It must never reach a
 		// production path: the adapter gets IndexedDB from the ambient
-		// globals (or an injected `IDBFactory` via `DexieOptions`), and the
+		// globals (or an injected `IDBFactory`), and the
 		// shim is wired in only from `tests/`. Separate block from the
 		// hexagon rule above because its scope is all of `src/**`, not just
 		// core/ports.
@@ -104,7 +101,7 @@ export default defineConfig(
 						{
 							group: ['fake-indexeddb', 'fake-indexeddb/*'],
 							message:
-								'fake-indexeddb is a test-only shim — production code must use the ambient IndexedDB (injected via DexieOptions), never the fake.',
+								'fake-indexeddb is a test-only shim — production code must use the ambient IndexedDB (or an injected IDBFactory), never the fake.',
 						},
 					],
 				},

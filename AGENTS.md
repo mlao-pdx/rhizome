@@ -56,17 +56,28 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
   - **Minimize dependencies:** Prefer implementing small utilities in-house
     over adding third-party packages. Keep the dependency graph shallow,
     especially for runtime `dependencies` bundled into `main.js`.
-  - **Pin exact versions and commit the lockfile:** All `dependencies` and
-    `devDependencies` in `package.json` must be pinned to exact `x.y.z`
-    versions (`save-exact=true` in `.npmrc`; no `^`, `~`, or range
-    specifiers). `package-lock.json` is committed and authoritative
-    (`npm ci`).
+  - **Pin exact production versions and commit the lockfile:** Never put
+    `save-exact=true` in `.npmrc`. Pin all runtime `dependencies` in
+    `package.json` to exact `x.y.z` versions (no `^`, `~`, or range
+    specifiers; install/upgrade with `npm install --save-exact <pkg>@<version>`).
+    Use `^` carets on `devDependencies` (`~` on `typescript`) so
+    `npm audit fix` (without `--force`) can apply non-breaking security
+    patches, and keep `@types/node` on `@types/node@^22`. `package-lock.json`
+    is committed and authoritative (`npm ci`).
+  - **`npm audit` and bundle reachability (`audit:bundle`):** Never run
+    `npm audit fix --force`, never delete `package-lock.json` or
+    `node_modules/` to clear errors, and never add `overrides` to
+    `package.json` without explicit user approval. Always run
+    `npm run build && npm run audit:bundle` (which cross-references
+    `npm audit --json` against esbuild's `meta.json`) to verify whether an
+    advisory actually reaches `main.js` before acting on it.
   - **Upgrade slowly and deliberately:** Do not rush to newly published
     package versions; allow a buffer window for the ecosystem to surface
     regressions or supply-chain compromises. Treat every upgrade like
     adding a new dependency: review the changelog and sub-dependency diff,
-    run `npm run check:licenses` and the test suite, and update
-    `THIRD-PARTY-NOTICES.md` if a production dependency changed.
+    run `npm run check:licenses`, `npm run audit:bundle`, and the test
+    suite, and update `THIRD-PARTY-NOTICES.md` if a production dependency
+    changed.
 
 ## Performance
 
@@ -89,8 +100,10 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
 - Use `this.register*` helpers for everything that needs cleanup.
 - Never change `manifest.json`'s `id` after release; treat it as a stable
   API.
-- Pin exact package versions in `package.json` (`save-exact=true`) and run
-  `npm run check:licenses` after adding or upgrading any dependency.
+- Pin exact runtime `dependencies` versions in `package.json` (`--save-exact`),
+  keep `^` ranges (`~` for `typescript`) on `devDependencies`, and run
+  `npm run check:licenses` and `npm run audit:bundle` after adding or
+  upgrading any dependency.
 
 **Don't**
 
@@ -103,9 +116,10 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
   never ships default hotkeys — binding any key is entirely the user's
   prerogative, configured by them in Obsidian's Hotkeys settings.
 - Add third-party packages for trivial utilities that can be written
-  in-house, use semver range prefixes (`^`, `~`) in `package.json`, or
-  upgrade/downgrade dependencies opportunistically (including via
-  `npm audit fix --force`) without explicit user request and review.
+  in-house, use semver range prefixes (`^`, `~`) on production `dependencies`
+  in `package.json`, put `save-exact=true` in `.npmrc`, or upgrade/downgrade
+  dependencies opportunistically (including via `npm audit fix --force`)
+  without explicit user request and review.
 
 ## Git workflow
 

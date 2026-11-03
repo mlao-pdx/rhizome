@@ -1,12 +1,12 @@
 # `src/adapters/`
 
 Adapter implementations of the interfaces declared in `src/ports/`. This is
-where `obsidian` and `dexie` runtime imports are allowed — the
+where `obsidian` runtime imports and browser `indexedDB` access are allowed — the
 `no-restricted-imports` override in `eslint.config.mts` only targets
 `src/core/**` and `src/ports/**` (see `src/core/README.md`#enforcement,
 `src/ports/README.md`). The inverse guard lives there too:
-`fake-indexeddb` is banned under `src/**` — the test shim reaches Dexie
-only through the `DexieOptions` injection point, wired in from `tests/`.
+`fake-indexeddb` is banned under `src/**` — the test shim reaches the adapter
+only through an `IDBFactory` injection point, wired in from `tests/`.
 
 See `docs/dev/tsdoc-conventions.md` for the doc-comment format (`@see`/
 `@remarks`) used throughout this directory.
@@ -23,7 +23,7 @@ See `docs/dev/tsdoc-conventions.md` for the doc-comment format (`@see`/
 
 ## Pure helpers
 
-Logic split out of the adapters with zero `obsidian`/`dexie` import so it is
+Logic split out of the adapters with zero `obsidian` import so it is
 unit-testable without mocking anything:
 
 - `logger-format.ts` — formatting/level-filtering for the logger adapter.
