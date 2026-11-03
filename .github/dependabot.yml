@@ -1,0 +1,16 @@
+# Dependabot configuration for Rhizome.
+# - Routine version-update PRs are disabled (open-pull-requests-limit: 0) per
+#   AGENTS.md's "Upgrade slowly and deliberately" policy and exact production
+#   dependency pinning.
+# - Development dependencies (devDependencies) are ignored so dev-only tooling
+#   never triggers automated Dependabot PR noise.
+version: 2
+updates:
+  - package-ecosystem: 'npm'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+    open-pull-requests-limit: 0
+    ignore:
+      - dependency-name: '*'
+        dependency-type: 'development'

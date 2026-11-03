@@ -58,3 +58,24 @@ Steps:
    failing audit blocks CI and releases. Run them locally after adding or
    upgrading a dependency so any missing notices or bundle advisories are
    resolved before you commit.
+8. **Triage non-critical dev-dependency alerts in GitHub / Dependabot:**
+   When `npm run audit:bundle` passes with non-critical dev/unbundled
+   advisories, check or remind the user about GitHub Dependabot alerts
+   (never run `npm audit fix --force` to silence dev-only advisories):
+   - **One-time manual GitHub UI setting (remind user if red/yellow alerts
+     appear on GitHub or `git push`):**
+     `https://github.com/mlao-pdx/rhizome/settings/security_analysis` →
+     **Dependabot rules** → enable **"Dismiss low impact issues for
+     development-scoped dependencies"**.
+   - **Automated CLI dismissal of existing open dev-scoped non-critical
+     alerts (via `gh api`):**
+     ```sh
+     gh api --paginate /repos/mlao-pdx/rhizome/dependabot/alerts \
+       --jq '.[] | select(.state == "open" and .dependency.scope == "development" and .security_advisory.severity != "critical") | .number' \
+       | while read -r num; do
+           gh api --method PATCH "/repos/mlao-pdx/rhizome/dependabot/alerts/$num" \
+             -f state='dismissed' \
+             -f dismissed_reason='tolerable_risk' \
+             -f dismissed_comment='Dev-only dependency; not bundled into main.js (verified by npm run audit:bundle).'
+         done
+     ```

@@ -71,6 +71,18 @@ Follow Obsidian's Developer Policies and Plugin Guidelines. In particular:
     `npm run build && npm run audit:bundle` (which cross-references
     `npm audit --json` against esbuild's `meta.json`) to verify whether an
     advisory actually reaches `main.js` before acting on it.
+    `.github/dependabot.yml` disables routine version-bump PRs
+    (`open-pull-requests-limit: 0`) and ignores `dependency-type:
+'development'`. If `npm run audit:bundle` passes (0 vulnerabilities in
+    `main.js` and 0 `critical` dev vulnerabilities) but `npm audit`,
+    `git push`, or GitHub's Security tab still reports non-critical
+    `development`-scoped Dependabot alerts, do not run `npm audit fix --force`
+    or downgrade packages; instead, alert the user to: (1) ensure the
+    one-time GitHub repository setting **Settings → Code security →
+    Dependabot rules → "Dismiss low impact issues for development-scoped
+    dependencies"** is enabled, and/or (2) dismiss existing open
+    `development`-scoped non-critical alerts via `gh api` (see
+    `.kilo/command/audit-licenses.md`).
   - **Upgrade slowly and deliberately:** Do not rush to newly published
     package versions; allow a buffer window for the ecosystem to surface
     regressions or supply-chain compromises. Treat every upgrade like
