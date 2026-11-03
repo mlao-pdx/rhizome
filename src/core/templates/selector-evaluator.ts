@@ -38,6 +38,18 @@ export interface LiquidFilterThis {
 
 const NON_NEGATIVE_INT_SEGMENT_RE = /^(?:0|[1-9]\d*)$/;
 const NUMERIC_OR_LITERAL_ARG_RE = /^(?:[+-]?\d+(?:\.\d+)?|true|false|nil|null)$/i;
+const MULTI_ARG_FILTER_MAX_EXTRA_COMMAS: Readonly<Record<string, number>> = Object.freeze({
+	slice: 1,
+	replace: 1,
+	replace_first: 1,
+	replace_last: 1,
+	truncate: 1,
+	truncatewords: 1,
+	date: 1,
+	date_to_string: 1,
+	date_to_long_string: 1,
+	default: 1,
+});
 
 /**
  * Returns `true` when `val` (after `unwrapLiquidValue`) is a non-null plain object
@@ -239,6 +251,8 @@ export function splitTopLevelSelectorList(raw: string): string[] {
 	let escaped = false;
 	let parenDepth = 0;
 	let inFilterWithColon = false;
+	let currentFilterName = '';
+	let filterArgCommasSeen = 0;
 	let start = 0;
 
 	for (let i = 0; i < raw.length; i++) {
@@ -268,10 +282,15 @@ export function splitTopLevelSelectorList(raw: string): string[] {
 		if (parenDepth === 0) {
 			if (ch === '|') {
 				inFilterWithColon = false;
+				filterArgCommasSeen = 0;
+				const afterPipe = raw.slice(i + 1).trimStart();
+				const nameMatch = /^([a-zA-Z_][a-zA-Z0-9_]*)/.exec(afterPipe);
+				currentFilterName = nameMatch ? (nameMatch[1] ?? '').toLowerCase() : '';
 				continue;
 			}
 			if (ch === ':') {
 				inFilterWithColon = true;
+				filterArgCommasSeen = 0;
 				continue;
 			}
 			if (ch === ',') {
@@ -288,16 +307,29 @@ export function splitTopLevelSelectorList(raw: string): string[] {
 						boundIdx = nextPipeIdx;
 					}
 					const nextChunk = (boundIdx === -1 ? rest : rest.slice(0, boundIdx)).trim();
+					const hasNextPipe =
+						nextPipeIdx !== -1 && (nextCommaIdx === -1 || nextPipeIdx < nextCommaIdx);
+					const hasTrailingAsOrDir =
+						splitTrailingAsClause(nextChunk).targetPath !== null ||
+						/\s+(?:asc|ascending|desc|descending)$/i.test(nextChunk);
 					const withoutAs = splitTrailingAsClause(nextChunk).leftPart;
-					const StripDirChunk = withoutAs.replace(
+					const stripDirChunk = withoutAs.replace(
 						/\s+(?:asc|ascending|desc|descending)$/i,
 						'',
 					);
+					const maxExtraCommas =
+						MULTI_ARG_FILTER_MAX_EXTRA_COMMAS[currentFilterName] ?? 0;
+					const isMultiArgContinuation =
+						filterArgCommasSeen < maxExtraCommas &&
+						(!hasNextPipe || boundIdx === -1) &&
+						!hasTrailingAsOrDir;
 					if (
-						StripDirChunk.startsWith('"') ||
-						StripDirChunk.startsWith("'") ||
-						NUMERIC_OR_LITERAL_ARG_RE.test(StripDirChunk)
+						stripDirChunk.startsWith('"') ||
+						stripDirChunk.startsWith("'") ||
+						NUMERIC_OR_LITERAL_ARG_RE.test(stripDirChunk) ||
+						isMultiArgContinuation
 					) {
+						filterArgCommasSeen++;
 						continue;
 					}
 				}
@@ -307,6 +339,8 @@ export function splitTopLevelSelectorList(raw: string): string[] {
 				}
 				start = i + 1;
 				inFilterWithColon = false;
+				currentFilterName = '';
+				filterArgCommasSeen = 0;
 			}
 		}
 	}
@@ -320,7 +354,7 @@ export function splitTopLevelSelectorList(raw: string): string[] {
 
 /**
  * Parses variadic filter arguments for `pick` and `aggregate` (`agg`), supporting:
- * - String selectors: `"file.basename"`, `"properties.status as state"`, `"file.size | divided_by: 1024 as meta.kb"`
+ * - String selectors (including comma-separated selector lists): `"file.basename"`, `"properties.status as state"`, `"file.size | divided_by: 1024 as meta.kb"`
  * - Array arguments containing string selectors (e.g., `pick: keys_array`)
  * - LiquidJS named-argument `[alias, path]` 2-tuples when `alias` is a valid target path
  */
@@ -330,8 +364,10 @@ export function parsePickOrAggSelectors(args: readonly unknown[]): ParsedPathSel
 	const visitArg = (arg: unknown, allowNamedTuple: boolean): void => {
 		const u = unwrapLiquidValue(arg);
 		if (typeof u === 'string') {
-			const parsed = parseSingleSelectorString(u);
-			if (parsed) selectors.push(parsed);
+			for (const piece of splitTopLevelSelectorList(u)) {
+				const parsed = parseSingleSelectorString(piece);
+				if (parsed) selectors.push(parsed);
+			}
 			return;
 		}
 		if (Array.isArray(u)) {
@@ -466,8 +502,11 @@ export function evaluateSelectorOnItem(
 
 	const unwrappedItem = unwrapLiquidValue(item);
 	const scopeFrame = isPlainRecord(unwrappedItem) ? unwrappedItem : { item: unwrappedItem };
+	const ctxInternal = ctx as unknown as { sync?: boolean | undefined };
+	const prevSync = ctxInternal.sync;
 
 	ctx.push(scopeFrame);
+	ctxInternal.sync = true;
 	try {
 		let current: unknown = rawVal;
 		for (const token of filterTokens) {
@@ -485,6 +524,7 @@ export function evaluateSelectorOnItem(
 		const finalVal = unwrapLiquidValue(current);
 		return finalVal === undefined ? null : finalVal;
 	} finally {
+		ctxInternal.sync = prevSync;
 		ctx.pop();
 	}
 }

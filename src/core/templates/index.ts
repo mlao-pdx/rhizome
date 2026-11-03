@@ -7,6 +7,7 @@ export * from './temporal-liquid-extensions';
 export * from './selector-evaluator';
 export * from './payload-filters';
 export * from './aggregate-filter';
+export * from './group-by-filter';
 export * from './sort-group-filters';
 export * from './collection-filters';
 export * from './template-context';

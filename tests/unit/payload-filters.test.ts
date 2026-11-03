@@ -614,6 +614,20 @@ describe('Payload-Shaping & Aggregation Filters (pick, prune, merge, aggregate/a
 					empty: 'filled',
 				},
 			});
+
+			// Comma-separated selector list in pick & unquoted variable args in multi-arg filters (replace)
+			const commaAndMultiArgPicked = pickFilter(
+				{
+					file: { path: 'Projects/Alpha.md', parent: 'Projects/', basename: 'Alpha' },
+					properties: { status: 'open' },
+				},
+				"file.path | replace: file.parent, '' as relPath, file.basename as title, properties.status",
+			);
+			expect(commaAndMultiArgPicked).toEqual({
+				relPath: 'Alpha.md',
+				title: 'Alpha',
+				status: 'open',
+			});
 		});
 
 		it('supports aggregate (agg) with inline filter pipelines on selectors', () => {
@@ -730,9 +744,17 @@ describe('Payload-Shaping & Aggregation Filters (pick, prune, merge, aggregate/a
 			// Code-point tie-breaker when collator returns 0 on single-key sort_natural
 			expect(sortNaturalFilter(['alpha', 'Alpha'])).toEqual(['Alpha', 'alpha']);
 
-			// Verify language context propagation in template engine for sort_natural
+			// Numeric strings (including 4-digit strings like "1024") sort numerically alongside numbers
+			expect(sortFilter(['20000', '500', '1024', '20'])).toEqual([
+				'20',
+				'500',
+				'1024',
+				'20000',
+			]);
+
+			// Verify language context propagation in template engine for sort_natural (and unshadowable when assigning language)
 			const tplRes = await renderRhizomeTemplate(
-				'{%- query words -%}tag:word{%- endquery -%}{{ query.words | map: "w" | sort_natural | join: "," }}',
+				'{%- query words -%}tag:word{%- endquery -%}{% assign language = "invalid-shadow" %}{{ query.words | map: "w" | sort_natural | join: "," }}',
 				{
 					runQueries: async () => ({
 						words: [{ w: 'Note 10' }, { w: 'Note 2' }, { w: 'Éclair' }],
@@ -818,6 +840,14 @@ describe('Payload-Shaping & Aggregation Filters (pick, prune, merge, aggregate/a
 			const minuteGroups = groupByFilter(minuteDocs, 'at');
 			expect(minuteGroups).toHaveLength(1);
 			expect(String(minuteGroups[0]?.name)).toBe('2026-10-15T08:00..2026-10-15T10:00');
+
+			// 5. Numeric string series ("500", "1024", "20000") keeps 4-digit "1024" as a string instead of a TemporalDrop year
+			const numericStringGroups = groupByFilter(
+				[{ code: '500' }, { code: '1024' }, { code: '20000' }],
+				'code',
+			);
+			expect(numericStringGroups.map((g) => g.name)).toEqual(['500', '1024', '20000']);
+			expect(numericStringGroups[1]?.name).not.toBeInstanceOf(TemporalDrop);
 		});
 
 		it('compares explicit-offset and naïve timestamps in UTC using runtimeContext.timeZone in templates', async () => {

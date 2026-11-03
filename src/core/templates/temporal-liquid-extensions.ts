@@ -54,11 +54,12 @@ export function readContextLiquidInstance(ctx: Context | undefined): Liquid | un
 }
 
 /**
- * Pinned temporal evaluation metadata attached to the root template context.
+ * Pinned temporal and locale evaluation metadata attached to the root template context.
  */
 export interface TemporalContextMeta {
 	readonly timeZone: string;
 	readonly referenceTimeMs: number;
+	readonly language?: string | undefined;
 }
 
 /**

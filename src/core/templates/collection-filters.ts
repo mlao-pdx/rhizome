@@ -47,6 +47,7 @@ function coerceStringOrDropToDateInterval(
 	allowEpochNumber: boolean,
 	timeZone: string,
 	referenceTimeMs: number,
+	allowBareYearString = true,
 ): DateInterval | null {
 	const u = unwrapLiquidValue(val);
 	if (u instanceof TemporalDrop) {
@@ -55,7 +56,7 @@ function coerceStringOrDropToDateInterval(
 	if (allowEpochNumber && typeof u === 'number') {
 		return coerceOperandToDateInterval(u, timeZone, referenceTimeMs);
 	}
-	const drop = coerceToTemporalGroupDrop(u, timeZone, referenceTimeMs);
+	const drop = coerceToTemporalGroupDrop(u, timeZone, referenceTimeMs, allowBareYearString);
 	return drop ? drop.toDateInterval() : null;
 }
 
@@ -99,6 +100,7 @@ function prepareWhereTarget(
 				uExpected instanceof TemporalDrop,
 				timeZone,
 				referenceTimeMs,
+				true,
 			);
 	const canonicalKey = isVacuous
 		? 'v:null'
@@ -142,6 +144,7 @@ function matchesPreparedWhereTarget(actualVal: unknown, target: PreparedWhereTar
 					true,
 					target.timeZone,
 					target.referenceTimeMs,
+					true,
 				)
 			: null);
 	if (intExpected !== null) {
@@ -150,6 +153,7 @@ function matchesPreparedWhereTarget(actualVal: unknown, target: PreparedWhereTar
 			typeof target.uExpected !== 'number',
 			target.timeZone,
 			target.referenceTimeMs,
+			true,
 		);
 		if (intActual) {
 			return (

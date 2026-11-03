@@ -1,12 +1,12 @@
-import {
-	compareDateIntervals,
-	type DateInterval,
-	FORBIDDEN_KEYS,
-	isVacuousOccurrence,
-	parseSingleTemporalAtom,
-	parseTemporalExpr,
-} from '@core/search';
+import { FORBIDDEN_KEYS } from '@core/search';
 import type { Context } from 'liquidjs';
+import {
+	canonicalRhizomeValueKey,
+	coerceToTemporalGroupDrop,
+	type GroupByBucket,
+	groupByFilter,
+	isVacuousSortOrGroupValue,
+} from './group-by-filter';
 import {
 	evaluateSelectorOnItem,
 	isPlainRecord,
@@ -17,15 +17,23 @@ import {
 } from './selector-evaluator';
 import {
 	type DisplayGrain,
-	finestDisplayGrain,
-	normalizeRelativeTemporalString,
 	parseFiniteRangeNumber,
 	readContextTemporalMeta,
 	resolveDefaultSystemTimeZone,
 	resolveValidTimeZone,
+	TEMPORAL_CONTEXT_META_SYMBOL,
+	type TemporalContextMeta,
 	TemporalDrop,
 	unwrapLiquidValue,
 } from './temporal-drop';
+
+export {
+	canonicalRhizomeValueKey,
+	coerceToTemporalGroupDrop,
+	type GroupByBucket,
+	groupByFilter,
+	isVacuousSortOrGroupValue,
+};
 
 /**
  * Sort direction for a single selector in `sort` or `sort_natural`.
@@ -39,16 +47,6 @@ export interface ParsedSortSelector {
 	readonly segments: readonly string[];
 	readonly filterRaw: string | null;
 	readonly direction: SortDirection;
-}
-
-/**
- * Output bucket entry returned by `group_by`.
- */
-export interface GroupByBucket {
-	readonly name: unknown;
-	readonly items: unknown[];
-	readonly size: number;
-	readonly groups?: GroupByBucket[];
 }
 
 const GRAIN_ORDER: Readonly<Record<DisplayGrain, number>> = Object.freeze({
@@ -90,10 +88,30 @@ export function getNaturalSortCollator(language: string): Intl.Collator {
 }
 
 /**
- * Reads the active `language` tag from a LiquidJS `Context`, defaulting to `'en'`.
+ * Reads the active `language` tag from a LiquidJS `Context`, preferring the unshadowable
+ * `TEMPORAL_CONTEXT_META_SYMBOL` on `ctx.globals` or `ctx.environments` so item properties
+ * or `{% assign language = ... %}` cannot corrupt natural collation, defaulting to `'en'`.
  */
 export function readContextLanguage(ctx: Context | undefined): string {
 	if (!ctx) return 'en';
+	const ctxInternal = ctx as unknown as {
+		globals?: Record<PropertyKey, unknown>;
+		environments?: Record<PropertyKey, unknown>;
+	};
+	const fromGlobals = ctxInternal.globals?.[TEMPORAL_CONTEXT_META_SYMBOL] as
+		TemporalContextMeta | undefined;
+	if (
+		fromGlobals &&
+		typeof fromGlobals.language === 'string' &&
+		fromGlobals.language.trim().length > 0
+	) {
+		return fromGlobals.language.trim();
+	}
+	const fromEnvs = ctxInternal.environments?.[TEMPORAL_CONTEXT_META_SYMBOL] as
+		TemporalContextMeta | undefined;
+	if (fromEnvs && typeof fromEnvs.language === 'string' && fromEnvs.language.trim().length > 0) {
+		return fromEnvs.language.trim();
+	}
 	try {
 		const rawLang: unknown = ctx.getSync(['language']);
 		if (typeof rawLang === 'string' && rawLang.trim().length > 0) {
@@ -102,9 +120,12 @@ export function readContextLanguage(ctx: Context | undefined): string {
 	} catch {
 		// Fall back to globals or 'en'
 	}
-	const globals = (ctx as unknown as { globals?: Record<string, unknown> }).globals;
-	if (globals && typeof globals.language === 'string' && globals.language.trim().length > 0) {
-		return globals.language.trim();
+	if (
+		ctxInternal.globals &&
+		typeof ctxInternal.globals.language === 'string' &&
+		ctxInternal.globals.language.trim().length > 0
+	) {
+		return ctxInternal.globals.language.trim();
 	}
 	return 'en';
 }
@@ -203,32 +224,9 @@ export function parseSortSelectors(args: readonly unknown[]): ParsedSortSelector
 	return selectors;
 }
 
-/**
- * Returns `true` when `val` is vacuous for sorting and grouping (`null`, `undefined`, `""`,
- * an empty array or array of only vacuous elements, or an empty plain object `{}`).
- */
-export function isVacuousSortOrGroupValue(val: unknown): boolean {
-	const u = unwrapLiquidValue(val);
-	if (isVacuousOccurrence(u)) {
-		return true;
-	}
-	if (Array.isArray(u)) {
-		return u.every((el) => isVacuousSortOrGroupValue(el));
-	}
-	if (isPlainRecord(u)) {
-		for (const key of Object.keys(u)) {
-			if (!FORBIDDEN_KEYS.has(key)) {
-				return false;
-			}
-		}
-		return true;
-	}
-	return false;
-}
-
 type ClassifiedValue =
 	| { readonly rank: 1; readonly bool: number }
-	| { readonly rank: 2; readonly num: number }
+	| { readonly rank: 2; readonly num: number; readonly rawStr: string | null }
 	| {
 			readonly rank: 3;
 			readonly start: number;
@@ -252,7 +250,7 @@ function classifySortKeyValue(
 		return { rank: 1, bool: u ? 1 : 0 };
 	}
 	if (typeof u === 'number') {
-		return { rank: 2, num: Number.isFinite(u) ? (u === 0 ? 0 : u) : 0 };
+		return { rank: 2, num: Number.isFinite(u) ? (u === 0 ? 0 : u) : 0, rawStr: null };
 	}
 	if (u instanceof TemporalDrop) {
 		return {
@@ -263,7 +261,11 @@ function classifySortKeyValue(
 		};
 	}
 	if (typeof u === 'string') {
-		const temporalDrop = coerceToTemporalGroupDrop(u, timeZone, referenceTimeMs);
+		const numVal = parseFiniteRangeNumber(u);
+		if (numVal !== null) {
+			return { rank: 2, num: numVal === 0 ? 0 : numVal, rawStr: u };
+		}
+		const temporalDrop = coerceToTemporalGroupDrop(u, timeZone, referenceTimeMs, false);
 		if (temporalDrop) {
 			return {
 				rank: 3,
@@ -315,7 +317,13 @@ function comparePreclassifiedValues(
 		return ca.bool - cb.bool;
 	}
 	if (ca.rank === 2 && cb.rank === 2) {
-		return ca.num < cb.num ? -1 : ca.num > cb.num ? 1 : 0;
+		if (ca.num !== cb.num) return ca.num < cb.num ? -1 : 1;
+		if (useCodePointTieBreaker && ca.rawStr !== cb.rawStr) {
+			if (ca.rawStr === null) return -1;
+			if (cb.rawStr === null) return 1;
+			return ca.rawStr < cb.rawStr ? -1 : 1;
+		}
+		return 0;
 	}
 	if (ca.rank === 3 && cb.rank === 3) {
 		if (ca.start !== cb.start) return ca.start < cb.start ? -1 : 1;
@@ -501,382 +509,4 @@ export function sortNaturalFilter(
 	...args: unknown[]
 ): unknown[] {
 	return executeSort(this, input, args, true);
-}
-
-interface ParsedGroupSelector {
-	readonly segments: readonly string[];
-	readonly filterRaw: string | null;
-}
-
-function parseGroupBySelectors(args: readonly unknown[]): ParsedGroupSelector[] {
-	const selectors: ParsedGroupSelector[] = [];
-
-	const visitArg = (arg: unknown): void => {
-		const u = unwrapLiquidValue(arg);
-		if (typeof u === 'string') {
-			for (const piece of splitTopLevelSelectorList(u)) {
-				const trimmed = piece.trim();
-				if (trimmed === '.' || trimmed === 'this') {
-					selectors.push(Object.freeze({ segments: Object.freeze([]), filterRaw: null }));
-					continue;
-				}
-				const parsed = parseSingleSelectorString(trimmed);
-				if (parsed) {
-					selectors.push(
-						Object.freeze({
-							segments: parsed.segments,
-							filterRaw: parsed.filterRaw,
-						}),
-					);
-				}
-			}
-			return;
-		}
-		if (Array.isArray(u)) {
-			for (const item of u) {
-				visitArg(item);
-			}
-		}
-	};
-
-	for (const arg of args) {
-		visitArg(arg);
-	}
-	return selectors;
-}
-
-/**
- * Coerces a `TemporalDrop` or temporal string (including `left..right` range strings,
- * preserving the finest endpoint `DisplayGrain`) into a `TemporalDrop` normalized to UTC
- * epoch milliseconds using `timeZone` for naïve dates.
- */
-export function coerceToTemporalGroupDrop(
-	val: unknown,
-	timeZone: string,
-	referenceTimeMs: number,
-): TemporalDrop | null {
-	const u = unwrapLiquidValue(val);
-	if (u instanceof TemporalDrop) return u;
-	if (typeof u === 'string') {
-		const trimmed = u.trim();
-		if (trimmed.length === 0 || !/^[0-9@tTyYlLnN]/.test(trimmed)) return null;
-		// Keep pure non-4-digit decimal numbers as strings/numbers unless they are 4-digit years or ISO dates
-		if (parseFiniteRangeNumber(trimmed) !== null && !/^\d{4}$/.test(trimmed)) {
-			return null;
-		}
-		const normalized = normalizeRelativeTemporalString(trimmed);
-		const rangeParts = normalized.split('..');
-		if (rangeParts.length === 2) {
-			const leftRaw = rangeParts[0]?.trim() ?? '';
-			const rightRaw = rangeParts[1]?.trim() ?? '';
-			if (!leftRaw || !rightRaw) return null;
-			const parseOpts = {
-				allowYearOnly: true,
-				allowRelative: true,
-				timeZone,
-				referenceTimeMs,
-			};
-			const leftRes = parseSingleTemporalAtom(leftRaw, parseOpts);
-			if (!leftRes.ok) return null;
-			const rightRes = parseSingleTemporalAtom(rightRaw, parseOpts);
-			if (!rightRes.ok) return null;
-			const leftDrop = TemporalDrop.fromDateInterval(
-				leftRes.interval,
-				timeZone,
-				referenceTimeMs,
-			);
-			const rightDrop = TemporalDrop.fromDateInterval(
-				rightRes.interval,
-				timeZone,
-				referenceTimeMs,
-			);
-			if (leftDrop.start >= rightDrop.end) return null;
-			return new TemporalDrop({
-				start: leftDrop.start,
-				end: rightDrop.end,
-				grain: finestDisplayGrain(leftDrop.grain, rightDrop.grain),
-				isRange: true,
-				timeZone,
-				referenceTimeMs,
-				raw: trimmed,
-			});
-		}
-
-		const parsed = parseTemporalExpr(normalized, {
-			allowYearOnly: true,
-			allowRelative: true,
-			timeZone,
-			referenceTimeMs,
-		});
-		if (parsed.ok) {
-			return TemporalDrop.fromDateInterval(parsed.interval, timeZone, referenceTimeMs);
-		}
-	}
-	return null;
-}
-
-/**
- * Builds a deterministic structural key for value-based bucketing and `uniq` deduplication,
- * normalizing temporal values (explicit-offset ISO timestamps and naïve dates interpreted in
- * `timeZone`) to their UTC millisecond interval `[start, end)`.
- */
-export function canonicalRhizomeValueKey(
-	val: unknown,
-	timeZone: string,
-	referenceTimeMs: number,
-): string {
-	const u = unwrapLiquidValue(val);
-	if (isVacuousSortOrGroupValue(u)) return 'v:null';
-	if (typeof u === 'boolean') return `b:${u}`;
-	if (typeof u === 'number') return `n:${u === 0 ? 0 : u}`;
-	if (u instanceof TemporalDrop) {
-		return `t:${u.grain}:${u.start}:${u.end}`;
-	}
-	if (typeof u === 'string') {
-		const temporalDrop = coerceToTemporalGroupDrop(u, timeZone, referenceTimeMs);
-		if (temporalDrop) {
-			return `t:${temporalDrop.grain}:${temporalDrop.start}:${temporalDrop.end}`;
-		}
-		return `s:${u}`;
-	}
-	if (Array.isArray(u)) {
-		return `a:[${u.map((el) => canonicalRhizomeValueKey(el, timeZone, referenceTimeMs)).join(',')}]`;
-	}
-	if (isPlainRecord(u)) {
-		const keys = Object.keys(u)
-			.filter((k) => !FORBIDDEN_KEYS.has(k))
-			.sort();
-		const pairs = keys.map(
-			(k) =>
-				`${JSON.stringify(k)}:${canonicalRhizomeValueKey(u[k], timeZone, referenceTimeMs)}`,
-		);
-		return `o:{${pairs.join(',')}}`;
-	}
-	return `x:${typeof u}`;
-}
-
-interface IndexedEntry {
-	readonly item: unknown;
-	readonly index: number;
-}
-
-interface ActiveGroupBucket {
-	name: unknown;
-	entries: IndexedEntry[];
-	active: boolean;
-	subsumedInto: ActiveGroupBucket | null;
-	interval: DateInterval | null;
-}
-
-function resolveActiveBucket(bucket: ActiveGroupBucket): ActiveGroupBucket {
-	let curr = bucket;
-	while (curr.subsumedInto !== null) {
-		curr = curr.subsumedInto;
-	}
-	return curr;
-}
-
-function groupItemsAtLevel(
-	items: readonly unknown[],
-	selectors: readonly ParsedGroupSelector[],
-	selectorIndex: number,
-	filterThis: LiquidFilterThis | void,
-	timeZone: string,
-	referenceTimeMs: number,
-): GroupByBucket[] {
-	const selector = selectors[selectorIndex]!;
-	const bucketsInOrder: ActiveGroupBucket[] = [];
-	const temporalByGrain = new Map<DisplayGrain, ActiveGroupBucket[]>();
-	const exactTemporalMap = new Map<string, ActiveGroupBucket>();
-	const valueBucketsByKey = new Map<string, ActiveGroupBucket>();
-	let nullBucketEntries: IndexedEntry[] | null = null;
-
-	for (let i = 0; i < items.length; i++) {
-		const item = items[i];
-		const rawVal =
-			selector.segments.length === 0 && selector.filterRaw === null
-				? unwrapLiquidValue(item)
-				: evaluateSelectorOnItem(item, selector, filterThis);
-		const entry: IndexedEntry = { item, index: i };
-
-		if (isVacuousSortOrGroupValue(rawVal)) {
-			if (!nullBucketEntries) {
-				nullBucketEntries = [];
-			}
-			nullBucketEntries.push(entry);
-			continue;
-		}
-
-		const temporalDrop = coerceToTemporalGroupDrop(rawVal, timeZone, referenceTimeMs);
-		if (temporalDrop) {
-			const grain = temporalDrop.grain;
-			const exactKey = `${grain}:${temporalDrop.start}:${temporalDrop.end}`;
-			const exactHit = exactTemporalMap.get(exactKey);
-			if (exactHit) {
-				const target = resolveActiveBucket(exactHit);
-				target.entries.push(entry);
-				continue;
-			}
-
-			const candInterval = temporalDrop.toDateInterval();
-			let grainList = temporalByGrain.get(grain);
-			if (!grainList) {
-				grainList = [];
-				temporalByGrain.set(grain, grainList);
-			}
-
-			let matchedBucket: ActiveGroupBucket | null = null;
-			for (let b = 0; b < grainList.length; b++) {
-				const g = grainList[b]!;
-				if (!g.active || !g.interval) continue;
-
-				if (compareDateIntervals(candInterval, '=', g.interval)) {
-					// Candidate C is contained in existing bucket G_i (C <= G_i)
-					g.entries.push(entry);
-					exactTemporalMap.set(exactKey, g);
-					matchedBucket = g;
-					break;
-				}
-
-				if (compareDateIntervals(g.interval, '=', candInterval)) {
-					// Candidate C widens existing bucket G_i (G_i < C)
-					g.name = temporalDrop;
-					g.interval = candInterval;
-					g.entries.push(entry);
-					exactTemporalMap.set(exactKey, g);
-					matchedBucket = g;
-
-					// Sweep remaining active buckets at the same grain for subsumption into G_i
-					let mergedAny = false;
-					for (let j = 0; j < grainList.length; j++) {
-						const other = grainList[j]!;
-						if (other === g || !other.active || !other.interval) continue;
-						if (compareDateIntervals(other.interval, '=', candInterval)) {
-							other.active = false;
-							other.subsumedInto = g;
-							g.entries.push(...other.entries);
-							other.entries = [];
-							mergedAny = true;
-						}
-					}
-					if (mergedAny) {
-						g.entries.sort((x, y) => x.index - y.index);
-					}
-					break;
-				}
-			}
-
-			if (!matchedBucket) {
-				const freshBucket: ActiveGroupBucket = {
-					name: temporalDrop,
-					entries: [entry],
-					active: true,
-					subsumedInto: null,
-					interval: candInterval,
-				};
-				grainList.push(freshBucket);
-				bucketsInOrder.push(freshBucket);
-				exactTemporalMap.set(exactKey, freshBucket);
-			}
-			continue;
-		}
-
-		const valKey = canonicalRhizomeValueKey(rawVal, timeZone, referenceTimeMs);
-		let valBucket = valueBucketsByKey.get(valKey);
-		if (!valBucket) {
-			valBucket = {
-				name: unwrapLiquidValue(rawVal),
-				entries: [entry],
-				active: true,
-				subsumedInto: null,
-				interval: null,
-			};
-			valueBucketsByKey.set(valKey, valBucket);
-			bucketsInOrder.push(valBucket);
-		} else {
-			valBucket.entries.push(entry);
-		}
-	}
-
-	const hasNextLevel = selectorIndex + 1 < selectors.length;
-	const outputGroups: GroupByBucket[] = [];
-
-	for (const bucket of bucketsInOrder) {
-		if (!bucket.active) continue;
-		const bucketItems = bucket.entries.map((e) => e.item);
-		if (hasNextLevel) {
-			outputGroups.push({
-				name: bucket.name,
-				items: bucketItems,
-				size: bucketItems.length,
-				groups: groupItemsAtLevel(
-					bucketItems,
-					selectors,
-					selectorIndex + 1,
-					filterThis,
-					timeZone,
-					referenceTimeMs,
-				),
-			});
-		} else {
-			outputGroups.push({
-				name: bucket.name,
-				items: bucketItems,
-				size: bucketItems.length,
-			});
-		}
-	}
-
-	if (nullBucketEntries && nullBucketEntries.length > 0) {
-		const nullItems = nullBucketEntries.map((e) => e.item);
-		if (hasNextLevel) {
-			outputGroups.push({
-				name: null,
-				items: nullItems,
-				size: nullItems.length,
-				groups: groupItemsAtLevel(
-					nullItems,
-					selectors,
-					selectorIndex + 1,
-					filterThis,
-					timeZone,
-					referenceTimeMs,
-				),
-			});
-		} else {
-			outputGroups.push({
-				name: null,
-				items: nullItems,
-				size: nullItems.length,
-			});
-		}
-	}
-
-	return outputGroups;
-}
-
-/**
- * Liquid `group_by` filter: groups an array by one or more `<deep.path> [| <filterPipeline>]`
- * selectors in first-seen order (`name: null` bucket last), supporting hierarchical nested
- * `groups` (Option B), grain-partitioned bidirectional `=` temporal interval bucketing with
- * arrival-order-independent widening subsumption, and structural value bucketing.
- */
-export function groupByFilter(
-	this: LiquidFilterThis | void,
-	input: unknown,
-	...args: unknown[]
-): GroupByBucket[] {
-	const unwrapped = unwrapLiquidValue(input);
-	if (!Array.isArray(unwrapped)) {
-		return [];
-	}
-	const selectors = parseGroupBySelectors(args);
-	if (selectors.length === 0) {
-		return [];
-	}
-
-	const ctx = this && typeof this === 'object' && 'context' in this ? this.context : undefined;
-	const { timeZone, referenceTimeMs } = readContextTemporalMeta(ctx);
-
-	return groupItemsAtLevel(unwrapped, selectors, 0, this, timeZone, referenceTimeMs);
 }

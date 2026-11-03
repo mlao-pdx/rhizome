@@ -179,7 +179,7 @@ export function buildRhizomeTemplateContext(
 	};
 
 	Object.defineProperty(root, TEMPORAL_CONTEXT_META_SYMBOL, {
-		value: Object.freeze({ timeZone, referenceTimeMs }),
+		value: Object.freeze({ timeZone, referenceTimeMs, language }),
 		enumerable: false,
 		configurable: false,
 		writable: false,
