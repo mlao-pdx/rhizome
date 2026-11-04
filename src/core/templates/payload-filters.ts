@@ -27,7 +27,12 @@ import { groupByFilter, sortFilter, sortNaturalFilter } from './sort-group-filte
 import { tableFilter } from './table-filter';
 import {
 	attachLiquidInstanceToOptions,
+	dateToLongStringFilter,
+	dateToRfc822Filter,
+	dateToStringFilter,
+	dateToXmlschemaFilter,
 	parseFiniteRangeNumber,
+	rhizomeDateFilter,
 	unwrapLiquidValue,
 } from './temporal-drop';
 
@@ -268,6 +273,11 @@ const REMOVED_EXP_FILTERS: readonly string[] = Object.freeze([
 
 function seedFallbackFilters(): void {
 	const entries: readonly [string, (...args: unknown[]) => unknown][] = [
+		['date', rhizomeDateFilter],
+		['date_to_xmlschema', dateToXmlschemaFilter],
+		['date_to_rfc822', dateToRfc822Filter],
+		['date_to_string', dateToStringFilter],
+		['date_to_long_string', dateToLongStringFilter],
 		['pick', pickFilter],
 		['prune', pruneFilter],
 		['merge', mergeFilter],

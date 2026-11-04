@@ -2,6 +2,7 @@ export * from './types';
 export * from './vault-liquid-fs';
 export * from './query-tag';
 export * from './temporal-drop';
+export * from './moment-date-formatter';
 export * from './temporal-range-tokenizer';
 export * from './temporal-liquid-extensions';
 export * from './selector-evaluator';

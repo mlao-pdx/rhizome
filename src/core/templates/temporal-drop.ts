@@ -392,14 +392,26 @@ export function combineTemporalRange(
 }
 
 export {
+	formatMomentDate,
+	isStrftimeDateFormat,
+	isValidIanaTimeZone,
+	type ResolvedTemporalTimeZone,
+	resolveTemporalTimeZone,
+} from './moment-date-formatter';
+export {
 	attachLiquidInstanceToOptions,
 	createRhizomeLiquidOperators,
+	dateToLongStringFilter,
+	dateToRfc822Filter,
+	dateToStringFilter,
+	dateToXmlschemaFilter,
 	LIQUID_INSTANCE_SYMBOL,
 	readContextLiquidInstance,
 	readContextTemporalMeta,
 	registerTemporalLiquidExtensions,
 	resolveDefaultSystemTimeZone,
 	resolveValidTimeZone,
+	rhizomeDateFilter,
 	TEMPORAL_CONTEXT_META_SYMBOL,
 	type TemporalContextMeta,
 } from './temporal-liquid-extensions';

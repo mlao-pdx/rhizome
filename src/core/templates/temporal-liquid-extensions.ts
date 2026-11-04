@@ -1,11 +1,16 @@
-import { Temporal } from '@js-temporal/polyfill';
 import {
 	compareDateIntervals,
 	isValidReferenceTimeMs,
 	parseTemporalExpr,
 	type PropertyOperator,
 } from '@core/search';
-import { type Context, defaultOperators, filters, type Liquid } from 'liquidjs';
+import { Context, defaultOperators, filters, type Liquid } from 'liquidjs';
+import {
+	formatMomentDate,
+	isStrftimeDateFormat,
+	isValidIanaTimeZone,
+	resolveTemporalTimeZone,
+} from './moment-date-formatter';
 import {
 	coerceOperandToDateInterval,
 	normalizeRelativeTemporalString,
@@ -71,8 +76,9 @@ export function resolveDefaultSystemTimeZone(): string {
 		const sysTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 		if (typeof sysTz === 'string' && sysTz.trim().length > 0) {
 			const trimmed = sysTz.trim();
-			Temporal.Instant.fromEpochMilliseconds(0).toZonedDateTimeISO(trimmed);
-			return trimmed;
+			if (isValidIanaTimeZone(trimmed)) {
+				return trimmed;
+			}
 		}
 	} catch {
 		// Fall back to 'UTC'
@@ -96,12 +102,7 @@ export function resolveValidTimeZone(raw: unknown): string {
 	if (trimmed.length === 0) {
 		return 'UTC';
 	}
-	try {
-		Temporal.Instant.fromEpochMilliseconds(0).toZonedDateTimeISO(trimmed);
-		return trimmed;
-	} catch {
-		return 'UTC';
-	}
+	return isValidIanaTimeZone(trimmed) ? trimmed : 'UTC';
 }
 
 function isTemporalContextMeta(val: unknown): val is TemporalContextMeta {
@@ -223,105 +224,233 @@ export function createRhizomeLiquidOperators(): typeof defaultOperators {
 	} as unknown as typeof defaultOperators;
 }
 
+const builtinDateFilter = filters.date as unknown as (
+	this: { context: Context },
+	v: unknown,
+	format?: unknown,
+	timezoneOffset?: unknown,
+) => unknown;
+
+function normalizeDateInput(
+	v: unknown,
+	ctx: Context | undefined,
+	explicitTz?: unknown,
+): { normalizedValue: unknown; effectiveTz: unknown; fallbackTimeZone: string } {
+	const { timeZone, referenceTimeMs } = readContextTemporalMeta(ctx);
+	const unwrapped = unwrapLiquidValue(v);
+	const unwrappedTz = explicitTz !== undefined ? unwrapLiquidValue(explicitTz) : undefined;
+	const baseTz = unwrapped instanceof TemporalDrop ? unwrapped.timeZone : timeZone;
+	const effectiveTz = unwrappedTz !== undefined && unwrappedTz !== null ? unwrappedTz : baseTz;
+
+	if (unwrapped instanceof TemporalDrop) {
+		return {
+			normalizedValue: new Date(unwrapped.start),
+			effectiveTz,
+			fallbackTimeZone: baseTz,
+		};
+	}
+	if (typeof unwrapped === 'number' && Number.isFinite(unwrapped)) {
+		return { normalizedValue: new Date(unwrapped), effectiveTz, fallbackTimeZone: baseTz };
+	}
+	if (typeof unwrapped === 'string') {
+		const trimmed = unwrapped.trim();
+		if (/^[+-]?\d+$/.test(trimmed)) {
+			return {
+				normalizedValue: new Date(Number(trimmed)),
+				effectiveTz,
+				fallbackTimeZone: baseTz,
+			};
+		}
+		const parsed = parseTemporalExpr(normalizeRelativeTemporalString(trimmed), {
+			allowYearOnly: true,
+			allowRelative: true,
+			timeZone,
+			referenceTimeMs,
+		});
+		if (parsed.ok) {
+			return {
+				normalizedValue: new Date(parsed.interval.start),
+				effectiveTz,
+				fallbackTimeZone: baseTz,
+			};
+		}
+	}
+	return { normalizedValue: unwrapped, effectiveTz, fallbackTimeZone: baseTz };
+}
+
+function resolveEpochMsFromNormalizedValue(normalizedValue: unknown): number | null {
+	if (normalizedValue instanceof Date) {
+		const ms = normalizedValue.getTime();
+		return Number.isFinite(ms) ? ms : null;
+	}
+	if (typeof normalizedValue === 'string') {
+		const trimmed = normalizedValue.trim();
+		if (trimmed.length === 0) {
+			return null;
+		}
+		const ms = Date.parse(trimmed);
+		return Number.isFinite(ms) ? ms : null;
+	}
+	return null;
+}
+
+function stringifyFormatArg(rawFormat: unknown, fallbackFormat: string): string {
+	if (rawFormat === null || rawFormat === undefined) {
+		return fallbackFormat;
+	}
+	if (typeof rawFormat === 'string') {
+		return rawFormat;
+	}
+	if (
+		typeof rawFormat === 'number' ||
+		typeof rawFormat === 'boolean' ||
+		typeof rawFormat === 'bigint'
+	) {
+		return String(rawFormat);
+	}
+	return '';
+}
+
+function resolveFilterContext(filterThis: { context?: Context } | void): Context {
+	const ctx =
+		filterThis && typeof filterThis === 'object' && filterThis.context
+			? filterThis.context
+			: new Context({});
+	const opts = (ctx as unknown as { opts?: { locale?: string } }).opts;
+	if (opts && (!opts.locale || opts.locale.trim().length === 0)) {
+		(ctx as unknown as { opts: { locale: string } }).opts = {
+			...opts,
+			locale: 'en',
+		};
+	}
+	return ctx;
+}
+
 /**
- * Registers the millisecond-aware and `TemporalDrop`-aware `date` filter (and companion
- * `date_to_*` filters) on `liquid`.
+ * Dual-flavor Liquid `date` filter:
+ * - Formats with LiquidJS `strftime` when the resolved format string contains `'%'`
+ *   (including when `format` is omitted and defaults to `opts.dateFormat`).
+ * - Formats with Obsidian's native Moment.js token syntax when the format string
+ *   does not contain `'%'`.
+ */
+export function rhizomeDateFilter(
+	this: { context?: Context } | void,
+	v: unknown,
+	format?: unknown,
+	timezoneOffset?: unknown,
+): unknown {
+	const ctx = resolveFilterContext(this);
+	const { normalizedValue, effectiveTz, fallbackTimeZone } = normalizeDateInput(
+		v,
+		ctx,
+		timezoneOffset,
+	);
+	const rawFormat = unwrapLiquidValue(format);
+	const defaultFormat = (ctx as unknown as { opts?: { dateFormat?: unknown } }).opts?.dateFormat;
+	const fallbackFormat =
+		typeof defaultFormat === 'string' ? defaultFormat : '%A, %B %-e, %Y at %-l:%M %P %z';
+	const formatStr = stringifyFormatArg(rawFormat, fallbackFormat);
+
+	if (isStrftimeDateFormat(formatStr)) {
+		const { strftimeTz } = resolveTemporalTimeZone(effectiveTz, fallbackTimeZone);
+		return builtinDateFilter.call({ context: ctx }, normalizedValue, format, strftimeTz);
+	}
+
+	const epochMs = resolveEpochMsFromNormalizedValue(normalizedValue);
+	if (epochMs === null) {
+		return v;
+	}
+	return formatMomentDate(epochMs, formatStr, effectiveTz, fallbackTimeZone);
+}
+
+/**
+ * Liquid `date_to_xmlschema` filter (`%Y-%m-%dT%H:%M:%S%:z`), normalized for `TemporalDrop`
+ * and millisecond timestamps.
+ */
+export function dateToXmlschemaFilter(this: { context?: Context } | void, v: unknown): unknown {
+	const ctx = resolveFilterContext(this);
+	const { normalizedValue, effectiveTz, fallbackTimeZone } = normalizeDateInput(v, ctx);
+	const { strftimeTz } = resolveTemporalTimeZone(effectiveTz, fallbackTimeZone);
+	return builtinDateFilter.call(
+		{ context: ctx },
+		normalizedValue,
+		'%Y-%m-%dT%H:%M:%S%:z',
+		strftimeTz,
+	);
+}
+
+/**
+ * Liquid `date_to_rfc822` filter (`%a, %d %b %Y %H:%M:%S %z`), normalized for `TemporalDrop`
+ * and millisecond timestamps.
+ */
+export function dateToRfc822Filter(this: { context?: Context } | void, v: unknown): unknown {
+	const ctx = resolveFilterContext(this);
+	const { normalizedValue, effectiveTz, fallbackTimeZone } = normalizeDateInput(v, ctx);
+	const { strftimeTz } = resolveTemporalTimeZone(effectiveTz, fallbackTimeZone);
+	return builtinDateFilter.call(
+		{ context: ctx },
+		normalizedValue,
+		'%a, %d %b %Y %H:%M:%S %z',
+		strftimeTz,
+	);
+}
+
+function formatStringifyDate(
+	filterThis: { context?: Context } | void,
+	v: unknown,
+	monthType: '%b' | '%B',
+	type?: unknown,
+	style?: unknown,
+): unknown {
+	const ctx = resolveFilterContext(filterThis);
+	const { normalizedValue, effectiveTz, fallbackTimeZone } = normalizeDateInput(v, ctx);
+	const { strftimeTz } = resolveTemporalTimeZone(effectiveTz, fallbackTimeZone);
+	const fmt =
+		type === 'ordinal'
+			? style === 'US'
+				? `${monthType} %-d%q, %Y`
+				: `%-d%q ${monthType} %Y`
+			: `%d ${monthType} %Y`;
+	return builtinDateFilter.call({ context: ctx }, normalizedValue, fmt, strftimeTz);
+}
+
+/**
+ * Liquid `date_to_string` filter (`%d %b %Y` or ordinal), normalized for `TemporalDrop`
+ * and millisecond timestamps.
+ */
+export function dateToStringFilter(
+	this: { context?: Context } | void,
+	v: unknown,
+	type?: unknown,
+	style?: unknown,
+): unknown {
+	return formatStringifyDate(this, v, '%b', type, style);
+}
+
+/**
+ * Liquid `date_to_long_string` filter (`%d %B %Y` or ordinal), normalized for `TemporalDrop`
+ * and millisecond timestamps.
+ */
+export function dateToLongStringFilter(
+	this: { context?: Context } | void,
+	v: unknown,
+	type?: unknown,
+	style?: unknown,
+): unknown {
+	return formatStringifyDate(this, v, '%B', type, style);
+}
+
+/**
+ * Registers the millisecond-aware, `TemporalDrop`-aware, and Moment.js/`strftime` dual-flavor
+ * `date` filter (and companion `date_to_*` filters) on `liquid`.
  */
 export function registerTemporalLiquidExtensions(liquid: Liquid): void {
 	installTemporalTokenizerExtensions();
 	attachLiquidInstanceToOptions(liquid);
 
-	const normalizeDateInput = (
-		v: unknown,
-		ctx: Context,
-		explicitTz?: unknown,
-	): { normalizedValue: unknown; effectiveTz: unknown } => {
-		const { timeZone, referenceTimeMs } = readContextTemporalMeta(ctx);
-		const unwrapped = unwrapLiquidValue(v);
-		const effectiveTz = explicitTz !== undefined ? explicitTz : timeZone;
-
-		if (unwrapped instanceof TemporalDrop) {
-			return {
-				normalizedValue: new Date(unwrapped.start),
-				effectiveTz: explicitTz !== undefined ? explicitTz : unwrapped.timeZone,
-			};
-		}
-		if (typeof unwrapped === 'number' && Number.isFinite(unwrapped)) {
-			return { normalizedValue: new Date(unwrapped), effectiveTz };
-		}
-		if (typeof unwrapped === 'string') {
-			const trimmed = unwrapped.trim();
-			if (/^[+-]?\d+$/.test(trimmed)) {
-				return { normalizedValue: new Date(Number(trimmed)), effectiveTz };
-			}
-			const parsed = parseTemporalExpr(normalizeRelativeTemporalString(trimmed), {
-				allowYearOnly: true,
-				allowRelative: true,
-				timeZone,
-				referenceTimeMs,
-			});
-			if (parsed.ok) {
-				return { normalizedValue: new Date(parsed.interval.start), effectiveTz };
-			}
-		}
-		return { normalizedValue: unwrapped, effectiveTz };
-	};
-
-	const builtinDateFilter = filters.date as unknown as (
-		this: { context: Context },
-		v: unknown,
-		format?: unknown,
-		timezoneOffset?: unknown,
-	) => unknown;
-
-	liquid.registerFilter(
-		'date',
-		function (
-			this: { context: Context },
-			v: unknown,
-			format?: unknown,
-			timezoneOffset?: unknown,
-		) {
-			const { normalizedValue, effectiveTz } = normalizeDateInput(
-				v,
-				this.context,
-				timezoneOffset,
-			);
-			return builtinDateFilter.call(this, normalizedValue, format, effectiveTz);
-		},
-	);
-
-	liquid.registerFilter('date_to_xmlschema', function (this: { context: Context }, v: unknown) {
-		const { normalizedValue, effectiveTz } = normalizeDateInput(v, this.context);
-		return builtinDateFilter.call(this, normalizedValue, '%Y-%m-%dT%H:%M:%S%:z', effectiveTz);
-	});
-
-	liquid.registerFilter('date_to_rfc822', function (this: { context: Context }, v: unknown) {
-		const { normalizedValue, effectiveTz } = normalizeDateInput(v, this.context);
-		return builtinDateFilter.call(
-			this,
-			normalizedValue,
-			'%a, %d %b %Y %H:%M:%S %z',
-			effectiveTz,
-		);
-	});
-
-	const registerStringifyDateFilter = (filterName: string, monthType: '%b' | '%B'): void => {
-		liquid.registerFilter(
-			filterName,
-			function (this: { context: Context }, v: unknown, type?: unknown, style?: unknown) {
-				const { normalizedValue, effectiveTz } = normalizeDateInput(v, this.context);
-				const fmt =
-					type === 'ordinal'
-						? style === 'US'
-							? `${monthType} %-d%q, %Y`
-							: `%-d%q ${monthType} %Y`
-						: `%d ${monthType} %Y`;
-				return builtinDateFilter.call(this, normalizedValue, fmt, effectiveTz);
-			},
-		);
-	};
-
-	registerStringifyDateFilter('date_to_string', '%b');
-	registerStringifyDateFilter('date_to_long_string', '%B');
+	liquid.registerFilter('date', rhizomeDateFilter);
+	liquid.registerFilter('date_to_xmlschema', dateToXmlschemaFilter);
+	liquid.registerFilter('date_to_rfc822', dateToRfc822Filter);
+	liquid.registerFilter('date_to_string', dateToStringFilter);
+	liquid.registerFilter('date_to_long_string', dateToLongStringFilter);
 }

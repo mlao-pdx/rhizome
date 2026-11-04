@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { renderRhizomeTemplate } from '../../src/core/templates';
+import { pickFilter, renderRhizomeTemplate } from '../../src/core/templates';
 
 describe('renderRhizomeTemplate & {% query %} tag', () => {
 	it('batches multiple {% query %} blocks into a single runQueries call and binds results in root Liquid scope', async () => {
@@ -945,5 +945,113 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		expect(res.markdown).toContain('for_sorted=Alpha;Beta;Gamma;');
 		expect(res.markdown).toContain('if_cond=matched');
 		expect(res.markdown).toContain('chain=Gamma');
+	});
+
+	it('supports both Obsidian Moment.js date formats and LiquidJS strftime formats in | date using % as the flavor trigger', async () => {
+		// Pin to 2026-10-31T14:05:09.123Z (Saturday)
+		const refMs = Date.UTC(2026, 9, 31, 14, 5, 9, 123);
+		const res = await renderRhizomeTemplate(
+			[
+				'{%- query notes -%}* {%- endquery -%}',
+				'm_iso={{ file.modified | date: "YYYY-MM-DD HH:mm:ss.SSS" }}',
+				'm_human={{ today | date: "dddd, MMMM Do YYYY" }}',
+				'm_escaped={{ now | date: "[Today is] ddd, MMM D [at] h:mm A" }}',
+				'm_backslash={{ today | date: "\\\\YYYY YYYY" }}',
+				'm_quarters_weeks={{ today | date: "Q Qo [W]WW Wo w wo DDD DDDD DDDo e E d dd" }}',
+				'm_week_years={{ "2026-01-01" | date: "gggg gg GGGG GG" }}',
+				'm_hours={{ file.modified | date: "H HH h hh k kk a A hmm hmmss Hmm Hmmss eHHmm" }}',
+				'm_frac={{ file.modified | date: "S SS SSS SSSS SSSSS SSSSSS" }}',
+				'm_unix={{ file.modified | date: "X | x" }}',
+				'm_zone_utc={{ file.modified | date: "Z ZZ z zz" }}',
+				'm_zone_ny={{ file.modified | date: "YYYY-MM-DD HH:mm Z ZZ", "America/New_York" }}',
+				'm_zone_offset={{ file.modified | date: "YYYY-MM-DD HH:mm Z ZZ", "+05:30" }}',
+				'm_zone_num={{ file.modified | date: "YYYY-MM-DD HH:mm Z ZZ", -480 }}',
+				'm_long={{ file.modified | date: "LT | LTS | L | LL | LLL | LLLL" }}',
+				'm_short_local={{ file.modified | date: "l | ll | lll | llll" }}',
+				'm_era={{ today | date: "y yy yyy yyyy yo N NNNN NNNNN" }}',
+				'm_empty={{ today | date: "" }}',
+				's_basic={{ file.modified | date: "%Y-%m-%d %H:%M:%S" }}',
+				's_pct={{ today | date: "100%% in %Y" }}',
+				's_offset={{ file.modified | date: "%Y-%m-%d %H:%M %z", "+0530" }}',
+				's_default={{ today | date }}',
+				'invalid_m={{ "not-a-date" | date: "YYYY-MM-DD" }}',
+				'invalid_s={{ "not-a-date" | date: "%Y-%m-%d" }}',
+				'nil_m={{ properties.missing | date: "YYYY-MM-DD" }}',
+				'pick_m={% assign rows = query.notes | pick: "file.basename as name", "file.modified | date: \'YYYY-MM-DD\' as mod" %}{% for r in rows %}{{ r.name }}:{{ r.mod }};{% endfor %}',
+			].join('\n'),
+			{
+				runQueries: async () => ({
+					'◊host': [
+						{
+							file: {
+								path: 'Daily/2026-10-31.md',
+								name: '2026-10-31.md',
+								basename: '2026-10-31',
+								extension: 'md',
+								folder: 'Daily',
+								parent: 'Daily',
+								created: refMs,
+								modified: refMs,
+								size: 128,
+							},
+						},
+					],
+					notes: [{ file: { basename: 'Alpha', modified: refMs } }],
+				}),
+				explainQuery: async () => '',
+				runtimeContext: {
+					sourcePath: 'Daily/2026-10-31.md',
+					referenceTimeMs: refMs,
+					timeZone: 'UTC',
+				},
+			},
+		);
+
+		expect(res.ok).toBe(true);
+		expect(res.markdown).toContain('m_iso=2026-10-31 14:05:09.123');
+		expect(res.markdown).toContain('m_human=Saturday, October 31st 2026');
+		expect(res.markdown).toContain('m_escaped=Today is Sat, Oct 31 at 2:05 PM');
+		expect(res.markdown).toContain('m_backslash=YYYY 2026');
+		expect(res.markdown).toContain(
+			'm_quarters_weeks=4 4th W44 44th 44 44th 304 304 304th 6 6 6 Sa',
+		);
+		expect(res.markdown).toContain('m_week_years=2026 26 2026 26');
+		expect(res.markdown).toContain(
+			'm_hours=14 14 2 02 14 14 pm PM 205 20509 1405 140509 61405',
+		);
+		expect(res.markdown).toContain('m_frac=1 12 123 1230 12300 123000');
+		expect(res.markdown).toContain(`m_unix=${Math.floor(refMs / 1000)} | ${refMs}`);
+		expect(res.markdown).toContain('m_zone_utc=+00:00 +0000 UTC Coordinated Universal Time');
+		expect(res.markdown).toContain('m_zone_ny=2026-10-31 10:05 -04:00 -0400');
+		expect(res.markdown).toContain('m_zone_offset=2026-10-31 19:35 +05:30 +0530');
+		expect(res.markdown).toContain('m_zone_num=2026-10-31 22:05 +08:00 +0800');
+		expect(res.markdown).toContain(
+			'm_long=2:05 PM | 2:05:09 PM | 10/31/2026 | October 31, 2026 | October 31, 2026 2:05 PM | Saturday, October 31, 2026 2:05 PM',
+		);
+		expect(res.markdown).toContain(
+			'm_short_local=10/31/2026 | Oct 31, 2026 | Oct 31, 2026 2:05 PM | Sat, Oct 31, 2026 2:05 PM',
+		);
+		expect(res.markdown).toContain('m_era=2026 2026 2026 2026 2026th AD Anno Domini AD');
+		expect(res.markdown).toContain('m_empty=\n');
+		expect(res.markdown).toContain('s_basic=2026-10-31 14:05:09');
+		expect(res.markdown).toContain('s_pct=100% in 2026');
+		expect(res.markdown).toContain('s_offset=2026-10-31 19:35 +0530');
+		expect(res.markdown).toContain('s_default=Saturday, October 31, 2026 at 12:00 am +0000');
+		expect(res.markdown).toContain('invalid_m=not-a-date');
+		expect(res.markdown).toContain('invalid_s=not-a-date');
+		expect(res.markdown).toContain('nil_m=\n');
+		expect(res.markdown).toContain('pick_m=Alpha:2026-10-31;');
+
+		// Verify direct fallback filter execution outside a Liquid instance
+		const directPicked = pickFilter(
+			{ modified: refMs },
+			"modified | date: 'YYYY-MM-DD', 'UTC' as momentDate",
+			"modified | date: '%Y-%m-%d', 'UTC' as strftimeDate",
+			'modified | date_to_string as strDate',
+		) as Record<string, unknown>;
+		expect(directPicked.momentDate).toBe('2026-10-31');
+		expect(directPicked.strftimeDate).toBe('2026-10-31');
+		expect(typeof directPicked.strDate).toBe('string');
+		expect(String(directPicked.strDate)).toContain('2026');
 	});
 });

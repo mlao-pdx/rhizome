@@ -1,7 +1,10 @@
+import { Temporal } from '@js-temporal/polyfill';
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
 	createVaultLiquidFs,
+	formatMomentDate,
+	isStrftimeDateFormat,
 	renderRhizomeTemplate,
 	resolveTemplateFolders,
 } from '../../src/core/templates';
@@ -304,6 +307,82 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 					}
 				},
 			),
+		);
+	});
+
+	it('Dual-Flavor Date Filter Invariant: % selects LiquidJS strftime while %-free format strings render equivalent Moment.js output', async () => {
+		const epochMsArb = fc.integer({
+			min: Date.UTC(1900, 0, 1, 0, 0, 0, 0),
+			max: Date.UTC(2100, 11, 31, 23, 59, 59, 999),
+		});
+
+		const equivalentSpecArb = fc.constantFrom<
+			readonly [momentToken: string, strftimeToken: string]
+		>(
+			['YYYY', '%Y'],
+			['YY', '%y'],
+			['MM', '%m'],
+			['MMM', '%b'],
+			['MMMM', '%B'],
+			['DD', '%d'],
+			['D', '%-d'],
+			['DDDD', '%j'],
+			['ddd', '%a'],
+			['dddd', '%A'],
+			['d', '%w'],
+			['E', '%u'],
+			['HH', '%H'],
+			['H', '%-H'],
+			['hh', '%I'],
+			['h', '%-I'],
+			['mm', '%M'],
+			['ss', '%S'],
+			['SSS', '%L'],
+			['A', '%p'],
+			['a', '%P'],
+			['X', '%s'],
+			['Z', '%:z'],
+			['ZZ', '%z'],
+			['[literal]', 'literal'],
+			['-', '-'],
+			[':', ':'],
+			['/', '/'],
+			[' ', ' '],
+		);
+
+		const pairListArb = fc.array(equivalentSpecArb, { minLength: 1, maxLength: 8 });
+
+		await assertProperty(
+			'templates/date-filter__moment-and-strftime-dual-flavor-equivalence',
+			fc.asyncProperty(epochMsArb, pairListArb, async (ms, pairs) => {
+				const momentFmt = pairs.map((p) => p[0]).join(' | ');
+				const strftimeFmt = `${pairs.map((p) => p[1]).join(' | ')}%n`;
+
+				expect(isStrftimeDateFormat(momentFmt)).toBe(false);
+				expect(isStrftimeDateFormat(strftimeFmt)).toBe(true);
+
+				const zdt = Temporal.Instant.fromEpochMilliseconds(ms).toZonedDateTimeISO('UTC');
+				const isoDate = `${String(zdt.year).padStart(4, '0')}-${String(zdt.month).padStart(2, '0')}-${String(zdt.day).padStart(2, '0')}`;
+				expect(formatMomentDate(ms, 'YYYY-MM-DD', 'UTC', 'UTC')).toBe(isoDate);
+
+				const res = await renderRhizomeTemplate(
+					`M={{ file.created | date: ${JSON.stringify(momentFmt)} }}\nS={{ file.created | date: ${JSON.stringify(strftimeFmt)} }}`,
+					{
+						runQueries: async () => ({
+							'◊host': [{ file: { created: ms }, properties: {} }],
+						}),
+						explainQuery: async () => '',
+						runtimeContext: {
+							sourcePath: 'Host.md',
+							referenceTimeMs: ms,
+							timeZone: 'UTC',
+						},
+					},
+				);
+				expect(res.ok).toBe(true);
+				const expectedVal = formatMomentDate(ms, momentFmt, 'UTC', 'UTC');
+				expect(res.markdown).toBe(`M=${expectedVal}\nS=${expectedVal}\n`);
+			}),
 		);
 	});
 });
