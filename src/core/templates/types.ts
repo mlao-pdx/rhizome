@@ -21,6 +21,7 @@ export interface ExtractedQueryBlock {
 export type TemplateDiagnosticCode =
 	| 'TEMPLATE_SYNTAX_ERROR'
 	| 'INVALID_QUERY_TAG_ARGS'
+	| 'INVALID_HEADING_TAG_ARGS'
 	| 'DUPLICATE_QUERY_NAME'
 	| 'TEMPLATE_RENDER_ERROR';
 
@@ -77,6 +78,7 @@ export interface TemplateRuntimeContext {
 	readonly vault?: string;
 	readonly language?: string;
 	readonly platform?: Partial<TemplatePlatformFlags>;
+	readonly headingLevel?: number;
 }
 
 /**

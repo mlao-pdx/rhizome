@@ -5,7 +5,9 @@ import {
 	parseSingleTemporalAtom,
 } from '@core/search';
 import {
+	type HeadingContextState,
 	isBareRelativeTemporalAtom,
+	normalizeInitialHeadingLevel,
 	resolveValidTimeZone,
 	TEMPORAL_CONTEXT_META_SYMBOL,
 	TemporalDrop,
@@ -178,8 +180,14 @@ export function buildRhizomeTemplateContext(
 		platform,
 	};
 
+	const initialHeadingLevel = normalizeInitialHeadingLevel(runtimeContext?.headingLevel);
+	const headingState: HeadingContextState = {
+		level: initialHeadingLevel,
+		initialLevel: initialHeadingLevel,
+	};
+
 	Object.defineProperty(root, TEMPORAL_CONTEXT_META_SYMBOL, {
-		value: Object.freeze({ timeZone, referenceTimeMs, language }),
+		value: Object.freeze({ timeZone, referenceTimeMs, language, headingState }),
 		enumerable: false,
 		configurable: false,
 		writable: false,

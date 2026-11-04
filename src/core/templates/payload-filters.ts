@@ -11,6 +11,7 @@ import {
 	uniqFilter,
 	whereFilter,
 } from './collection-filters';
+import { headingFilter } from './heading-filter';
 import { listFilter, sentenceFilter } from './list-filter';
 import {
 	isPlainRecord,
@@ -272,6 +273,7 @@ function seedFallbackFilters(): void {
 		['sum', sumFilter],
 		['table', tableFilter],
 		['list', listFilter],
+		['heading', headingFilter],
 		['sentence', sentenceFilter],
 		['array_to_sentence_string', sentenceFilter],
 	];
@@ -325,6 +327,7 @@ export function registerPayloadLiquidFilters(liquid: Liquid): void {
 	liquid.registerFilter('sum', bindContextFilter(sumFilter));
 	liquid.registerFilter('table', bindContextFilter(tableFilter));
 	liquid.registerFilter('list', bindContextFilter(listFilter));
+	liquid.registerFilter('heading', bindContextFilter(headingFilter));
 	liquid.registerFilter('sentence', bindContextFilter(sentenceFilter));
 	liquid.registerFilter('array_to_sentence_string', bindContextFilter(sentenceFilter));
 }

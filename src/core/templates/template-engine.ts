@@ -1,5 +1,6 @@
 import { formatSourceCaretSnippet, type SourceSpan } from '@core/search';
 import { Liquid, LiquidError, Tag, type Template, toPromise } from 'liquidjs';
+import { registerHeadingTag } from './heading-filter';
 import { registerPayloadLiquidFilters } from './payload-filters';
 import {
 	createQueryTagEnvironment,
@@ -170,6 +171,7 @@ export function createRhizomeLiquidInstance(
 		operators: createRhizomeLiquidOperators(),
 	});
 	registerQueryTag(liquid, env, originalSource);
+	registerHeadingTag(liquid, env, originalSource);
 	registerTemporalLiquidExtensions(liquid);
 	registerPayloadLiquidFilters(liquid);
 	return liquid;

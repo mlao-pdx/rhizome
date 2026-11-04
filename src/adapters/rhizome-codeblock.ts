@@ -12,6 +12,7 @@ import {
 	HOST_QUERY_KEY,
 	parseRhizomeTemplatePass1Async,
 	renderParsedRhizomeTemplate,
+	resolveCodeBlockHeadingLevel,
 	type TemplateRenderResult,
 	type TemplateRuntimeContext,
 } from '@core/templates';
@@ -19,10 +20,45 @@ import type RhizomePlugin from '../main';
 import { markSensitive } from './logger-format';
 import { resolveDefaultTimeZone, type VaultQueryResult } from './vault-query-runner';
 
+export { resolveCodeBlockHeadingLevel };
+
+function lookupHostHeadingLevel(
+	plugin: RhizomePlugin,
+	sourcePath: string,
+	ctx: MarkdownPostProcessorContext,
+	el: HTMLElement,
+): number {
+	if (sourcePath.length === 0 || typeof ctx.getSectionInfo !== 'function') {
+		return 0;
+	}
+	const sectionInfo = ctx.getSectionInfo(el);
+	const lineStart = sectionInfo?.lineStart;
+	if (typeof lineStart !== 'number' || !Number.isFinite(lineStart) || lineStart <= 0) {
+		return 0;
+	}
+	const normalized = normalizePath(sourcePath);
+	const vaultWithLookup = plugin.app.vault as {
+		getFileByPath?: (
+			path: string,
+		) => ReturnType<typeof plugin.app.vault.getMarkdownFiles>[number] | null;
+	};
+	const matchedFile =
+		typeof vaultWithLookup.getFileByPath === 'function'
+			? (vaultWithLookup.getFileByPath(normalized) ?? undefined)
+			: plugin.app.vault.getMarkdownFiles().find((f) => f.path === normalized);
+	if (!matchedFile) {
+		return 0;
+	}
+	const cache = plugin.app.metadataCache.getFileCache(matchedFile);
+	return resolveCodeBlockHeadingLevel(cache?.headings, lineStart);
+}
+
 function buildRuntimeContext(
 	plugin: RhizomePlugin,
 	referenceTimeMs: number,
 	sourcePath: string,
+	ctx: MarkdownPostProcessorContext,
+	el: HTMLElement,
 ): TemplateRuntimeContext {
 	const vaultWithGetName = plugin.app.vault as { getName?: () => string };
 	const vaultName =
@@ -35,6 +71,7 @@ function buildRuntimeContext(
 		vault: vaultName,
 		language,
 		platform: Platform,
+		headingLevel: lookupHostHeadingLevel(plugin, sourcePath, ctx, el),
 	};
 }
 
@@ -204,7 +241,7 @@ export async function processRhizomeCodeBlock(
 				parsed,
 				Object.freeze({}),
 				(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
-				buildRuntimeContext(plugin, referenceTimeMs, sourcePath),
+				buildRuntimeContext(plugin, referenceTimeMs, sourcePath, ctx, el),
 			);
 			if (
 				outerAbortController.signal.aborted ||
@@ -240,7 +277,7 @@ export async function processRhizomeCodeBlock(
 				newPayload,
 				(query, heading) =>
 					plugin.explainQuery(query, { referenceTimeMs: updateStartedAt, heading }),
-				buildRuntimeContext(plugin, updateStartedAt, sourcePath),
+				buildRuntimeContext(plugin, updateStartedAt, sourcePath, ctx, el),
 			);
 			if (
 				outerAbortController.signal.aborted ||
@@ -274,7 +311,7 @@ export async function processRhizomeCodeBlock(
 			parsed,
 			initialPayload,
 			(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
-			buildRuntimeContext(plugin, referenceTimeMs, sourcePath),
+			buildRuntimeContext(plugin, referenceTimeMs, sourcePath, ctx, el),
 		);
 		if (
 			outerAbortController.signal.aborted ||

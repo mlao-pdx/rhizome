@@ -59,12 +59,34 @@ export function readContextLiquidInstance(ctx: Context | undefined): Liquid | un
 }
 
 /**
- * Pinned temporal and locale evaluation metadata attached to the root template context.
+ * Mutable heading level state holder attached to `TemporalContextMeta` under
+ * `TEMPORAL_CONTEXT_META_SYMBOL` on the root template scope (`ctx.globals`),
+ * shared across the root template, `{% render %}` partials, and `{% layout %}` files.
+ */
+export interface HeadingContextState {
+	level: number;
+	readonly initialLevel: number;
+}
+
+/**
+ * Normalizes an optional initial host heading level into an integer in `[0, 6]`,
+ * defaulting to `0` when omitted, non-numeric, or non-finite.
+ */
+export function normalizeInitialHeadingLevel(raw: unknown): number {
+	if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+		return 0;
+	}
+	return Math.max(0, Math.min(6, Math.trunc(raw)));
+}
+
+/**
+ * Pinned temporal, locale, and heading evaluation metadata attached to the root template context.
  */
 export interface TemporalContextMeta {
 	readonly timeZone: string;
 	readonly referenceTimeMs: number;
 	readonly language?: string | undefined;
+	readonly headingState?: HeadingContextState | undefined;
 }
 
 /**
@@ -148,6 +170,66 @@ export function readContextTemporalMeta(ctx: Context | undefined): TemporalConte
 			? rawNow.referenceTimeMs
 			: Date.now();
 	return { timeZone, referenceTimeMs };
+}
+
+/**
+ * Reads the mutable `HeadingContextState` attached to `ctx.globals` or `ctx.environments`
+ * under `TEMPORAL_CONTEXT_META_SYMBOL`, if present.
+ */
+export function readContextHeadingState(ctx: Context | undefined): HeadingContextState | null {
+	if (!ctx) {
+		return null;
+	}
+	const ctxInternal = ctx as unknown as {
+		globals?: Record<PropertyKey, unknown>;
+		environments?: Record<PropertyKey, unknown>;
+	};
+	const symbolFromGlobals = ctxInternal.globals?.[TEMPORAL_CONTEXT_META_SYMBOL];
+	if (isTemporalContextMeta(symbolFromGlobals) && symbolFromGlobals.headingState) {
+		return symbolFromGlobals.headingState;
+	}
+	const symbolFromEnvs = ctxInternal.environments?.[TEMPORAL_CONTEXT_META_SYMBOL];
+	if (isTemporalContextMeta(symbolFromEnvs) && symbolFromEnvs.headingState) {
+		return symbolFromEnvs.headingState;
+	}
+	return null;
+}
+
+/**
+ * Returns the mutable `HeadingContextState` for `ctx`, lazily attaching a default `{ level: 0, initialLevel: 0 }`
+ * state holder onto `ctx.globals` if `ctx` was constructed outside `buildRhizomeTemplateContext`.
+ */
+export function getOrCreateContextHeadingState(ctx: Context): HeadingContextState {
+	const existing = readContextHeadingState(ctx);
+	if (existing) {
+		return existing;
+	}
+	const ctxInternal = ctx as unknown as {
+		globals?: Record<PropertyKey, unknown>;
+	};
+	if (!ctxInternal.globals || typeof ctxInternal.globals !== 'object') {
+		ctxInternal.globals = {};
+	}
+	const headingState: HeadingContextState = { level: 0, initialLevel: 0 };
+	const currentMeta = ctxInternal.globals[TEMPORAL_CONTEXT_META_SYMBOL];
+	const baseMeta = isTemporalContextMeta(currentMeta)
+		? currentMeta
+		: { timeZone: resolveDefaultSystemTimeZone(), referenceTimeMs: Date.now() };
+	Object.defineProperty(ctxInternal.globals, TEMPORAL_CONTEXT_META_SYMBOL, {
+		value: Object.freeze({ ...baseMeta, headingState }),
+		enumerable: false,
+		configurable: true,
+		writable: true,
+	});
+	return headingState;
+}
+
+/**
+ * Reads the current logical heading level from `ctx` (`0` when no heading precedes the codeblock
+ * or when no heading context state is attached).
+ */
+export function readContextHeadingLevel(ctx: Context | undefined): number {
+	return readContextHeadingState(ctx)?.level ?? 0;
 }
 
 function evaluateTemporalOperator(

@@ -225,19 +225,28 @@ export function sentenceFilter(
 	return getConjunctionListFormatter(language).format(renderedItems);
 }
 
-interface RenderListResult {
+/**
+ * Internal list subtree render result shared with `heading-filter.ts`.
+ */
+export interface RenderListResult {
 	readonly lines: string[];
 	readonly hitHorizon: boolean;
 }
 
-interface ListRenderEnv {
+/**
+ * Shared evaluation environment for `listFilter` and `headingFilter` leaf/post-H6 subtrees.
+ */
+export interface ListRenderEnv {
 	readonly styles: readonly ListStyleMarker[];
 	readonly selectors: readonly ParsedPathSelector[];
 	readonly filterThis: LiquidFilterThis | void;
 	readonly language: string;
 }
 
-function getNonVacuousKeys(obj: Record<string, unknown>): string[] {
+/**
+ * Returns own non-forbidden keys of `obj` whose values are non-vacuous.
+ */
+export function getNonVacuousKeys(obj: Record<string, unknown>): string[] {
 	const keys: string[] = [];
 	for (const key of Object.keys(obj)) {
 		if (FORBIDDEN_KEYS.has(key)) continue;
@@ -263,7 +272,11 @@ function formatBulletLine(depth: number, marker: string, text: string): string {
 	return `${indent}${marker}${normalized}`;
 }
 
-function formatHorizonAtom(val: unknown): string | null {
+/**
+ * Formats an arbitrary value as a single-line horizon atom (`scalar`, `(size+)` bucket badge,
+ * or ellipsized `{...}` placeholder), or `null` if vacuous.
+ */
+export function formatHorizonAtom(val: unknown): string | null {
 	if (isVacuousSortOrGroupValue(val)) return null;
 	const u = unwrapLiquidValue(val);
 	if (isGroupByBucket(u)) {
@@ -317,7 +330,10 @@ function emitHorizonLine(
 	};
 }
 
-function renderKeyValueEntriesAtDepth(
+/**
+ * Renders `keys` of a plain record `obj` as Markdown list items at `depth` (1-based).
+ */
+export function renderKeyValueEntriesAtDepth(
 	obj: Record<string, unknown>,
 	keys: readonly string[],
 	depth: number,
@@ -433,7 +449,10 @@ function renderObjectItemInArray(
 	};
 }
 
-function renderGroupBucketAtDepth(
+/**
+ * Renders a `GroupByBucket` subtree as a Markdown list starting at `depth` (1-based).
+ */
+export function renderGroupBucketAtDepth(
 	bucket: GroupByBucket,
 	depth: number,
 	itemIndex: number,
@@ -496,7 +515,10 @@ function renderGroupBucketAtDepth(
 	};
 }
 
-function renderArrayAtDepth(
+/**
+ * Renders an array of items as a Markdown list starting at `depth` (1-based).
+ */
+export function renderArrayAtDepth(
 	items: readonly unknown[],
 	depth: number,
 	env: ListRenderEnv,
