@@ -2,6 +2,7 @@ import { Temporal } from '@js-temporal/polyfill';
 import {
 	compareDateIntervals,
 	type DateInterval,
+	formatEpochMsToMinuteIso,
 	MAX_SAFE_EPOCH_MS,
 	parseTemporalExpr,
 	wallClockToUtcMs,
@@ -97,16 +98,11 @@ export function formatEpochMsAtGrain(
 	grain: DisplayGrain,
 	timeZone: string,
 ): string {
-	const zdt = Temporal.Instant.fromEpochMilliseconds(epochMs).toZonedDateTimeISO(timeZone);
-	const yyyy = String(zdt.year).padStart(4, '0');
-	if (grain === 'year') return yyyy;
-	const mm = String(zdt.month).padStart(2, '0');
-	if (grain === 'month') return `${yyyy}-${mm}`;
-	const dd = String(zdt.day).padStart(2, '0');
-	if (grain === 'day') return `${yyyy}-${mm}-${dd}`;
-	const hh = String(zdt.hour).padStart(2, '0');
-	const min = String(zdt.minute).padStart(2, '0');
-	return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
+	const minuteIso = formatEpochMsToMinuteIso(epochMs, timeZone);
+	if (grain === 'minute') return minuteIso;
+	if (grain === 'day') return minuteIso.slice(0, -6);
+	if (grain === 'month') return minuteIso.slice(0, -9);
+	return minuteIso.slice(0, -12);
 }
 
 /**

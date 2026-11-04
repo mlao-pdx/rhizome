@@ -189,10 +189,11 @@ describe('Phase 6 evaluator invariants', () => {
 									new Set(evaluate(docs, queries.get(op)!).matches),
 								]),
 							);
-							for (const doc of docs) {
+							for (let i = 0; i < docs.length; i++) {
+								const doc = docs[i]!;
+								const t = times[i]!;
 								const matches = (op: (typeof operators)[number]) =>
 									results.get(op)!.has(doc);
-								const t = doc.file[virtualKey];
 								expect([matches('<'), matches('='), matches('>')]).toEqual([
 									t < start,
 									t >= start && t < end,

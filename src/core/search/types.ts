@@ -160,8 +160,8 @@ export interface NormalizedFileInfo {
 	basename: string;
 	extension: string;
 	parent: string; // "" for vault root
-	created: number; // Safe integer UTC epoch ms within [-8.64e15, 8.64e15]
-	modified: number; // Safe integer UTC epoch ms within [-8.64e15, 8.64e15]
+	created: string; // Minute-grain ISO-8601 datetime ("YYYY-MM-DDTHH:mm") in normalization timeZone
+	modified: string; // Minute-grain ISO-8601 datetime ("YYYY-MM-DDTHH:mm") in normalization timeZone
 	size: number; // Safe integer >= 0 (bytes)
 }
 

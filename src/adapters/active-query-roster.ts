@@ -186,8 +186,8 @@ class XxHash64Accumulator {
 		this.updateString(file.basename);
 		this.updateString(file.extension);
 		this.updateString(file.parent);
-		this.updateNumber(file.created);
-		this.updateNumber(file.modified);
+		this.updateString(file.created);
+		this.updateString(file.modified);
 		this.updateNumber(file.size);
 
 		this.updateStringArray(match.aliases);

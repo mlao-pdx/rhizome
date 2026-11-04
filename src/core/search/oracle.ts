@@ -1,5 +1,6 @@
 import { collectReferencedPropertyKeys } from './ast-utils';
 import { testRegex } from './literals';
+import { getInternalFileEpochMs } from './metadata-normalizer';
 import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
 import { hierarchicalTagMatch, normalizeTagBody, substringStringMatch } from './scopes';
 import { compareDateIntervals, parseTemporalExpr } from './temporal';
@@ -18,6 +19,18 @@ import {
 	type VaultEvaluationReport,
 } from './types';
 
+function resolveDocTimeZone(normalizationFingerprint: string): string {
+	try {
+		const parsed = JSON.parse(normalizationFingerprint) as { tz?: unknown };
+		if (typeof parsed.tz === 'string' && parsed.tz.length > 0) {
+			return parsed.tz;
+		}
+	} catch {
+		// Fall back to 'UTC'
+	}
+	return 'UTC';
+}
+
 export function hasPropertyOccurrence(doc: NormalizedDocument, lowerKey: string): boolean {
 	if (isVirtualFileKey(lowerKey)) return true;
 	return doc.propertyOccurrences.some((occ) => occ.key === lowerKey);
@@ -28,14 +41,38 @@ export function getTypedPropertyEntries(
 	lowerKey: string,
 ): TypedPropertyValue[] {
 	if (lowerKey === 'file.modified' || lowerKey === 'file.created') {
-		const t = doc.file[lowerKey === 'file.modified' ? 'modified' : 'created'];
-		return [
-			{
-				kind: 'datetime',
-				interval: { start: t, end: t + 1, grain: 'ms', raw: String(t) },
-				raw: String(t),
-			},
-		];
+		const isModified = lowerKey === 'file.modified';
+		const rawIso = String(doc.file[isModified ? 'modified' : 'created']);
+		const statMs = getInternalFileEpochMs(doc.file)?.[isModified ? 'mtime' : 'ctime'];
+		if (typeof statMs === 'number') {
+			return [
+				{
+					kind: 'datetime',
+					interval: { start: statMs, end: statMs + 1, grain: 'ms', raw: rawIso },
+					raw: rawIso,
+				},
+			];
+		}
+		const parsed = parseTemporalExpr(rawIso, {
+			allowYearOnly: true,
+			allowRelative: false,
+			timeZone: resolveDocTimeZone(doc.normalizationFingerprint),
+		});
+		if (parsed.ok) {
+			return [
+				{
+					kind: 'datetime',
+					interval: {
+						start: parsed.interval.start,
+						end: parsed.interval.start + 1,
+						grain: 'ms',
+						raw: rawIso,
+					},
+					raw: rawIso,
+				},
+			];
+		}
+		return [{ kind: 'null' }];
 	}
 	if (lowerKey === 'file.size') {
 		const s = doc.file.size;

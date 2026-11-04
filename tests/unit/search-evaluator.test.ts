@@ -253,7 +253,7 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 			'file.ext': 'legacy-ext',
 		};
 		const docs = [makeDoc(config, 'Archive/2026/Report.md', { frontmatter: shadowFm })];
-		for (const q of '[file.modified: = 2026-06-15];[file.created: = 2026-03-01];[file.size: = 4096];[file.extension: = md];[file.name: = Report.md];[file.basename: = Report];[file.path: = Archive/2026/Report.md];[file.parent: = Archive/2026];[file.mtime: = legacy-mtime];[file.ctime: = legacy-ctime];[file.ext: = legacy-ext]'.split(
+		for (const q of '[file.modified: = 2026-06-15];[file.created: = 2026-03-01];[file.modified: /^2026-06-15T/];[file.created: /^2026-03-01T/];[file.size: = 4096];[file.extension: = md];[file.name: = Report.md];[file.basename: = Report];[file.path: = Archive/2026/Report.md];[file.parent: = Archive/2026];[file.mtime: = legacy-mtime];[file.ctime: = legacy-ctime];[file.ext: = legacy-ext]'.split(
 			';',
 		)) {
 			assertEval(docs, q, config, ['Archive/2026/Report.md']);

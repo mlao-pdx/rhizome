@@ -634,8 +634,8 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		);
 
 		expect('stat' in doc.file).toBe(false);
-		expect(doc.file.created).toBe(1700000000000);
-		expect(doc.file.modified).toBe(1700000005000);
+		expect(doc.file.created).toBe('2023-11-14T17:13');
+		expect(doc.file.modified).toBe('2023-11-14T17:13');
 		expect(doc.file.size).toBe(512);
 		expect(doc.propertyOccurrences[0]?.rawValue).not.toBe(fmList);
 		expect(doc.properties['categories']).not.toBe(fmList);

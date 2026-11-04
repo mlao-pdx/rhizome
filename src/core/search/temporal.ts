@@ -64,6 +64,23 @@ export function wallClockToUtcMs(
 	return zdt.epochMilliseconds;
 }
 
+/**
+ * Formats a UTC epoch-millisecond timestamp as a minute-grain ISO-8601 string
+ * (`YYYY-MM-DDTHH:mm`) in `timeZone`.
+ */
+export function formatEpochMsToMinuteIso(epochMs: number, timeZone: string): string {
+	const zdt = Temporal.Instant.fromEpochMilliseconds(epochMs).toZonedDateTimeISO(timeZone);
+	const yyyy =
+		zdt.year < 0
+			? `-${String(Math.abs(zdt.year)).padStart(6, '0')}`
+			: String(zdt.year).padStart(4, '0');
+	const mm = String(zdt.month).padStart(2, '0');
+	const dd = String(zdt.day).padStart(2, '0');
+	const hh = String(zdt.hour).padStart(2, '0');
+	const min = String(zdt.minute).padStart(2, '0');
+	return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
+}
+
 function plainDateToDayInterval(
 	pd: Temporal.PlainDate,
 	timeZone: string,

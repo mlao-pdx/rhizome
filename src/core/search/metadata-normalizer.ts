@@ -9,12 +9,13 @@ import {
 	sanitizeScalar,
 } from './property-coercion';
 import { stripTagHash } from './scopes';
-import { MAX_SAFE_EPOCH_MS } from './temporal';
+import { formatEpochMsToMinuteIso, MAX_SAFE_EPOCH_MS } from './temporal';
 import type {
 	DocumentDiagnostic,
 	DocumentDiagnosticCode,
 	NormalizedAliasLocation,
 	NormalizedDocument,
+	NormalizedFileInfo,
 	NormalizedHeading,
 	NormalizedLink,
 	NormalizedPropertyLocation,
@@ -24,6 +25,21 @@ import type {
 	SanitizedScalar,
 	TypedPropertyValue,
 } from './types';
+
+const internalFileEpochMsMap = new WeakMap<
+	NormalizedFileInfo,
+	{ readonly ctime: number; readonly mtime: number }
+>();
+
+/**
+ * Returns the internal UTC epoch-millisecond `{ ctime, mtime }` recorded when `file`
+ * was normalized by `normalizeObsidianMetadata`, if available.
+ */
+export function getInternalFileEpochMs(
+	file: NormalizedFileInfo,
+): { readonly ctime: number; readonly mtime: number } | undefined {
+	return internalFileEpochMsMap.get(file);
+}
 
 export interface ObsidianLocInput {
 	readonly line: number;
@@ -587,18 +603,21 @@ export function normalizeObsidianMetadata(
 
 	const size = tfile.stat.size === 0 ? 0 : tfile.stat.size;
 
+	const file: NormalizedFileInfo = {
+		path: tfile.path,
+		name: tfile.name,
+		basename: tfile.basename,
+		extension: tfile.extension,
+		parent: tfile.parent?.path && tfile.parent.path !== '/' ? tfile.parent.path : '',
+		created: formatEpochMsToMinuteIso(ctime, timeZone),
+		modified: formatEpochMsToMinuteIso(mtime, timeZone),
+		size,
+	};
+	internalFileEpochMsMap.set(file, { ctime, mtime });
+
 	return {
 		normalizationFingerprint,
-		file: {
-			path: tfile.path,
-			name: tfile.name,
-			basename: tfile.basename,
-			extension: tfile.extension,
-			parent: tfile.parent?.path && tfile.parent.path !== '/' ? tfile.parent.path : '',
-			created: ctime,
-			modified: mtime,
-			size,
-		},
+		file,
 		aliases,
 		aliasLocations,
 		tags,

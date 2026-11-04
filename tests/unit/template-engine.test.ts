@@ -521,8 +521,8 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 						extension: 'md',
 						folder: 'Projects',
 						parent: 'Projects',
-						created: 1700000000000,
-						modified: Date.UTC(2026, 9, 31, 8, 33, 0, 0),
+						created: '2023-11-14T22:13',
+						modified: '2026-10-31T08:33',
 						size: 1024,
 					},
 					aliases: ['Project Alpha', 'PA'],
@@ -615,8 +615,8 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 						extension: 'md',
 						folder: 'Daily',
 						parent: 'Daily',
-						created: Date.UTC(2026, 9, 31, 6, 15, 0, 0),
-						modified: Date.UTC(2026, 9, 31, 8, 30, 0, 0),
+						created: '2026-10-31T06:15',
+						modified: '2026-10-31T08:30',
 						size: 256,
 					},
 					aliases: [],
@@ -633,8 +633,8 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 				},
 			],
 			notes: [
-				{ file: { basename: 'TodayNote', created: Date.UTC(2026, 9, 31, 7, 0, 0, 0) } },
-				{ file: { basename: 'OldNote', created: Date.UTC(2026, 9, 20, 7, 0, 0, 0) } },
+				{ file: { basename: 'TodayNote', created: '2026-10-31T07:00' } },
+				{ file: { basename: 'OldNote', created: '2026-10-20T07:00' } },
 			],
 		}));
 		const explainQuery = vi.fn(async () => '');
