@@ -11,17 +11,16 @@ import {
 	uniqFilter,
 	whereFilter,
 } from './collection-filters';
+import { listFilter, sentenceFilter } from './list-filter';
 import {
-	evaluateSelectorOnItem,
 	isPlainRecord,
 	type LiquidFilterThis,
-	type ParsedPathSelector,
 	parsePickOrAggSelectors,
+	pickFromObject,
 	registerFallbackFilter,
 	safeMergeKeyValue,
 	shallowClonePlainRecord,
 	splitCleanSegments,
-	writeDeepTargetValue,
 } from './selector-evaluator';
 import { groupByFilter, sortFilter, sortNaturalFilter } from './sort-group-filters';
 import { tableFilter } from './table-filter';
@@ -69,32 +68,7 @@ export function parsePrunePaths(args: readonly unknown[]): (readonly string[])[]
 	return paths;
 }
 
-function pickFromObject(
-	item: unknown,
-	selectors: readonly ParsedPathSelector[],
-	filterThis: LiquidFilterThis | void,
-): Record<string, unknown> {
-	const out: Record<string, unknown> = {};
-	const u = unwrapLiquidValue(item);
-	if (!isPlainRecord(u)) {
-		return out;
-	}
-	const promotedByContainer = new Map<Record<string, unknown>, Set<string>>();
-	const clonedContainers = new Set<Record<string, unknown>>([out]);
-
-	for (const selector of selectors) {
-		if (FORBIDDEN_KEYS.has(selector.outputKey)) continue;
-		const val = evaluateSelectorOnItem(u, selector, filterThis);
-		writeDeepTargetValue(
-			out,
-			promotedByContainer,
-			clonedContainers,
-			selector.outputSegments,
-			val,
-		);
-	}
-	return out;
-}
+export { pickFromObject };
 
 /**
  * Liquid `pick` filter: extracts one or more root or deep-dotted paths (with optional
@@ -297,6 +271,9 @@ function seedFallbackFilters(): void {
 		['uniq', uniqFilter],
 		['sum', sumFilter],
 		['table', tableFilter],
+		['list', listFilter],
+		['sentence', sentenceFilter],
+		['array_to_sentence_string', sentenceFilter],
 	];
 	for (const [name, fn] of entries) {
 		registerFallbackFilter(name, fn as FilterImplOptions);
@@ -347,4 +324,7 @@ export function registerPayloadLiquidFilters(liquid: Liquid): void {
 	liquid.registerFilter('uniq', bindContextFilter(uniqFilter));
 	liquid.registerFilter('sum', bindContextFilter(sumFilter));
 	liquid.registerFilter('table', bindContextFilter(tableFilter));
+	liquid.registerFilter('list', bindContextFilter(listFilter));
+	liquid.registerFilter('sentence', bindContextFilter(sentenceFilter));
+	liquid.registerFilter('array_to_sentence_string', bindContextFilter(sentenceFilter));
 }

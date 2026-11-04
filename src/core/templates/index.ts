@@ -12,6 +12,7 @@ export * from './group-by-filter';
 export * from './sort-group-filters';
 export * from './collection-filters';
 export * from './table-filter';
+export * from './list-filter';
 export * from './template-context';
 export * from './template-engine';
 export * from './template-analyzer';

@@ -648,3 +648,34 @@ export function writeDeepTargetValue(
 	}
 	safeMergeKeyValue(current, promotedSet, leafKey, val);
 }
+
+/**
+ * Projects a single plain record through `selectors`, writing each evaluated selector value
+ * into a new plain object via `writeDeepTargetValue`.
+ */
+export function pickFromObject(
+	item: unknown,
+	selectors: readonly ParsedPathSelector[],
+	filterThis: LiquidFilterThis | void,
+): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	const u = unwrapLiquidValue(item);
+	if (!isPlainRecord(u)) {
+		return out;
+	}
+	const promotedByContainer = new Map<Record<string, unknown>, Set<string>>();
+	const clonedContainers = new Set<Record<string, unknown>>([out]);
+
+	for (const selector of selectors) {
+		if (FORBIDDEN_KEYS.has(selector.outputKey)) continue;
+		const val = evaluateSelectorOnItem(u, selector, filterThis);
+		writeDeepTargetValue(
+			out,
+			promotedByContainer,
+			clonedContainers,
+			selector.outputSegments,
+			val,
+		);
+	}
+	return out;
+}

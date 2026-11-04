@@ -5,10 +5,12 @@ import {
 	compareRhizomeValues,
 	groupByFilter,
 	isVacuousSortOrGroupValue,
+	listFilter,
 	mergeFilter,
 	percentageFilter,
 	pickFilter,
 	pruneFilter,
+	sentenceFilter,
 	sortFilter,
 	sortNaturalFilter,
 	tableFilter,
@@ -403,6 +405,76 @@ describe('Payload-Shaping & Aggregation Filter Property Invariants', () => {
 						const unescapedPipes =
 							line.replace(/\\\\/g, '').replace(/\\\|/g, '').split('|').length - 1;
 						expect(unescapedPipes).toBe(expectedUnescapedPipes);
+					}
+				},
+			),
+		);
+	});
+
+	it('Markdown List & Sentence Structural and Horizon Badge Invariant: listFilter and sentenceFilter never mutate inputs or leak FORBIDDEN_KEYS, emit valid bullet lines, and use (size+) iff depth horizon is hit', async () => {
+		const singleLineScalarArb = fc.oneof(
+			fc.constant(null),
+			fc.constant(''),
+			fc.integer({ min: -500, max: 500 }),
+			fc.boolean(),
+			fc.stringMatching(/^[a-zA-Z0-9 _-]{1,12}$/),
+		);
+		const nestedRowArb = fc.dictionary(safeKeyArb, singleLineScalarArb, {
+			minKeys: 1,
+			maxKeys: 4,
+		});
+		const styleSpecArb = fc.constantFrom(
+			'-',
+			'1.',
+			'-, ...',
+			'1., ...',
+			'1., -',
+			'1., -, ...',
+			'-, 1., -',
+		);
+
+		await assertProperty(
+			'templates/payload-filters__list-and-sentence-structural-invariant',
+			fc.property(
+				fc.array(nestedRowArb, { minLength: 0, maxLength: 8 }),
+				styleSpecArb,
+				safeKeyArb,
+				safeKeyArb,
+				(rows, styleSpec, groupKey, pickKey) => {
+					const snapshotBefore = JSON.stringify(rows);
+
+					const sentenceOut = sentenceFilter(rows);
+					const listOut = listFilter(rows, styleSpec);
+					expect(typeof sentenceOut).toBe('string');
+					expect(typeof listOut).toBe('string');
+					expect(JSON.stringify(rows)).toBe(snapshotBefore);
+
+					if (listOut.length > 0) {
+						for (const line of listOut.split('\n')) {
+							expect(line.includes('\r')).toBe(false);
+							expect(line.includes('__proto__')).toBe(false);
+							expect(/^(?: {2})*(?:- |\d+\. ).+/.test(line)).toBe(true);
+						}
+					}
+
+					// Check GroupByBucket (size) vs (size+) horizon badge invariant on 1-key leaf projection
+					const rowsWithPickAndGroup = rows.map((r, idx) => ({
+						...r,
+						[groupKey]: idx % 2 === 0 ? 'GroupA' : 'GroupB',
+						[pickKey]: `Item_${idx}`,
+					}));
+					const grouped = groupByFilter(rowsWithPickAndGroup, groupKey);
+					if (grouped.length > 0) {
+						// With depth N = 1 ("1."), bucket items at depth 2 hit horizon -> (size+)
+						const truncatedList = listFilter(grouped, '1.', pickKey);
+						const firstTruncatedLine = truncatedList.split('\n')[0] ?? '';
+						expect(firstTruncatedLine).toContain(`(${grouped[0]!.size}+)`);
+
+						// With depth N = 6 ("1., ..."), 1-key scalar items at depth 2 do not hit horizon -> (size)
+						const fullList = listFilter(grouped, '1., ...', pickKey);
+						const firstFullLine = fullList.split('\n')[0] ?? '';
+						expect(firstFullLine).toContain(`(${grouped[0]!.size})`);
+						expect(firstFullLine).not.toContain(`(${grouped[0]!.size}+)`);
 					}
 				},
 			),

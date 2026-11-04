@@ -103,7 +103,11 @@ export function parseTableAlignments(
 	return alignments;
 }
 
-function formatTableScalar(val: unknown): string | null {
+/**
+ * Formats a scalar value (`string`, finite `number`, `boolean`, or `TemporalDrop`) for table/list
+ * rendering without coercing strings, or returns `null` when the value is vacuous or non-scalar.
+ */
+export function formatTableScalar(val: unknown): string | null {
 	const u = unwrapLiquidValue(val);
 	if (typeof u === 'string') {
 		return u.length > 0 ? u : null;
@@ -122,7 +126,11 @@ function formatTableScalar(val: unknown): string | null {
 	return null;
 }
 
-function formatEllipsizedObject(obj: Record<string, unknown>): string {
+/**
+ * Formats a plain object as a single-line ellipsized summary (`{...}`, `{k: v, ...}`,
+ * or `{first: v1, ..., last: vn}`) based on its non-vacuous scalar properties.
+ */
+export function formatEllipsizedObject(obj: Record<string, unknown>): string {
 	const scalarPairs: string[] = [];
 	for (const key of Object.keys(obj)) {
 		if (FORBIDDEN_KEYS.has(key)) continue;
