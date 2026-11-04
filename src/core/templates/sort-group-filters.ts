@@ -47,6 +47,7 @@ export interface ParsedSortSelector {
 	readonly segments: readonly string[];
 	readonly filterRaw: string | null;
 	readonly direction: SortDirection;
+	readonly isNullLiteral?: boolean;
 }
 
 const GRAIN_ORDER: Readonly<Record<DisplayGrain, number>> = Object.freeze({
@@ -173,6 +174,7 @@ function parseSingleSortPiece(rawPiece: string): ParsedSortSelector | null {
 		segments: parsed.segments,
 		filterRaw: parsed.filterRaw,
 		direction,
+		...(parsed.isNullLiteral ? { isNullLiteral: true } : {}),
 	});
 }
 
@@ -442,7 +444,7 @@ function executeSort(
 	const decorated = items.map((item, index) => {
 		const classifiedKeys = selectors.map((sel) => {
 			const rawKey =
-				sel.segments.length === 0 && sel.filterRaw === null
+				!sel.isNullLiteral && sel.segments.length === 0 && sel.filterRaw === null
 					? unwrapLiquidValue(item)
 					: evaluateSelectorOnItem(item, sel, filterThis);
 			return classifySortKeyValue(rawKey, timeZone, referenceTimeMs);

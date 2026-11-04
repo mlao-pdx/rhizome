@@ -20,7 +20,7 @@ import {
 
 function resolveCollectionSelector(
 	rawSelector: unknown,
-): Pick<ParsedPathSelector, 'segments' | 'filterRaw'> | null {
+): Pick<ParsedPathSelector, 'segments' | 'filterRaw' | 'isNullLiteral'> | null {
 	const u = unwrapLiquidValue(rawSelector);
 	if (typeof u !== 'string') return null;
 	const trimmed = u.trim();
@@ -33,10 +33,10 @@ function resolveCollectionSelector(
 
 function evalCollectionItem(
 	item: unknown,
-	selector: Pick<ParsedPathSelector, 'segments' | 'filterRaw'>,
+	selector: Pick<ParsedPathSelector, 'segments' | 'filterRaw' | 'isNullLiteral'>,
 	filterThis: LiquidFilterThis | void,
 ): unknown {
-	if (selector.segments.length === 0 && selector.filterRaw === null) {
+	if (!selector.isNullLiteral && selector.segments.length === 0 && selector.filterRaw === null) {
 		return unwrapLiquidValue(item);
 	}
 	return evaluateSelectorOnItem(item, selector, filterThis);

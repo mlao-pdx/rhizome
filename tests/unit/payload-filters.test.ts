@@ -952,6 +952,43 @@ describe('Payload-Shaping & Aggregation Filters (pick, prune, merge, aggregate/a
 				'a_item',
 			]);
 
+			// Reserved `nil` and `null` source selectors always start from null (even if item has a 'nil'/'null' key)
+			// and support parenthesized expressions inside selector filter arguments
+			const itemWithNilProp = {
+				nil: 'should-not-be-read',
+				null: 'should-not-be-read-either',
+				file: { basename: 'Alpha' },
+			};
+			expect(
+				pickFilter(
+					itemWithNilProp,
+					"nil | default: 'foo.bar' | upcase as baz",
+					'null | default: (file.basename | downcase) as lowerName',
+				),
+			).toEqual({
+				baz: 'FOO.BAR',
+				lowerName: 'alpha',
+			});
+			expect(mapFilter([itemWithNilProp], 'nil')).toEqual([null]);
+			expect(mapFilter([itemWithNilProp], "nil | default: 'const'")).toEqual(['const']);
+
+			// Assigning to `nil` or `null` (or omitting `as <target>` when using `nil`/`null` in pick/agg) throws
+			expect(() => pickFilter(itemWithNilProp, 'file.basename as nil')).toThrow(
+				/Cannot assign to reserved keyword 'nil'/,
+			);
+			expect(() => pickFilter(itemWithNilProp, 'file.basename as meta.null')).toThrow(
+				/Cannot assign to reserved keyword 'meta\.null'/,
+			);
+			expect(() => pickFilter(itemWithNilProp, ['nil', 'file.basename'])).toThrow(
+				/Cannot assign to reserved keyword 'nil'/,
+			);
+			expect(() => pickFilter(itemWithNilProp, ['title', 'nil'])).toThrow(
+				/uses 'nil' without an 'as <target>' alias/,
+			);
+			expect(() => pickFilter(itemWithNilProp, "nil | default: 'foo'")).toThrow(
+				/uses 'nil' without an 'as <target>' alias/,
+			);
+
 			// Verify *_exp filters are unregistered from createRhizomeLiquidInstance
 			const liquid = createRhizomeLiquidInstance(createQueryTagEnvironment());
 			for (const removed of [

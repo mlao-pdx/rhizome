@@ -36,6 +36,7 @@ export interface GroupByBucket {
 interface ParsedGroupSelector {
 	readonly segments: readonly string[];
 	readonly filterRaw: string | null;
+	readonly isNullLiteral?: boolean;
 }
 
 const TEMPORAL_START_CHAR_RE = /^[0-9@tTyYlLnN+-]/;
@@ -82,6 +83,7 @@ function parseGroupBySelectors(args: readonly unknown[]): ParsedGroupSelector[] 
 						Object.freeze({
 							segments: parsed.segments,
 							filterRaw: parsed.filterRaw,
+							...(parsed.isNullLiteral ? { isNullLiteral: true } : {}),
 						}),
 					);
 				}
@@ -259,7 +261,7 @@ function groupItemsAtLevel(
 	for (let i = 0; i < items.length; i++) {
 		const item = items[i];
 		const rawVal =
-			selector.segments.length === 0 && selector.filterRaw === null
+			!selector.isNullLiteral && selector.segments.length === 0 && selector.filterRaw === null
 				? unwrapLiquidValue(item)
 				: evaluateSelectorOnItem(item, selector, filterThis);
 		evaluatedValues[i] = rawVal;

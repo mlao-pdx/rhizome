@@ -326,16 +326,10 @@ function createFilteredValueEvaluationToken(
 	return propAccessToken;
 }
 
-function scanParenthesizedSlice(
-	input: string,
-	openParenIdx: number,
-	limit: number,
-): { closeParenIdx: number; hasTopLevelRangeDots: boolean; hasTopLevelPipe: boolean } {
+function scanParenthesizedSlice(input: string, openParenIdx: number, limit: number): number {
 	let depth = 1;
 	let quote: string | null = null;
 	let escaped = false;
-	let hasTopLevelRangeDots = false;
-	let hasTopLevelPipe = false;
 
 	for (let i = openParenIdx + 1; i < limit; i++) {
 		const ch = input[i]!;
@@ -360,21 +354,12 @@ function scanParenthesizedSlice(
 		if (ch === ')') {
 			depth--;
 			if (depth === 0) {
-				return { closeParenIdx: i, hasTopLevelRangeDots, hasTopLevelPipe };
-			}
-			continue;
-		}
-		if (depth === 1) {
-			if (ch === '|') {
-				hasTopLevelPipe = true;
-			} else if (!hasTopLevelPipe && ch === '.' && i + 1 < limit && input[i + 1] === '.') {
-				hasTopLevelRangeDots = true;
-				i++;
+				return i;
 			}
 		}
 	}
 
-	return { closeParenIdx: -1, hasTopLevelRangeDots, hasTopLevelPipe };
+	return -1;
 }
 
 function createRangeEvaluationToken(
@@ -459,39 +444,20 @@ export function installTemporalTokenizerExtensions(): void {
 		const begin = this.p;
 		if (this.peek() !== '(') return undefined;
 
-		const { closeParenIdx, hasTopLevelRangeDots, hasTopLevelPipe } = scanParenthesizedSlice(
-			this.input,
-			begin,
-			this.N,
-		);
+		const closeParenIdx = scanParenthesizedSlice(this.input, begin, this.N);
 		this.assert(closeParenIdx !== -1, 'parenthesized expression not closed');
-
-		if (hasTopLevelRangeDots && !hasTopLevelPipe) {
-			this.advance(1);
-			const lhs = origReadValue.call(this);
-			this.assert(lhs, () => `unexpected token ${this.snapshot()}, value expected`);
-			this.skipBlank();
-			this.assert(this.read() === '.' && this.read() === '.', 'invalid range syntax');
-			const rhs = origReadValue.call(this);
-			this.assert(rhs, () => `unexpected token ${this.snapshot()}, value expected`);
-			this.skipBlank();
-			this.assert(this.read() === ')', 'invalid range syntax');
-			return createRangeEvaluationToken(
-				this.input,
-				begin,
-				this.p,
-				lhs!,
-				rhs!,
-				this.file,
-				true,
-			) as unknown as ReturnType<Tokenizer['readGroupOrRange']>;
-		}
 
 		const subTokenizer = new Tokenizer(this.input, {}, this.file, [begin + 1, closeParenIdx]);
 		const selfInternals = this as unknown as { opTrie: unknown; literalTrie: unknown };
-		const subInternals = subTokenizer as unknown as { opTrie: unknown; literalTrie: unknown };
+		const subInternals = subTokenizer as unknown as {
+			opTrie: unknown;
+			literalTrie: unknown;
+			parenthesizedInitialStart?: number;
+		};
 		subInternals.opTrie = selfInternals.opTrie;
 		subInternals.literalTrie = selfInternals.literalTrie;
+		subTokenizer.skipBlank();
+		subInternals.parenthesizedInitialStart = subTokenizer.p;
 
 		const filteredValueToken = subTokenizer.readFilteredValue();
 		subTokenizer.skipBlank();
@@ -517,8 +483,16 @@ export function installTemporalTokenizerExtensions(): void {
 		if (!lhs) return lhs;
 		if (this.peek() === '.' && this.peek(1) === '.') {
 			this.advance(2);
+			this.assert(
+				this.p < this.N && !/\s/.test(this.peek()),
+				() => `unexpected token ${this.snapshot()}, value expected`,
+			);
 			const rhs = origReadValue.call(this);
 			this.assert(rhs, () => `unexpected token ${this.snapshot()}, value expected`);
+			const parenthesizedInitialStart = (
+				this as unknown as { parenthesizedInitialStart?: number }
+			).parenthesizedInitialStart;
+			const isParenthesized = parenthesizedInitialStart === begin;
 			return createRangeEvaluationToken(
 				this.input,
 				begin,
@@ -526,7 +500,7 @@ export function installTemporalTokenizerExtensions(): void {
 				lhs,
 				rhs!,
 				this.file,
-				false,
+				isParenthesized,
 			) as unknown as ReturnType<Tokenizer['readValue']>;
 		}
 		return lhs;

@@ -10,6 +10,7 @@ import {
 } from 'liquidjs';
 import {
 	createRhizomeLiquidOperators,
+	installTemporalTokenizerExtensions,
 	readContextLiquidInstance,
 	TemporalDrop,
 	unwrapLiquidValue,
@@ -26,6 +27,7 @@ export interface ParsedPathSelector {
 	readonly filterRaw: string | null;
 	readonly outputSegments: readonly string[];
 	readonly outputKey: string;
+	readonly isNullLiteral?: boolean;
 }
 
 /**
@@ -217,27 +219,39 @@ export function parseSingleSelectorString(raw: string): ParsedPathSelector | nul
 	}
 
 	const isSelfSelector = rawSourcePath === '.' || rawSourcePath === 'this';
-	const segments = isSelfSelector ? [] : splitCleanSegments(rawSourcePath);
+	const isNullLiteral = rawSourcePath === 'nil' || rawSourcePath === 'null';
+	const segments = isSelfSelector || isNullLiteral ? [] : splitCleanSegments(rawSourcePath);
 	if (!segments) return null;
 
 	if (targetPath !== null) {
 		const outputSegments = splitCleanSegments(targetPath);
 		if (!outputSegments) return null;
+		if (outputSegments.some((seg) => seg === 'nil' || seg === 'null')) {
+			throw new Error(
+				`Cannot assign to reserved keyword '${targetPath}' in selector '${trimmed}'. Specify a valid property name after 'as'.`,
+			);
+		}
 		const outputKey = outputSegments[outputSegments.length - 1]!;
 		return Object.freeze({
 			segments: Object.freeze(segments),
 			filterRaw: rawFilter,
 			outputSegments: Object.freeze(outputSegments),
 			outputKey,
+			...(isNullLiteral ? { isNullLiteral: true } : {}),
 		});
 	}
 
-	const leaf = isSelfSelector ? 'this' : segments[segments.length - 1]!;
+	const leaf = isSelfSelector
+		? 'this'
+		: isNullLiteral
+			? rawSourcePath
+			: segments[segments.length - 1]!;
 	return Object.freeze({
 		segments: Object.freeze(segments),
 		filterRaw: rawFilter,
 		outputSegments: Object.freeze([leaf]),
 		outputKey: leaf,
+		...(isNullLiteral ? { isNullLiteral: true } : {}),
 	});
 }
 
@@ -366,7 +380,17 @@ export function parsePickOrAggSelectors(args: readonly unknown[]): ParsedPathSel
 		if (typeof u === 'string') {
 			for (const piece of splitTopLevelSelectorList(u)) {
 				const parsed = parseSingleSelectorString(piece);
-				if (parsed) selectors.push(parsed);
+				if (parsed) {
+					if (
+						parsed.isNullLiteral &&
+						(parsed.outputKey === 'nil' || parsed.outputKey === 'null')
+					) {
+						throw new Error(
+							`Selector '${piece}' uses '${parsed.outputKey}' without an 'as <target>' alias.`,
+						);
+					}
+					selectors.push(parsed);
+				}
 			}
 			return;
 		}
@@ -451,6 +475,7 @@ export function registerFallbackFilter(name: string, impl: FilterImplOptions): v
 }
 
 function getCompiledFilterTokens(filterRaw: string): ReturnType<Tokenizer['readFilters']> {
+	installTemporalTokenizerExtensions();
 	let tokens = cachedFilterTokens.get(filterRaw);
 	if (!tokens) {
 		const tokenizer = new Tokenizer(`| ${filterRaw}`, fallbackOperators);
@@ -473,15 +498,16 @@ function getCompiledFilterTokens(filterRaw: string): ReturnType<Tokenizer['readF
 
 /**
  * Evaluates a `ParsedPathSelector` against `item`: reads `readDeepPath(item, selector.segments)`
- * and, when `selector.filterRaw !== null`, runs the Liquid filter pipeline with `item`
- * pushed onto the active `Context` so filter arguments can reference sibling properties of `item`.
+ * (or `null` when `selector.isNullLiteral === true`) and, when `selector.filterRaw !== null`,
+ * runs the Liquid filter pipeline with `item` pushed onto the active `Context` so filter arguments
+ * can reference sibling properties of `item`.
  */
 export function evaluateSelectorOnItem(
 	item: unknown,
-	selector: Pick<ParsedPathSelector, 'segments' | 'filterRaw'>,
+	selector: Pick<ParsedPathSelector, 'segments' | 'filterRaw' | 'isNullLiteral'>,
 	filterThis?: LiquidFilterThis | void,
 ): unknown {
-	const rawVal = readDeepPath(item, selector.segments);
+	const rawVal = selector.isNullLiteral ? null : readDeepPath(item, selector.segments);
 	if (selector.filterRaw === null) {
 		return rawVal;
 	}

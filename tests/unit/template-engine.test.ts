@@ -803,6 +803,52 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		);
 		expect(lenientRes.ok).toBe(true);
 		expect(lenientRes.markdown).toBe('[][][]');
+
+		// Unparenthesized range inside a parenthesized filter argument remains strict (not lenient)
+		const unparenthesizedArgRangeRes = await renderRhizomeTemplate(
+			'{{ (nil | default: properties.missing..false) }}',
+			{
+				runQueries: async () => ({}),
+				explainQuery: async () => '',
+				runtimeContext: {
+					referenceTimeMs: refMs,
+					timeZone: 'UTC',
+				},
+			},
+		);
+		expect(unparenthesizedArgRangeRes.ok).toBe(false);
+		expect(unparenthesizedArgRangeRes.diagnostics).toHaveLength(1);
+		expect(unparenthesizedArgRangeRes.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
+		expect(unparenthesizedArgRangeRes.diagnostics[0]?.issue).toContain(
+			"'properties.missing' is not a valid temporal literal",
+		);
+
+		// Spaced numeric and temporal intervals (unparenthesized or parenthesized) are rejected at parse time
+		const spacedRangeCases = [
+			'{{ 1 .. 5 }}',
+			'{{ 1.. 5 }}',
+			'{{ 1 ..5 }}',
+			'{{ (1 .. 5) }}',
+			'{{ (1 .. 5 | join: "-") }}',
+			'{{ yesterday .. tomorrow }}',
+			'{{ yesterday.. tomorrow }}',
+			'{{ yesterday ..tomorrow }}',
+			'{{ (yesterday .. tomorrow) }}',
+			'{{ ("2026-01-01" .. "2026-01-31") }}',
+		];
+		for (const source of spacedRangeCases) {
+			const spacedRes = await renderRhizomeTemplate(source, {
+				runQueries: async () => ({}),
+				explainQuery: async () => '',
+				runtimeContext: {
+					referenceTimeMs: refMs,
+					timeZone: 'UTC',
+				},
+			});
+			expect(spacedRes.ok).toBe(false);
+			expect(spacedRes.diagnostics).toHaveLength(1);
+			expect(spacedRes.diagnostics[0]?.code).toBe('TEMPLATE_SYNTAX_ERROR');
+		}
 	});
 
 	it('disambiguates bare 4-digit year literals vs epoch-ms numeric variables (including 0) when paired with a temporal endpoint', async () => {
@@ -917,6 +963,11 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 				'for_sorted={% for n in (query.notes | sort: "file.basename") %}{{ n.file.basename }};{% endfor %}',
 				'if_cond={% if (file.basename | downcase) == "readme" %}matched{% else %}nope{% endif %}',
 				'chain={{ (query.notes | sort: "file.stat.mtime desc")[0].file.basename }}',
+				'lit_str={{ ("hello" | upcase) }}',
+				'lit_num={{ (42 | plus: 8) }}',
+				'lit_nil={{ (nil | default: "fallback") }}',
+				'range_pipe={{ (1..3 | join: "-") }}',
+				'lenient_range_pipe={{ (missingA..missingB | default: "empty") }}',
 			].join('\n'),
 			{
 				runQueries: async () => ({
@@ -945,6 +996,11 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		expect(res.markdown).toContain('for_sorted=Alpha;Beta;Gamma;');
 		expect(res.markdown).toContain('if_cond=matched');
 		expect(res.markdown).toContain('chain=Gamma');
+		expect(res.markdown).toContain('lit_str=HELLO');
+		expect(res.markdown).toContain('lit_num=50');
+		expect(res.markdown).toContain('lit_nil=fallback');
+		expect(res.markdown).toContain('range_pipe=1-2-3');
+		expect(res.markdown).toContain('lenient_range_pipe=empty');
 	});
 
 	it('supports both Obsidian Moment.js date formats and LiquidJS strftime formats in | date using % as the flavor trigger', async () => {
