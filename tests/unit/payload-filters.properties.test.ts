@@ -11,6 +11,7 @@ import {
 	pruneFilter,
 	sortFilter,
 	sortNaturalFilter,
+	tableFilter,
 } from '../../src/core/templates';
 import { assertProperty } from '../support/assertProperty';
 
@@ -333,6 +334,76 @@ describe('Payload-Shaping & Aggregation Filter Property Invariants', () => {
 					const snapshot = JSON.stringify(nestedRows);
 					pickFilter(nestedRows, 'nested', `nested.${k1} as nested.${k2}`);
 					expect(JSON.stringify(nestedRows)).toBe(snapshot);
+				},
+			),
+		);
+	});
+
+	it('GFM Table Structural & Pipe-Escaping Invariant: tableFilter preserves column delimiter counts across all rows and escapes internal pipes/newlines', async () => {
+		const trickyStringArb = fc.oneof(
+			fc.string({ minLength: 0, maxLength: 16 }),
+			fc.constantFrom(
+				'[[Note|Alias]]',
+				'a | b \\| c',
+				'a \\\\| b \\\\\\| c',
+				'line1\nline2\r\nline3',
+				'2026-10-15',
+				'{already}',
+			),
+		);
+		const trickyKeyArb = fc
+			.oneof(safeKeyArb, fc.constantFrom('Book Title', 'Col | Pipe', 'Line\nBreak', 'Rating'))
+			.filter((k) => k !== '__proto__' && k !== 'prototype' && k !== 'constructor');
+
+		const tableCellArb = fc.oneof(
+			fc.constant(null),
+			fc.constant(undefined),
+			trickyStringArb,
+			fc.integer({ min: -1000, max: 1000 }),
+			fc.boolean(),
+			fc.array(trickyStringArb, { minLength: 0, maxLength: 4 }),
+			fc.dictionary(safeKeyArb, scalarValueArb, { maxKeys: 4 }),
+		);
+		const tableRowArb = fc.dictionary(trickyKeyArb, tableCellArb, { maxKeys: 5 });
+		const alignSpecArb = fc
+			.tuple(fc.constantFrom('', '<', '^', '>'), trickyKeyArb)
+			.map(([sigil, col]) => `${sigil}${col}`);
+
+		await assertProperty(
+			'templates/payload-filters__table-gfm-structural-invariant',
+			fc.property(
+				fc.array(tableRowArb, { minLength: 0, maxLength: 8 }),
+				fc.array(alignSpecArb, { minLength: 0, maxLength: 4 }),
+				(rows, alignSpecs) => {
+					const snapshotBefore = JSON.stringify(rows);
+					const out = tableFilter(rows, ...alignSpecs);
+					expect(JSON.stringify(rows)).toBe(snapshotBefore);
+
+					const discoveredCols = new Set<string>();
+					for (const r of rows) {
+						for (const k of Object.keys(r)) {
+							discoveredCols.add(k);
+						}
+					}
+
+					if (rows.length === 0 || discoveredCols.size === 0) {
+						expect(out).toBe('');
+						return;
+					}
+
+					const lines = out.split('\n');
+					expect(lines).toHaveLength(rows.length + 2);
+
+					const expectedUnescapedPipes = discoveredCols.size + 1;
+					for (const line of lines) {
+						expect(line.includes('\r')).toBe(false);
+						expect(line.startsWith('| ')).toBe(true);
+						expect(line.endsWith(' |')).toBe(true);
+						// Count unescaped `|` characters (not preceded by an odd number of `\`)
+						const unescapedPipes =
+							line.replace(/\\\\/g, '').replace(/\\\|/g, '').split('|').length - 1;
+						expect(unescapedPipes).toBe(expectedUnescapedPipes);
+					}
 				},
 			),
 		);

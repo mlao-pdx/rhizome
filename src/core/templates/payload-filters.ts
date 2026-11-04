@@ -24,6 +24,7 @@ import {
 	writeDeepTargetValue,
 } from './selector-evaluator';
 import { groupByFilter, sortFilter, sortNaturalFilter } from './sort-group-filters';
+import { tableFilter } from './table-filter';
 import {
 	attachLiquidInstanceToOptions,
 	parseFiniteRangeNumber,
@@ -285,6 +286,7 @@ function seedFallbackFilters(): void {
 		['map', mapFilter],
 		['uniq', uniqFilter],
 		['sum', sumFilter],
+		['table', tableFilter],
 	];
 	for (const [name, fn] of entries) {
 		registerFallbackFilter(name, fn as FilterImplOptions);
@@ -334,4 +336,5 @@ export function registerPayloadLiquidFilters(liquid: Liquid): void {
 	liquid.registerFilter('map', bindContextFilter(mapFilter));
 	liquid.registerFilter('uniq', bindContextFilter(uniqFilter));
 	liquid.registerFilter('sum', bindContextFilter(sumFilter));
+	liquid.registerFilter('table', bindContextFilter(tableFilter));
 }
