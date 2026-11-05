@@ -355,4 +355,53 @@ describe('explainQuery', () => {
 			'[`/foo|bar/`](https://regex101.com/?flavor=javascript&regex=foo%7Cbar&flags=)',
 		);
 	});
+
+	it('explains @this.* leaves with resolved host values and emits warning callouts when @this.* is missing on hostDoc', () => {
+		const cfg = makeConfig({ propertyTypes: { priority: 'number' } });
+		const hostDoc = {
+			normalizationFingerprint: cfg.normalizationFingerprint,
+			file: {
+				path: 'Projects/Host.md',
+				name: 'Host.md',
+				basename: 'Host',
+				extension: 'md',
+				parent: 'Projects',
+				created: '2026-10-20T09:00',
+				modified: '2026-10-22T15:30',
+				size: 512,
+			},
+			aliases: [],
+			aliasLocations: [],
+			tags: ['alpha', 'beta'],
+			tagLocations: [],
+			headings: [],
+			links: [],
+			embeds: [],
+			blocks: [],
+			propertyOccurrences: [],
+			propertyKeys: ['priority'],
+			properties: Object.assign(Object.create(null) as Record<string, unknown>, {
+				priority: 3,
+			}),
+			propertyLocations: [],
+			diagnostics: [],
+		};
+
+		const md = explainQuery(
+			'tag:@this.tags AND [priority: >= @this.properties.priority] AND [status: = @this.properties.missing]',
+			cfg,
+			REF_TIME_MS,
+			'Host Explain Plan',
+			hostDoc,
+		);
+
+		expect(md).toContain('# Host Explain Plan');
+		expect(md).toContain('- **Status**: *Executable* with 0 errors, 1 warning, 0 hints.');
+		expect(md).toContain('(from `@this.tags`)');
+		expect(md).toContain('is at least `3` (from `@this.properties.priority`)');
+		expect(md).toContain(
+			'⚠️ `@this.properties.missing` is missing or empty on the host note (evaluates to `false`)',
+		);
+		expect(md).toContain('> [!warning] Warning 1: `WARN_MISSING_THIS_VALUE`');
+	});
 });

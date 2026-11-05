@@ -156,6 +156,9 @@ export default class RhizomePlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
+				if (typeof oldPath === 'string' && typeof file?.path === 'string') {
+					this.activeQueryRoster.handleFileRename(oldPath, file.path);
+				}
 				if (isTemplateFolderNote(file?.path) || isTemplateFolderNote(oldPath)) {
 					scheduleTemplateReset();
 				}

@@ -165,8 +165,9 @@ export function evaluatorQuery(
 	input: string,
 	config: ResolvedEngineConfig,
 	referenceTimeMs: number,
+	hostDoc?: NormalizedDocument | null,
 ): PreparedQuery {
-	const result = compileQuery(input, config, referenceTimeMs);
+	const result = compileQuery(input, config, referenceTimeMs, hostDoc);
 	if (!result.executable || !result.prepared) {
 		throw new Error(
 			`Generated query is not executable: ${JSON.stringify(input)}; ${JSON.stringify(result.diagnostics)}`,

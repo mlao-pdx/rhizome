@@ -15,6 +15,7 @@ function encodeDoubleQuoted(value: string): string {
 
 function printLeafMatcher(matcher: LeafMatcher): string {
 	if (matcher.kind === 'regex') return `/${matcher.pattern}/${matcher.flags}`;
+	if (matcher.kind === 'this') return matcher.raw;
 	return matcher.quoted ? encodeDoubleQuoted(matcher.value) : matcher.value;
 }
 

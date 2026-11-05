@@ -1,4 +1,5 @@
 import { collectReferencedPropertyKeys } from './ast-utils';
+import { coerceHostScalarForProperty, resolveThisReference } from './host-reference';
 import { testRegex } from './literals';
 import { getInternalFileEpochMs } from './metadata-normalizer';
 import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
@@ -108,18 +109,25 @@ function evalValueExprOnTarget(
 	target: string,
 	expr: ValueExprAST,
 	scopeDef: Pick<ScopeDefinition, 'matchString'>,
+	hostDoc: NormalizedDocument | null | undefined,
 ): boolean {
 	switch (expr.type) {
 		case 'VALUE_LOGICAL':
 			return expr.operator === 'AND'
-				? expr.children.every((c) => evalValueExprOnTarget(target, c, scopeDef))
-				: expr.children.some((c) => evalValueExprOnTarget(target, c, scopeDef));
+				? expr.children.every((c) => evalValueExprOnTarget(target, c, scopeDef, hostDoc))
+				: expr.children.some((c) => evalValueExprOnTarget(target, c, scopeDef, hostDoc));
 		case 'VALUE_NOT':
-			return !evalValueExprOnTarget(target, expr.child, scopeDef);
-		case 'VALUE_LEAF':
-			return expr.matcher.kind === 'regex'
-				? testRegex(target, expr.matcher)
-				: scopeDef.matchString(target, expr.matcher.value, expr.matcher.quoted);
+			return !evalValueExprOnTarget(target, expr.child, scopeDef, hostDoc);
+		case 'VALUE_LEAF': {
+			if (expr.matcher.kind === 'regex') {
+				return testRegex(target, expr.matcher);
+			}
+			if (expr.matcher.kind === 'this') {
+				const res = resolveThisReference(hostDoc, expr.matcher.segments);
+				return res.values.some((v) => scopeDef.matchString(target, String(v), true));
+			}
+			return scopeDef.matchString(target, expr.matcher.value, expr.matcher.quoted);
+		}
 	}
 }
 
@@ -129,18 +137,40 @@ function evalColonExprOnEntry(
 	expr: ValueExprAST,
 	timeZone: string,
 	referenceTimeMs: number,
+	hostDoc: NormalizedDocument | null | undefined,
 ): boolean {
 	switch (expr.type) {
 		case 'VALUE_LOGICAL':
 			return expr.operator === 'AND'
 				? expr.children.every((c) =>
-						evalColonExprOnEntry(entry, propType, c, timeZone, referenceTimeMs),
+						evalColonExprOnEntry(
+							entry,
+							propType,
+							c,
+							timeZone,
+							referenceTimeMs,
+							hostDoc,
+						),
 					)
 				: expr.children.some((c) =>
-						evalColonExprOnEntry(entry, propType, c, timeZone, referenceTimeMs),
+						evalColonExprOnEntry(
+							entry,
+							propType,
+							c,
+							timeZone,
+							referenceTimeMs,
+							hostDoc,
+						),
 					);
 		case 'VALUE_NOT':
-			return !evalColonExprOnEntry(entry, propType, expr.child, timeZone, referenceTimeMs);
+			return !evalColonExprOnEntry(
+				entry,
+				propType,
+				expr.child,
+				timeZone,
+				referenceTimeMs,
+				hostDoc,
+			);
 		case 'VALUE_LEAF': {
 			if (expr.matcher.kind === 'regex') {
 				if (propType === 'checkbox' || entry.kind === 'checkbox') return false;
@@ -149,6 +179,39 @@ function evalColonExprOnEntry(
 				}
 				const target = entry.kind === 'text' ? entry.value : entry.raw;
 				return testRegex(target, expr.matcher);
+			}
+			if (expr.matcher.kind === 'this') {
+				const res = resolveThisReference(hostDoc, expr.matcher.segments);
+				return res.values.some((val) => {
+					const coerced = coerceHostScalarForProperty(
+						val,
+						propType,
+						timeZone,
+						referenceTimeMs,
+					);
+					if (!coerced.ok) return false;
+					switch (coerced.kind) {
+						case 'number':
+							return entry.kind === 'number' && entry.value === coerced.rhsNum;
+						case 'checkbox':
+							return entry.kind === 'checkbox' && entry.value === coerced.rhsBool;
+						case 'temporal':
+							return (
+								(entry.kind === 'date' || entry.kind === 'datetime') &&
+								compareDateIntervals(entry.interval, '=', coerced.rhsInterval)
+							);
+						case 'tags':
+							return (
+								entry.kind === 'text' &&
+								hierarchicalTagMatch(entry.value, coerced.rhsRaw)
+							);
+						case 'text':
+							return (
+								entry.kind === 'text' &&
+								substringStringMatch(entry.value, coerced.rhsRaw)
+							);
+					}
+				});
 			}
 			const { value: rhsRaw, quoted } = expr.matcher;
 			switch (propType) {
@@ -200,12 +263,94 @@ function evalPropertyEntry(
 	expr: ValueExprAST,
 	timeZone: string,
 	referenceTimeMs: number,
+	hostDoc: NormalizedDocument | null | undefined,
 ): boolean {
 	if (entry.kind === 'null' || entry.kind === 'invalid') return false;
 	if (op === ':') {
-		return evalColonExprOnEntry(entry, propType, expr, timeZone, referenceTimeMs);
+		return evalColonExprOnEntry(entry, propType, expr, timeZone, referenceTimeMs, hostDoc);
 	}
 	if (expr.type !== 'VALUE_LEAF' || expr.matcher.kind === 'regex') return false;
+	if (expr.matcher.kind === 'this') {
+		const res = resolveThisReference(hostDoc, expr.matcher.segments);
+		return res.values.some((val) => {
+			const coerced = coerceHostScalarForProperty(val, propType, timeZone, referenceTimeMs);
+			if (!coerced.ok) return false;
+			switch (coerced.kind) {
+				case 'number': {
+					if (entry.kind !== 'number') return false;
+					const rhsNum = coerced.rhsNum;
+					switch (op) {
+						case '=':
+							return entry.value === rhsNum;
+						case '!=':
+							return entry.value !== rhsNum;
+						case '<':
+							return entry.value < rhsNum;
+						case '>':
+							return entry.value > rhsNum;
+						case '<=':
+							return entry.value <= rhsNum;
+						case '>=':
+							return entry.value >= rhsNum;
+						default:
+							return false;
+					}
+				}
+				case 'checkbox': {
+					if (entry.kind !== 'checkbox') return false;
+					if (op === '=') return entry.value === coerced.rhsBool;
+					if (op === '!=') return entry.value !== coerced.rhsBool;
+					return false;
+				}
+				case 'temporal': {
+					if (entry.kind !== 'date' && entry.kind !== 'datetime') return false;
+					return compareDateIntervals(entry.interval, op, coerced.rhsInterval);
+				}
+				case 'tags': {
+					if (entry.kind !== 'text') return false;
+					const a = normalizeTagBody(entry.value);
+					const b = coerced.rhsTag;
+					switch (op) {
+						case '=':
+							return a === b;
+						case '!=':
+							return a !== b;
+						case '<':
+							return a < b;
+						case '>':
+							return a > b;
+						case '<=':
+							return a <= b;
+						case '>=':
+							return a >= b;
+						default:
+							return false;
+					}
+				}
+				case 'text': {
+					if (entry.kind !== 'text') return false;
+					const a = entry.value.toLowerCase();
+					const b = coerced.rhsLower;
+					switch (op) {
+						case '=':
+							return a === b;
+						case '!=':
+							return a !== b;
+						case '<':
+							return a < b;
+						case '>':
+							return a > b;
+						case '<=':
+							return a <= b;
+						case '>=':
+							return a >= b;
+						default:
+							return false;
+					}
+				}
+			}
+		});
+	}
 	const { value: rhsRaw, quoted } = expr.matcher;
 
 	switch (entry.kind) {
@@ -281,16 +426,21 @@ function evalAstNode(
 	ast: SearchAST,
 	resolvedConfig: ResolvedEngineConfig,
 	referenceTimeMs: number,
+	hostDoc: NormalizedDocument | null | undefined,
 ): boolean {
 	switch (ast.type) {
 		case 'MATCH_ALL':
 			return true;
 		case 'LOGICAL':
 			return ast.operator === 'AND'
-				? ast.children.every((c) => evalAstNode(doc, c, resolvedConfig, referenceTimeMs))
-				: ast.children.some((c) => evalAstNode(doc, c, resolvedConfig, referenceTimeMs));
+				? ast.children.every((c) =>
+						evalAstNode(doc, c, resolvedConfig, referenceTimeMs, hostDoc),
+					)
+				: ast.children.some((c) =>
+						evalAstNode(doc, c, resolvedConfig, referenceTimeMs, hostDoc),
+					);
 		case 'NOT':
-			return !evalAstNode(doc, ast.child, resolvedConfig, referenceTimeMs);
+			return !evalAstNode(doc, ast.child, resolvedConfig, referenceTimeMs, hostDoc);
 		case 'SCOPED_FILTER': {
 			const def =
 				ast.rawScope === '#'
@@ -298,7 +448,7 @@ function evalAstNode(
 					: resolvedConfig.getScope(ast.scope);
 			if (!def) throw new Error(`Unresolved scope in AST: ${ast.scope}`);
 			const targets = def.extract(doc);
-			return targets.some((target) => evalValueExprOnTarget(target, ast.expr, def));
+			return targets.some((target) => evalValueExprOnTarget(target, ast.expr, def, hostDoc));
 		}
 		case 'PROPERTY_FILTER': {
 			const lowerKey = ast.key.trim().toLowerCase();
@@ -324,6 +474,7 @@ function evalAstNode(
 					valueExpr,
 					resolvedConfig.timeZone,
 					referenceTimeMs,
+					hostDoc,
 				),
 			);
 		}
@@ -334,7 +485,13 @@ export function oracleEvaluateDoc(doc: NormalizedDocument, prepared: PreparedQue
 	if (doc.normalizationFingerprint !== prepared.resolvedConfig.normalizationFingerprint) {
 		throw new Error(`Document "${doc.file.path}" normalizationFingerprint mismatch.`);
 	}
-	return evalAstNode(doc, prepared.ast, prepared.resolvedConfig, prepared.referenceTimeMs);
+	return evalAstNode(
+		doc,
+		prepared.ast,
+		prepared.resolvedConfig,
+		prepared.referenceTimeMs,
+		prepared.hostDoc,
+	);
 }
 
 export function oracleEvaluateVault(

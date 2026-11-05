@@ -393,4 +393,87 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		expect(evaluateDoc(corruptedDoc, prepare('[tags: = work]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[tags: work]', config))).toBe(false);
 	});
+
+	it('evaluates @this.* across scalar properties, array overlap, deep indexing, and unresolved/uncoercible fallbacks identically in evaluator and oracle', () => {
+		const config = makeConfig();
+		const hostDoc = makeDoc(config, 'Projects/Host.md', {
+			frontmatter: {
+				'Review Status': 'active',
+				num: 5,
+				bad_num: 'high',
+				day: '2026-10-22',
+				flag: true,
+				tags: ['project/alpha', 'shared'],
+				aliases: ['HostAlias'],
+			},
+			links: [{ link: 'TargetA' }],
+		});
+		const candidateMatch = makeDoc(config, 'Notes/Match.md', {
+			frontmatter: {
+				label: 'active',
+				num: 10,
+				day: '2026-10-22',
+				flag: true,
+				tags: ['project/alpha/sub', 'other'],
+			},
+		});
+		const candidateOther = makeDoc(config, 'Notes/Other.md', {
+			frontmatter: {
+				label: 'archived',
+				num: 2,
+				day: '2026-11-01',
+				flag: false,
+				tags: ['unrelated'],
+			},
+		});
+
+		const assertHostQuery = (query: string, expected: string[]) => {
+			const compiled = compileQuery(query, config, REF_MS, hostDoc);
+			expect(compiled.executable).toBe(true);
+			expect(compiled.prepared).not.toBeNull();
+			const docs = [candidateMatch, candidateOther];
+			const prodMatches = evaluateVault(docs, compiled.prepared!).matches.map(
+				(d) => d.file.path,
+			);
+			const oracleMatches = oracleEvaluateVault(docs, compiled.prepared!).matches.map(
+				(d) => d.file.path,
+			);
+			expect(prodMatches).toEqual(expected);
+			expect(oracleMatches).toEqual(expected);
+		};
+
+		// Quoted segment property match & numeric ordering
+		assertHostQuery('[label: = @this.properties."Review Status"]', ['Notes/Match.md']);
+		assertHostQuery('[num: > @this.properties.num]', ['Notes/Match.md']);
+		assertHostQuery('[day: = @this.properties.day] AND [flag: = @this.properties.flag]', [
+			'Notes/Match.md',
+		]);
+
+		// Hierarchical tag overlap (`tag:@this.tags` & `[tags: @this.tags]`) vs exact (`[tags: = @this.tags.0]`)
+		assertHostQuery('tag:@this.tags', ['Notes/Match.md']);
+		assertHostQuery('[tags: @this.tags]', ['Notes/Match.md']);
+		assertHostQuery('!tag:@this.tags', ['Notes/Other.md']);
+		assertHostQuery('[tags: = @this.tags.0]', []);
+
+		// Deep array/object traversal (`@this.links.0.rawTarget`, `@this.links.rawTarget`, `@this.file.ext`)
+		const linkCandidate = makeDoc(config, 'Notes/TargetA.md', {});
+		const linkCompiled = compileQuery(
+			'file:@this.links.0.rawTarget AND file:@this.links.rawTarget AND ext:@this.file.ext',
+			config,
+			REF_MS,
+			hostDoc,
+		);
+		expect(evaluateDoc(linkCandidate, linkCompiled.prepared!)).toBe(true);
+		expect(oracleEvaluateDoc(linkCandidate, linkCompiled.prepared!)).toBe(true);
+
+		// Missing / unresolved `@this.*` and uncoercible `@this.*` evaluate leaf to false (`true` when negated)
+		assertHostQuery('[label: = @this.properties.missing]', []);
+		assertHostQuery('![label: = @this.properties.missing]', [
+			'Notes/Match.md',
+			'Notes/Other.md',
+		]);
+		assertHostQuery('tag:NOT @this.properties.missing', ['Notes/Match.md', 'Notes/Other.md']);
+		assertHostQuery('[num: > @this.properties.bad_num]', []);
+		assertHostQuery('![num: > @this.properties.bad_num]', ['Notes/Match.md', 'Notes/Other.md']);
+	});
 });

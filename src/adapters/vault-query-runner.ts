@@ -1,8 +1,8 @@
-import type { App } from 'obsidian';
+import { type App, normalizePath } from 'obsidian';
 import {
 	compileQuery,
-	evaluateDoc,
 	explainQuery,
+	evaluateDoc,
 	FORBIDDEN_KEYS,
 	getExecutionPlan,
 	hasInternalRhizomeFlag,
@@ -18,8 +18,10 @@ import {
 	normalizeObsidianMetadata,
 	type PreparedQuery,
 	type PropertyTypeRegistry,
+	type ResolvedEngineConfig,
 	type ResolveLinkPathFn,
 } from '@core/search';
+import { HOST_QUERY_KEY } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import { markSensitive } from './logger-format';
 import {
@@ -51,6 +53,31 @@ export interface VaultQueryOptions {
 	 * layout, or template folder setting changes, forcing the subscriber to re-run Pass 1.
 	 */
 	readonly onReset?: (() => void) | undefined;
+	/**
+	 * Optional vault-relative path of the hosting Markdown note for O(1) `@this.*` and `this.*`
+	 * resolution prior to query compilation.
+	 */
+	readonly sourcePath?: string | undefined;
+	/**
+	 * Optional pre-normalized hosting note document (takes precedence over `sourcePath` when provided).
+	 */
+	readonly hostDoc?: NormalizedDocument | null | undefined;
+	/**
+	 * Optional per-query host document map used by `ActiveQueryRoster` when batching `@this.*`
+	 * queries across multiple open notes in a single vault scan.
+	 */
+	readonly queryHostDocs?:
+		Readonly<Record<string, NormalizedDocument | null | undefined>> | undefined;
+	/**
+	 * Optional callback invoked by `ActiveQueryRoster.handleFileRename()` when the hosting note
+	 * at `sourcePath` is renamed.
+	 */
+	readonly onSourcePathRename?: ((newPath: string) => void) | undefined;
+	/**
+	 * Optional pre-resolved engine configuration to avoid redundant `.obsidian/types.json` reads
+	 * when `ActiveQueryRoster` has already resolved the group's configuration.
+	 */
+	readonly resolvedConfig?: ResolvedEngineConfig | undefined;
 }
 
 /**
@@ -165,6 +192,86 @@ export function sanitizeQueryEntries(queries: unknown): Array<[string, string]> 
 }
 
 /**
+ * Resolves and normalizes a hosting Markdown note in O(1) time via `vault.getFileByPath`
+ * (with fallback to `vault.getMarkdownFiles().find`).
+ * Returns `undefined` when `sourcePath` is `undefined`, or `null` when the note is missing,
+ * deleted, or marked with `DO_NOT_INDEX_OR_QUERY`.
+ */
+export function resolveHostDocument(
+	app: App,
+	sourcePath: string | undefined,
+	config: ResolvedEngineConfig,
+	resolveLinkPath?: ResolveLinkPathFn,
+	logger?: LoggerPort,
+): NormalizedDocument | null | undefined {
+	if (sourcePath === undefined) {
+		return undefined;
+	}
+	if (typeof sourcePath !== 'string' || sourcePath.trim().length === 0) {
+		return null;
+	}
+	const normalized = normalizePath(sourcePath);
+	const vaultWithLookup = app.vault as {
+		getFileByPath?: (
+			path: string,
+		) => ReturnType<typeof app.vault.getMarkdownFiles>[number] | null;
+	};
+	const file =
+		typeof vaultWithLookup.getFileByPath === 'function'
+			? (vaultWithLookup.getFileByPath(normalized) ??
+				app.vault
+					.getMarkdownFiles()
+					.find((f) => f.path === normalized || f.path === sourcePath))
+			: app.vault
+					.getMarkdownFiles()
+					.find((f) => f.path === normalized || f.path === sourcePath);
+	if (!file || (file as { deleted?: boolean }).deleted) {
+		return null;
+	}
+	const cache = app.metadataCache.getFileCache(file);
+	if (hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)) {
+		return null;
+	}
+	const effectiveResolveLinkPath: ResolveLinkPathFn =
+		resolveLinkPath ??
+		((rawTarget, linkSourcePath) =>
+			app.metadataCache.getFirstLinkpathDest?.(rawTarget, linkSourcePath)?.path ?? null);
+	try {
+		return normalizeObsidianMetadata(file, cache, config, [], effectiveResolveLinkPath);
+	} catch (error) {
+		logger?.log('error', `Failed to normalize host note ${markSensitive(file.path)}`, {
+			source: 'query.run',
+			error: String(error),
+		});
+		return null;
+	}
+}
+
+/**
+ * Loads `.obsidian/types.json`, merges `propertyTypes` overrides, and initializes a
+ * `ResolvedEngineConfig` for query compilation or host-note normalization.
+ */
+export async function resolveGroupEngineConfig(
+	app: App,
+	timeZone?: string,
+	propertyTypes?: PropertyTypeRegistry,
+	logger?: LoggerPort,
+): Promise<ResolvedEngineConfig | null> {
+	const resolvedTz = timeZone !== undefined ? timeZone : resolveDefaultTimeZone();
+	const vaultTypes = await loadVaultPropertyTypes(app, logger);
+	const mergedTypes = mergePropertyTypes(vaultTypes, propertyTypes);
+	const configResult = initEngineConfig({
+		timeZone: resolvedTz,
+		propertyTypes: mergedTypes,
+	});
+	if (!configResult.ok) {
+		logEngineConfigFailure(logger, resolvedTz, configResult.diagnostics);
+		return null;
+	}
+	return configResult.config;
+}
+
+/**
  * Compiles a named map of search queries against a shared config and reference timestamp,
  * and evaluates all executable queries in a single streaming pass over the vault.
  */
@@ -179,19 +286,46 @@ export async function runVaultQuery(
 	const timeZone = options?.timeZone !== undefined ? options.timeZone : resolveDefaultTimeZone();
 	const rawRefTimeMs = options?.referenceTimeMs ?? Date.now();
 
-	const vaultTypes = await loadVaultPropertyTypes(app, logger);
-	const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
+	let resolvedConfig: ResolvedEngineConfig;
+	if (options?.resolvedConfig) {
+		resolvedConfig = options.resolvedConfig;
+	} else {
+		const vaultTypes = await loadVaultPropertyTypes(app, logger);
+		const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
 
-	const configResult = initEngineConfig({
-		timeZone,
-		propertyTypes: mergedTypes,
-	});
-	if (!configResult.ok) {
-		logEngineConfigFailure(logger, timeZone, configResult.diagnostics);
-		return {};
+		const configResult = initEngineConfig({
+			timeZone,
+			propertyTypes: mergedTypes,
+		});
+		if (!configResult.ok) {
+			logEngineConfigFailure(logger, timeZone, configResult.diagnostics);
+			return {};
+		}
+		resolvedConfig = configResult.config;
 	}
 
+	const resolveLinkPath: ResolveLinkPathFn = (rawTarget, sourcePath) =>
+		app.metadataCache.getFirstLinkpathDest(rawTarget, sourcePath)?.path ?? null;
+
+	const hostDoc: NormalizedDocument | null | undefined =
+		options?.hostDoc !== undefined
+			? options.hostDoc
+			: resolveHostDocument(
+					app,
+					options?.sourcePath,
+					resolvedConfig,
+					resolveLinkPath,
+					logger,
+				);
+
 	const results: VaultQueryResult = {};
+	const hasHostContext =
+		options?.hostDoc !== undefined ||
+		(typeof options?.sourcePath === 'string' && options.sourcePath.length > 0);
+	if (hasHostContext) {
+		results[HOST_QUERY_KEY] = hostDoc ? [toVaultQueryMatch(hostDoc)] : [];
+	}
+
 	const executableQueries: Array<{
 		name: string;
 		prepared: PreparedQuery;
@@ -199,7 +333,12 @@ export async function runVaultQuery(
 	}> = [];
 
 	for (const [name, rawInput] of sanitizedEntries) {
-		const compileResult = compileQuery(rawInput, configResult.config, rawRefTimeMs);
+		const queryHostDoc =
+			options?.queryHostDocs &&
+			Object.prototype.hasOwnProperty.call(options.queryHostDocs, name)
+				? options.queryHostDocs[name]
+				: hostDoc;
+		const compileResult = compileQuery(rawInput, resolvedConfig, rawRefTimeMs, queryHostDoc);
 		logQueryCompilation(logger, name, rawInput, compileResult);
 		if (compileResult.executable && compileResult.prepared) {
 			const bucket: VaultQueryMatch[] = [];
@@ -235,9 +374,6 @@ export async function runVaultQuery(
 	}
 	const propDiagnosticsAggregator = new QueriedPropertyDiagnosticsAggregator(queriedKeys);
 
-	const resolveLinkPath: ResolveLinkPathFn = (rawTarget, sourcePath) =>
-		app.metadataCache.getFirstLinkpathDest(rawTarget, sourcePath)?.path ?? null;
-
 	let notesScanned = 0;
 	let uncachedNotes = 0;
 
@@ -257,7 +393,7 @@ export async function runVaultQuery(
 		}
 		let doc: NormalizedDocument;
 		try {
-			doc = normalizeObsidianMetadata(file, cache, configResult.config, [], resolveLinkPath);
+			doc = normalizeObsidianMetadata(file, cache, resolvedConfig, [], resolveLinkPath);
 		} catch (error) {
 			logger?.log('error', `Failed to normalize note ${markSensitive(file.path)}`, {
 				source: 'query.run',
@@ -314,11 +450,26 @@ export async function explainVaultQuery(
 	const vaultTypes = await loadVaultPropertyTypes(app, logger);
 	const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
 
+	let hostDoc: NormalizedDocument | null | undefined = options?.hostDoc;
+	if (hostDoc === undefined && options?.sourcePath !== undefined) {
+		const cfgRes = initEngineConfig({ timeZone, propertyTypes: mergedTypes });
+		if (cfgRes.ok) {
+			hostDoc = resolveHostDocument(
+				app,
+				options.sourcePath,
+				cfgRes.config,
+				undefined,
+				logger,
+			);
+		}
+	}
+
 	const markdown = explainQuery(
 		input,
 		{ timeZone, propertyTypes: mergedTypes },
 		referenceTimeMs,
 		options?.heading,
+		hostDoc,
 	);
 
 	logger?.log('debug', 'Generated query explanation', {

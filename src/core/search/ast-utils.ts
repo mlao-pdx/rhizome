@@ -6,6 +6,9 @@ import { isVirtualFileKey, type LogicalNode, type SearchAST, type ValueExprAST }
 export function deepFreezeValueExprAST(expr: ValueExprAST): ValueExprAST {
 	if (expr.span) Object.freeze(expr.span);
 	if (expr.type === 'VALUE_LEAF') {
+		if (expr.matcher.kind === 'this') {
+			Object.freeze(expr.matcher.segments);
+		}
 		Object.freeze(expr.matcher);
 		return Object.freeze(expr);
 	}
@@ -82,7 +85,17 @@ export function containsRegexLeaf(expr: ValueExprAST): boolean {
 export function normalizeValueExprAST(expr: ValueExprAST): ValueExprAST {
 	switch (expr.type) {
 		case 'VALUE_LEAF':
-			return { type: 'VALUE_LEAF', matcher: { ...expr.matcher } };
+			return {
+				type: 'VALUE_LEAF',
+				matcher:
+					expr.matcher.kind === 'this'
+						? {
+								kind: 'this',
+								raw: expr.matcher.raw,
+								segments: [...expr.matcher.segments],
+							}
+						: { ...expr.matcher },
+			};
 		case 'VALUE_NOT':
 			return { type: 'VALUE_NOT', syntax: 'NOT', child: normalizeValueExprAST(expr.child) };
 		case 'VALUE_LOGICAL': {

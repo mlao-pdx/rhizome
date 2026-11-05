@@ -1,10 +1,12 @@
 import { collectReferencedPropertyKeys } from './ast-utils';
+import { coerceHostScalarForProperty, resolveThisReference } from './host-reference';
 import { validateRegexLiteral } from './literals';
 import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
 import { normalizeTagBody } from './scopes';
 import { parseTemporalExpr } from './temporal';
 import type {
 	DateInterval,
+	NormalizedDocument,
 	ObsidianPropertyType,
 	PreparedQuery,
 	PropertyOperator,
@@ -77,7 +79,7 @@ export type CompiledSearchNode =
 	| {
 			readonly type: 'PROPERTY_COMPARE';
 			readonly lowerKey: string;
-			readonly comparison: CompiledPropertyComparison;
+			readonly comparisons: readonly CompiledPropertyComparison[];
 	  };
 
 export interface ExecutionPlan {
@@ -94,30 +96,47 @@ function compileRegexOrThrow(pattern: string, flags: string): RegExp {
 	return rx;
 }
 
-function compileValueExpr(expr: ValueExprAST): CompiledValueExprNode {
+function compileValueExpr(
+	expr: ValueExprAST,
+	hostDoc: NormalizedDocument | null | undefined,
+): CompiledValueExprNode {
 	switch (expr.type) {
 		case 'VALUE_LOGICAL':
 			return {
 				type: 'VALUE_LOGICAL',
 				operator: expr.operator,
-				children: expr.children.map(compileValueExpr),
+				children: expr.children.map((c) => compileValueExpr(c, hostDoc)),
 			};
 		case 'VALUE_NOT':
 			return {
 				type: 'VALUE_NOT',
-				child: compileValueExpr(expr.child),
+				child: compileValueExpr(expr.child, hostDoc),
 			};
-		case 'VALUE_LEAF':
-			return expr.matcher.kind === 'regex'
-				? {
-						type: 'VALUE_LEAF_REGEX',
-						regex: compileRegexOrThrow(expr.matcher.pattern, expr.matcher.flags),
-					}
-				: {
+		case 'VALUE_LEAF': {
+			if (expr.matcher.kind === 'regex') {
+				return {
+					type: 'VALUE_LEAF_REGEX',
+					regex: compileRegexOrThrow(expr.matcher.pattern, expr.matcher.flags),
+				};
+			}
+			if (expr.matcher.kind === 'this') {
+				const res = resolveThisReference(hostDoc, expr.matcher.segments);
+				return {
+					type: 'VALUE_LOGICAL',
+					operator: 'OR',
+					children: res.values.map((v) => ({
 						type: 'VALUE_LEAF_STRING',
-						value: expr.matcher.value,
-						quoted: expr.matcher.quoted,
-					};
+						value: String(v),
+						quoted: true,
+					})),
+				};
+			}
+			return {
+				type: 'VALUE_LEAF_STRING',
+				value: expr.matcher.value,
+				quoted: expr.matcher.quoted,
+			};
+		}
 	}
 }
 
@@ -126,6 +145,7 @@ function compilePropertyColonExpr(
 	propType: ObsidianPropertyType,
 	resolvedConfig: ResolvedEngineConfig,
 	referenceTimeMs: number,
+	hostDoc: NormalizedDocument | null | undefined,
 ): CompiledPropertyColonNode {
 	switch (expr.type) {
 		case 'VALUE_LOGICAL':
@@ -133,7 +153,7 @@ function compilePropertyColonExpr(
 				type: 'COLON_LOGICAL',
 				operator: expr.operator,
 				children: expr.children.map((c) =>
-					compilePropertyColonExpr(c, propType, resolvedConfig, referenceTimeMs),
+					compilePropertyColonExpr(c, propType, resolvedConfig, referenceTimeMs, hostDoc),
 				),
 			};
 		case 'VALUE_NOT':
@@ -144,6 +164,7 @@ function compilePropertyColonExpr(
 					propType,
 					resolvedConfig,
 					referenceTimeMs,
+					hostDoc,
 				),
 			};
 		case 'VALUE_LEAF': {
@@ -152,6 +173,48 @@ function compilePropertyColonExpr(
 					type: 'COLON_REGEX',
 					propType,
 					regex: compileRegexOrThrow(expr.matcher.pattern, expr.matcher.flags),
+				};
+			}
+			if (expr.matcher.kind === 'this') {
+				const res = resolveThisReference(hostDoc, expr.matcher.segments);
+				const children: CompiledPropertyColonNode[] = [];
+				for (const val of res.values) {
+					const coerced = coerceHostScalarForProperty(
+						val,
+						propType,
+						resolvedConfig.timeZone,
+						referenceTimeMs,
+					);
+					if (!coerced.ok) continue;
+					switch (coerced.kind) {
+						case 'number':
+							children.push({ type: 'COLON_NUMBER', rhsNum: coerced.rhsNum });
+							break;
+						case 'checkbox':
+							children.push({ type: 'COLON_CHECKBOX', rhsBool: coerced.rhsBool });
+							break;
+						case 'temporal':
+							children.push({
+								type: 'COLON_TEMPORAL',
+								rhsInterval: coerced.rhsInterval,
+							});
+							break;
+						case 'tags':
+							children.push({ type: 'COLON_TAG', rhsRaw: coerced.rhsRaw });
+							break;
+						case 'text':
+							children.push({
+								type: 'COLON_TEXT',
+								value: coerced.rhsRaw,
+								quoted: true,
+							});
+							break;
+					}
+				}
+				return {
+					type: 'COLON_LOGICAL',
+					operator: 'OR',
+					children,
 				};
 			}
 			const { value: rhsRaw, quoted } = expr.matcher;
@@ -200,16 +263,52 @@ function compilePropertyColonExpr(
 	}
 }
 
-function compilePropertyComparison(
+function compilePropertyComparisons(
 	lowerKey: string,
 	propType: ObsidianPropertyType,
 	operator: PropertyOperator,
 	valueExpr: ValueExprAST | undefined,
 	resolvedConfig: ResolvedEngineConfig,
 	referenceTimeMs: number,
-): CompiledPropertyComparison {
+	hostDoc: NormalizedDocument | null | undefined,
+): readonly CompiledPropertyComparison[] {
 	if (!valueExpr || valueExpr.type !== 'VALUE_LEAF' || valueExpr.matcher.kind === 'regex') {
 		throw new Error(`Invalid comparison expression for property "${lowerKey}".`);
+	}
+	if (valueExpr.matcher.kind === 'this') {
+		const res = resolveThisReference(hostDoc, valueExpr.matcher.segments);
+		const comparisons: CompiledPropertyComparison[] = [];
+		for (const val of res.values) {
+			const coerced = coerceHostScalarForProperty(
+				val,
+				propType,
+				resolvedConfig.timeZone,
+				referenceTimeMs,
+			);
+			if (!coerced.ok) continue;
+			switch (coerced.kind) {
+				case 'number':
+					comparisons.push({ kind: 'number', operator, rhsNum: coerced.rhsNum });
+					break;
+				case 'checkbox':
+					comparisons.push({ kind: 'checkbox', operator, rhsBool: coerced.rhsBool });
+					break;
+				case 'temporal':
+					comparisons.push({
+						kind: 'temporal',
+						operator,
+						rhsInterval: coerced.rhsInterval,
+					});
+					break;
+				case 'tags':
+					comparisons.push({ kind: 'tags', operator, rhsTag: coerced.rhsTag });
+					break;
+				case 'text':
+					comparisons.push({ kind: 'text', operator, rhsLower: coerced.rhsLower });
+					break;
+			}
+		}
+		return comparisons;
 	}
 	const { value: rhsRaw, quoted } = valueExpr.matcher;
 
@@ -220,14 +319,14 @@ function compilePropertyComparison(
 			if (quoted || !STRICT_NUMBER_RE.test(trimmed) || !Number.isFinite(rhsNum)) {
 				throw new Error(`Unvalidated number literal reached execution plan: ${rhsRaw}`);
 			}
-			return { kind: 'number', operator, rhsNum };
+			return [{ kind: 'number', operator, rhsNum }];
 		}
 		case 'checkbox': {
 			const lower = rhsRaw.trim().toLowerCase();
 			if (quoted || (lower !== 'true' && lower !== 'false')) {
 				throw new Error(`Unvalidated checkbox literal reached execution plan: ${rhsRaw}`);
 			}
-			return { kind: 'checkbox', operator, rhsBool: lower === 'true' };
+			return [{ kind: 'checkbox', operator, rhsBool: lower === 'true' }];
 		}
 		case 'date':
 		case 'datetime': {
@@ -240,13 +339,13 @@ function compilePropertyComparison(
 			if (!res.ok) {
 				throw new Error(`Unvalidated temporal literal reached execution plan: ${rhsRaw}`);
 			}
-			return { kind: 'temporal', operator, rhsInterval: res.interval };
+			return [{ kind: 'temporal', operator, rhsInterval: res.interval }];
 		}
 		case 'tags':
-			return { kind: 'tags', operator, rhsTag: normalizeTagBody(rhsRaw) };
+			return [{ kind: 'tags', operator, rhsTag: normalizeTagBody(rhsRaw) }];
 		case 'text':
 		case 'multitext':
-			return { kind: 'text', operator, rhsLower: rhsRaw.toLowerCase() };
+			return [{ kind: 'text', operator, rhsLower: rhsRaw.toLowerCase() }];
 	}
 }
 
@@ -254,6 +353,7 @@ function compileSearchNode(
 	ast: SearchAST,
 	resolvedConfig: ResolvedEngineConfig,
 	referenceTimeMs: number,
+	hostDoc: NormalizedDocument | null | undefined,
 ): CompiledSearchNode {
 	switch (ast.type) {
 		case 'MATCH_ALL':
@@ -263,13 +363,13 @@ function compileSearchNode(
 				type: 'LOGICAL',
 				operator: ast.operator,
 				children: ast.children.map((c) =>
-					compileSearchNode(c, resolvedConfig, referenceTimeMs),
+					compileSearchNode(c, resolvedConfig, referenceTimeMs, hostDoc),
 				),
 			};
 		case 'NOT':
 			return {
 				type: 'NOT',
-				child: compileSearchNode(ast.child, resolvedConfig, referenceTimeMs),
+				child: compileSearchNode(ast.child, resolvedConfig, referenceTimeMs, hostDoc),
 			};
 		case 'SCOPED_FILTER': {
 			const scopeDef =
@@ -280,7 +380,7 @@ function compileSearchNode(
 			return {
 				type: 'SCOPED_FILTER',
 				scopeDef,
-				expr: compileValueExpr(ast.expr),
+				expr: compileValueExpr(ast.expr, hostDoc),
 			};
 		}
 		case 'PROPERTY_FILTER': {
@@ -305,19 +405,21 @@ function compileSearchNode(
 						propType,
 						resolvedConfig,
 						referenceTimeMs,
+						hostDoc,
 					),
 				};
 			}
 			return {
 				type: 'PROPERTY_COMPARE',
 				lowerKey,
-				comparison: compilePropertyComparison(
+				comparisons: compilePropertyComparisons(
 					lowerKey,
 					propType,
 					ast.operator,
 					ast.valueExpr,
 					resolvedConfig,
 					referenceTimeMs,
+					hostDoc,
 				),
 			};
 		}
@@ -328,9 +430,9 @@ export function getExecutionPlan(prepared: PreparedQuery): ExecutionPlan {
 	const cached = EXECUTION_PLAN_CACHE.get(prepared);
 	if (cached) return cached;
 
-	const { ast, resolvedConfig, referenceTimeMs } = prepared;
+	const { ast, resolvedConfig, referenceTimeMs, hostDoc } = prepared;
 	const plan: ExecutionPlan = {
-		root: compileSearchNode(ast, resolvedConfig, referenceTimeMs),
+		root: compileSearchNode(ast, resolvedConfig, referenceTimeMs, hostDoc),
 		queriedKeys: collectReferencedPropertyKeys(ast),
 		expectedFingerprint: resolvedConfig.normalizationFingerprint,
 	};

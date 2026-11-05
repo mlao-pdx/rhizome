@@ -1,9 +1,11 @@
 import { containsRegexLeaf } from './ast-utils';
+import { coerceHostScalarForProperty, resolveThisReference } from './host-reference';
 import { validateRegexLiteral } from './literals';
 import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
 import { parseTemporalExpr } from './temporal';
 import type {
 	LeafMatcher,
+	NormalizedDocument,
 	ObsidianPropertyType,
 	PropertyFilterNode,
 	ResolvedEngineConfig,
@@ -216,6 +218,7 @@ export function validateQueryAST(
 	resolvedConfig: ResolvedEngineConfig,
 	referenceTimeMs: number,
 	initialInvalidPropertyNodes?: ReadonlySet<PropertyFilterNode>,
+	hostDoc?: NormalizedDocument | null,
 ): ValidationResult {
 	const diagnostics: SearchDiagnostic[] = [];
 	const invalidRegexPropNodes = new Set<PropertyFilterNode>(initialInvalidPropertyNodes);
@@ -251,7 +254,7 @@ export function validateQueryAST(
 		}
 	}
 
-	// Step 3: Validate and canonicalize scopes
+	// Step 3: Validate and canonicalize scopes (and check @this.* references in SCOPED_FILTER when hostDoc is supplied)
 	function step3Traverse(node: SearchAST): SearchAST {
 		switch (node.type) {
 			case 'SCOPED_FILTER': {
@@ -266,6 +269,28 @@ export function validateQueryAST(
 							span: node.span ?? null,
 						});
 						return node;
+					}
+					if (hostDoc !== undefined) {
+						for (const leafNode of collectValueExprLeaves(node.expr)) {
+							if (
+								leafNode.matcher.kind === 'this' &&
+								leafNode.matcher.segments.length > 0
+							) {
+								const res = resolveThisReference(
+									hostDoc,
+									leafNode.matcher.segments,
+								);
+								if (!res.resolved) {
+									diagnostics.push({
+										code: 'WARN_MISSING_THIS_VALUE',
+										severity: 'warning',
+										issue: `Host note value for "${leafNode.matcher.raw}" is missing or empty; this filter leaf evaluates to false.`,
+										hint: 'Set this field or property on the hosting note.',
+										span: leafNode.span ?? node.span ?? null,
+									});
+								}
+							}
+						}
 					}
 					if (node.scope !== scopeDef.canonicalName) {
 						return {
@@ -372,6 +397,40 @@ export function validateQueryAST(
 						);
 						if (!valid) {
 							invalidPropertyNodes.add(node);
+						}
+					} else if (
+						matcher.kind === 'this' &&
+						matcher.segments.length > 0 &&
+						hostDoc !== undefined
+					) {
+						const span = leafNode.span ?? node.span ?? null;
+						const res = resolveThisReference(hostDoc, matcher.segments);
+						if (!res.resolved) {
+							diagnostics.push({
+								code: 'WARN_MISSING_THIS_VALUE',
+								severity: 'warning',
+								issue: `Host note value for "${matcher.raw}" is missing or empty; this filter leaf evaluates to false.`,
+								hint: 'Set this field or property on the hosting note.',
+								span,
+							});
+						} else {
+							for (const val of res.values) {
+								const coerced = coerceHostScalarForProperty(
+									val,
+									propType,
+									resolvedConfig.timeZone,
+									referenceTimeMs,
+								);
+								if (!coerced.ok) {
+									diagnostics.push({
+										code: 'WARN_THIS_TYPE_MISMATCH',
+										severity: 'warning',
+										issue: `Host value "${coerced.raw}" from "${matcher.raw}" is not a valid ${propType} for property "${node.key}".`,
+										hint: null,
+										span,
+									});
+								}
+							}
 						}
 					}
 				}

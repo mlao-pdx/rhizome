@@ -43,7 +43,18 @@ const nonEmptyTextArb = textArb.filter((s) => s.length > 0);
 
 export const valueLeafArb = fc.oneof(
 	nonEmptyTextArb.map(quoteQueryString),
-	fc.constantFrom('alpha', 'beta', 'work', 'draft', 'open', 'true', 'false'),
+	fc.constantFrom(
+		'alpha',
+		'beta',
+		'work',
+		'draft',
+		'open',
+		'true',
+		'false',
+		'@this.file.basename',
+		'@this.tags',
+		'@this.properties.status',
+	),
 	regexArb,
 );
 

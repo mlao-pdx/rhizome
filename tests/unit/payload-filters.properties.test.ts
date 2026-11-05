@@ -223,8 +223,10 @@ describe('Payload-Shaping & Aggregation Filter Property Invariants', () => {
 				const validVal = typeof val === 'number' && Number.isFinite(val);
 				const validTotal =
 					typeof total === 'number' && Number.isFinite(total) && total !== 0;
+				const finiteQuotient =
+					validVal && validTotal && Number.isFinite((val / total) * 100);
 
-				if (!validVal || !validTotal) {
+				if (!finiteQuotient) {
 					expect(res).toBeNull();
 				} else {
 					expect(typeof res).toBe('number');

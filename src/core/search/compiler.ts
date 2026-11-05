@@ -2,7 +2,12 @@ import { deepFreezeAST } from './ast-utils';
 import { lintQueryAST } from './linter';
 import { parseAndLowerQuery } from './parser';
 import { isValidReferenceTimeMs } from './temporal';
-import type { CompileResult, PreparedQuery, ResolvedEngineConfig } from './types';
+import type {
+	CompileResult,
+	NormalizedDocument,
+	PreparedQuery,
+	ResolvedEngineConfig,
+} from './types';
 import { validateQueryAST } from './validator';
 
 /**
@@ -12,6 +17,7 @@ export function compileQuery(
 	input: string,
 	resolvedConfig: ResolvedEngineConfig,
 	referenceTimeMs: number,
+	hostDoc?: NormalizedDocument | null,
 ): CompileResult {
 	// Step 0: Validate referenceTimeMs
 	if (!isValidReferenceTimeMs(referenceTimeMs)) {
@@ -47,7 +53,13 @@ export function compileQuery(
 		ast: resolvedAst,
 		diagnostics: valDiagnostics,
 		invalidPropertyNodes,
-	} = validateQueryAST(parsed.ast, resolvedConfig, referenceTimeMs, parsed.invalidPropertyNodes);
+	} = validateQueryAST(
+		parsed.ast,
+		resolvedConfig,
+		referenceTimeMs,
+		parsed.invalidPropertyNodes,
+		hostDoc,
+	);
 
 	// Step 5: Non-blocking linter pass
 	const lintDiagnostics = lintQueryAST(resolvedAst, invalidPropertyNodes, resolvedConfig);
@@ -70,6 +82,7 @@ export function compileQuery(
 		ast: frozenAst,
 		resolvedConfig,
 		referenceTimeMs,
+		...(hostDoc !== undefined ? { hostDoc } : {}),
 	});
 	return {
 		ast: frozenAst,

@@ -1,6 +1,11 @@
 import type { CstElement, CstNode, IToken } from 'chevrotain';
 import { createWikilinkBracketsHint } from './linter';
-import { decodeQuotedString, decodeRegexLiteral, decodeWikiLinkValue } from './literals';
+import {
+	decodeQuotedString,
+	decodeRegexLiteral,
+	decodeThisReference,
+	decodeWikiLinkValue,
+} from './literals';
 import { BUILT_IN_SCOPES } from './scopes';
 import type {
 	LeafMatcher,
@@ -151,6 +156,28 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 			return {
 				matcher: { kind: 'regex', pattern, flags },
 				span: tokenToSpan(regex),
+			};
+		}
+		const thisRef = asTokens(ch.ThisReference)[0];
+		if (thisRef) {
+			const span = tokenToSpan(thisRef);
+			const decoded = decodeThisReference(thisRef.image);
+			if (!decoded.ok) {
+				diagnostics.push({
+					code: 'SYNTAX_ERROR',
+					severity: 'error',
+					issue: decoded.issue,
+					hint: decoded.hint,
+					span,
+				});
+				return {
+					matcher: { kind: 'this', raw: thisRef.image, segments: [] },
+					span,
+				};
+			}
+			return {
+				matcher: { kind: 'this', raw: thisRef.image, segments: decoded.segments },
+				span,
 			};
 		}
 		const tok =

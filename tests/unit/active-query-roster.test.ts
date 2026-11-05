@@ -735,7 +735,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		} as unknown as MarkdownPostProcessorContext;
 
 		const source =
-			'Note={{ file.basename }} | Status={{ properties.status }} | Alias={{ aliases.first }} | Vault={{ vault }}';
+			'Note={{ this.file.basename }} | Status={{ this.properties.status }} | Alias={{ this.aliases.first }} | Vault={{ vault }}';
 
 		await processRhizomeCodeBlock(source, el, ctx, plugin);
 
@@ -923,6 +923,162 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(renderLog?.meta.durationMs).toBe(0);
 
 		addedChildren[0]?.unload();
+		renderSpy.mockRestore();
+	});
+
+	it('isolates identical @this.tags queries across multiple open host notes in a single vault scan and updates sourcePath on file rename', async () => {
+		const harness = createMutableVaultApp([
+			{
+				path: 'Projects/Apollo.md',
+				cache: {
+					frontmatter: { tags: ['space'] },
+				},
+			},
+			{
+				path: 'Projects/Ocean.md',
+				cache: {
+					frontmatter: { tags: ['marine'] },
+				},
+			},
+			{
+				path: 'Notes/LunarRover.md',
+				cache: {
+					frontmatter: { tags: ['space/rover'] },
+				},
+			},
+			{
+				path: 'Notes/Submarine.md',
+				cache: {
+					frontmatter: { tags: ['marine/sub'] },
+				},
+			},
+		]);
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		const apolloRenders: string[] = [];
+		const oceanRenders: string[] = [];
+		const apolloEl = { empty: () => {} } as unknown as HTMLElement;
+		const oceanEl = { empty: () => {} } as unknown as HTMLElement;
+		const renderSpy = vi
+			.spyOn(MarkdownRenderer, 'render')
+			.mockImplementation(async (_app, markdown, containerEl) => {
+				if (containerEl === apolloEl) {
+					apolloRenders.push(markdown);
+				} else if (containerEl === oceanEl) {
+					oceanRenders.push(markdown);
+				}
+			});
+
+		const children: MarkdownRenderChild[] = [];
+		const sharedCodeblock = [
+			'{%- query related -%}tag:@this.tags AND ![file.path: = @this.file.path]{%- endquery -%}',
+			'Host={{ this.file.basename }} ({{ this.file.path }}) -> {% for n in query.related %}{{ n.file.basename }};{% endfor %}',
+		].join('\n');
+
+		await processRhizomeCodeBlock(
+			sharedCodeblock,
+			apolloEl,
+			{
+				sourcePath: 'Projects/Apollo.md',
+				addChild: (c: MarkdownRenderChild) => children.push(c),
+			} as unknown as MarkdownPostProcessorContext,
+			plugin,
+		);
+		await processRhizomeCodeBlock(
+			sharedCodeblock,
+			oceanEl,
+			{
+				sourcePath: 'Projects/Ocean.md',
+				addChild: (c: MarkdownRenderChild) => children.push(c),
+			} as unknown as MarkdownPostProcessorContext,
+			plugin,
+		);
+
+		expect(apolloRenders).toEqual(['Host=Apollo (Projects/Apollo.md) -> LunarRover;']);
+		expect(oceanRenders).toEqual(['Host=Ocean (Projects/Ocean.md) -> Submarine;']);
+
+		// 1. Add a new note Notes/MarsProbe.md tagged #space; Apollo re-renders while Ocean does NOT
+		harness.setNotes([
+			{
+				path: 'Projects/Apollo.md',
+				cache: {
+					frontmatter: { tags: ['space'] },
+				},
+			},
+			{
+				path: 'Projects/Ocean.md',
+				cache: {
+					frontmatter: { tags: ['marine'] },
+				},
+			},
+			{
+				path: 'Notes/LunarRover.md',
+				cache: {
+					frontmatter: { tags: ['space/rover'] },
+				},
+			},
+			{
+				path: 'Notes/MarsProbe.md',
+				cache: {
+					frontmatter: { tags: ['space/mars'] },
+				},
+			},
+			{
+				path: 'Notes/Submarine.md',
+				cache: {
+					frontmatter: { tags: ['marine/sub'] },
+				},
+			},
+		]);
+		await plugin.activeQueryRoster.nudge();
+
+		expect(apolloRenders).toHaveLength(2);
+		expect(apolloRenders[1]).toBe('Host=Apollo (Projects/Apollo.md) -> LunarRover;MarsProbe;');
+		expect(oceanRenders).toHaveLength(1);
+
+		// 2. Rename Projects/Apollo.md -> Projects/Artemis.md and verify handleFileRename + nudge updates this.file.basename & this.file.path
+		harness.setNotes([
+			{
+				path: 'Projects/Artemis.md',
+				cache: {
+					frontmatter: { tags: ['space'] },
+				},
+			},
+			{
+				path: 'Projects/Ocean.md',
+				cache: {
+					frontmatter: { tags: ['marine'] },
+				},
+			},
+			{
+				path: 'Notes/LunarRover.md',
+				cache: {
+					frontmatter: { tags: ['space/rover'] },
+				},
+			},
+			{
+				path: 'Notes/MarsProbe.md',
+				cache: {
+					frontmatter: { tags: ['space/mars'] },
+				},
+			},
+			{
+				path: 'Notes/Submarine.md',
+				cache: {
+					frontmatter: { tags: ['marine/sub'] },
+				},
+			},
+		]);
+		plugin.activeQueryRoster.handleFileRename('Projects/Apollo.md', 'Projects/Artemis.md');
+		await plugin.activeQueryRoster.nudge();
+
+		expect(apolloRenders).toHaveLength(3);
+		expect(apolloRenders[2]).toBe(
+			'Host=Artemis (Projects/Artemis.md) -> LunarRover;MarsProbe;',
+		);
+
+		for (const c of children) c.unload();
 		renderSpy.mockRestore();
 	});
 });

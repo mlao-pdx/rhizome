@@ -8,8 +8,6 @@ import {
 } from 'obsidian';
 import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
 import {
-	buildHostNoteQuery,
-	HOST_QUERY_KEY,
 	parseRhizomeTemplatePass1Async,
 	renderParsedRhizomeTemplate,
 	resolveCodeBlockHeadingLevel,
@@ -151,7 +149,10 @@ export async function processRhizomeCodeBlock(
 	ctx: MarkdownPostProcessorContext,
 	plugin: RhizomePlugin,
 ): Promise<void> {
-	const sourcePath = typeof ctx.sourcePath === 'string' ? ctx.sourcePath : '';
+	let currentSourcePath = typeof ctx.sourcePath === 'string' ? ctx.sourcePath : '';
+	const onSourcePathRename = (newPath: string): void => {
+		currentSourcePath = newPath;
+	};
 
 	const outerChild = new MarkdownRenderChild(el);
 	ctx.addChild(outerChild);
@@ -186,7 +187,7 @@ export async function processRhizomeCodeBlock(
 		const renderChild = new MarkdownRenderChild(el);
 		activeRenderChild = renderChild;
 		outerChild.addChild(renderChild);
-		await MarkdownRenderer.render(plugin.app, markdown, el, sourcePath, renderChild);
+		await MarkdownRenderer.render(plugin.app, markdown, el, currentSourcePath, renderChild);
 	};
 
 	const runCycle = async (): Promise<void> => {
@@ -229,6 +230,8 @@ export async function processRhizomeCodeBlock(
 				referenceTimeMs,
 				signal: cycleSignal,
 				onReset,
+				onSourcePathRename,
+				...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
 			});
 			if (
 				outerAbortController.signal.aborted ||
@@ -242,8 +245,13 @@ export async function processRhizomeCodeBlock(
 				source,
 				parsed,
 				Object.freeze({}),
-				(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
-				buildRuntimeContext(plugin, referenceTimeMs, sourcePath, ctx, el),
+				(query, heading) =>
+					plugin.explainQuery(query, {
+						referenceTimeMs,
+						heading,
+						...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
+					}),
+				buildRuntimeContext(plugin, referenceTimeMs, currentSourcePath, ctx, el),
 			);
 			if (
 				outerAbortController.signal.aborted ||
@@ -253,16 +261,13 @@ export async function processRhizomeCodeBlock(
 				return;
 			}
 			const durationMs = parseDurationMs + Math.max(0, Date.now() - renderStartedAt);
-			logCodeBlockRenderResult(plugin, sourcePath, errorResult, durationMs);
+			logCodeBlockRenderResult(plugin, currentSourcePath, errorResult, durationMs);
 			await renderIntoContainer(errorResult.markdown, generation, cycleSignal);
 			return;
 		}
 
 		const queries = parsed.env.queries;
 		const queryMap = Object.create(null) as Record<string, string>;
-		if (sourcePath.length > 0) {
-			queryMap[HOST_QUERY_KEY] = buildHostNoteQuery(sourcePath);
-		}
 		for (const q of queries) {
 			queryMap[q.name] = q.query;
 		}
@@ -278,8 +283,12 @@ export async function processRhizomeCodeBlock(
 				parsed,
 				newPayload,
 				(query, heading) =>
-					plugin.explainQuery(query, { referenceTimeMs: updateStartedAt, heading }),
-				buildRuntimeContext(plugin, updateStartedAt, sourcePath, ctx, el),
+					plugin.explainQuery(query, {
+						referenceTimeMs: updateStartedAt,
+						heading,
+						...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
+					}),
+				buildRuntimeContext(plugin, updateStartedAt, currentSourcePath, ctx, el),
 			);
 			if (
 				outerAbortController.signal.aborted ||
@@ -289,7 +298,7 @@ export async function processRhizomeCodeBlock(
 				return;
 			}
 			const updateDurationMs = Math.max(0, Date.now() - updateStartedAt);
-			logCodeBlockRenderResult(plugin, sourcePath, updatedResult, updateDurationMs);
+			logCodeBlockRenderResult(plugin, currentSourcePath, updatedResult, updateDurationMs);
 			await renderIntoContainer(updatedResult.markdown, generation, cycleSignal);
 		};
 
@@ -297,8 +306,14 @@ export async function processRhizomeCodeBlock(
 		const hasQueries = Object.keys(queryMap).length > 0;
 		const initialPayload = await plugin.query(
 			Object.freeze(queryMap),
-			{ referenceTimeMs, signal: cycleSignal, onReset },
-			hasQueries ? onUpdate : undefined,
+			{
+				referenceTimeMs,
+				signal: cycleSignal,
+				onReset,
+				onSourcePathRename,
+				...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
+			},
+			hasQueries || currentSourcePath.length > 0 ? onUpdate : undefined,
 		);
 		if (
 			outerAbortController.signal.aborted ||
@@ -313,8 +328,13 @@ export async function processRhizomeCodeBlock(
 			source,
 			parsed,
 			initialPayload,
-			(query, heading) => plugin.explainQuery(query, { referenceTimeMs, heading }),
-			buildRuntimeContext(plugin, referenceTimeMs, sourcePath, ctx, el),
+			(query, heading) =>
+				plugin.explainQuery(query, {
+					referenceTimeMs,
+					heading,
+					...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
+				}),
+			buildRuntimeContext(plugin, referenceTimeMs, currentSourcePath, ctx, el),
 		);
 		if (
 			outerAbortController.signal.aborted ||
@@ -325,7 +345,7 @@ export async function processRhizomeCodeBlock(
 		}
 
 		const durationMs = parseDurationMs + Math.max(0, Date.now() - renderStartedAt);
-		logCodeBlockRenderResult(plugin, sourcePath, initialResult, durationMs);
+		logCodeBlockRenderResult(plugin, currentSourcePath, initialResult, durationMs);
 		await renderIntoContainer(initialResult.markdown, initialGeneration, cycleSignal);
 	};
 

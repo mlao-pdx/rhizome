@@ -258,7 +258,8 @@ export interface NotNode {
 
 export type LeafMatcher =
 	| { readonly kind: 'string'; readonly value: string; readonly quoted: boolean }
-	| { readonly kind: 'regex'; readonly pattern: string; readonly flags: string };
+	| { readonly kind: 'regex'; readonly pattern: string; readonly flags: string }
+	| { readonly kind: 'this'; readonly raw: string; readonly segments: readonly string[] };
 
 export type ValueExprAST =
 	| {
@@ -304,6 +305,8 @@ export type DiagnosticCode =
 	| 'ERROR_TYPE_MISMATCH'
 	| 'ERROR_INVALID_OPERATOR_FOR_TYPE'
 	| 'WARN_SINGLE_VALUE_CONTRADICTION'
+	| 'WARN_MISSING_THIS_VALUE'
+	| 'WARN_THIS_TYPE_MISMATCH'
 	| 'HINT_PROP_NEQ_EXISTENCE'
 	| 'HINT_PROPERTY_MATCHES_SCOPE'
 	| 'HINT_AMBIGUOUS_PRECEDENCE'
@@ -360,6 +363,7 @@ export interface PreparedQuery {
 	readonly ast: SearchAST;
 	readonly resolvedConfig: ResolvedEngineConfig;
 	readonly referenceTimeMs: number;
+	readonly hostDoc?: NormalizedDocument | null | undefined;
 }
 
 export interface CompileResult {

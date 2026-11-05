@@ -53,6 +53,19 @@ export const Not = createToken({ name: 'Not', pattern: /NOT(?![^\s()[\]])/, labe
 export const BangNot = createToken({ name: 'BangNot', pattern: /!(?![=\s])/, label: '!' });
 
 /**
+ * Matches `@this` and `@this.<path>` host-note references, supporting unquoted dot-separated
+ * segments as well as single- or double-quoted property segments (`@this.properties."Review Status"`).
+ * Negative lookahead `(?![a-zA-Z0-9_+-])` ensures `@thisday`, `@thisweek`, `@thismonth`,
+ * `@thisquarter`, and `@thisyear` fall through to `DateTimeLiteral`.
+ */
+export const ThisReference = createToken({
+	name: 'ThisReference',
+	pattern:
+		/@this(?![a-zA-Z0-9_+-])(?:\.(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s.()[\]{}:"'><=!]*))*(?![^\s()[\]])/,
+	label: '@this.path',
+});
+
+/**
  * Matches:
  * - ISO dates/datetimes (with optional `±Nd` day offset on `YYYY-MM-DD`)
  * - `@now`, `@today`, `@yesterday`, `@tomorrow`, `@(last|this|next)(day|week|month|quarter|year)` (with optional `±Nd?` offset)
@@ -109,6 +122,7 @@ export const ALL_TOKENS: TokenType[] = [
 	And,
 	Not,
 	BangNot,
+	ThisReference,
 	DateTimeLiteral,
 	Colon,
 	CompOp,

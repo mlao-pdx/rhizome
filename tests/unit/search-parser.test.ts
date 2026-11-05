@@ -58,6 +58,7 @@ describe('Invariant 1a: Lexer & SearchParser self-analysis smoke test', () => {
 			And: 'AND',
 			Not: 'NOT',
 			BangNot: '!',
+			ThisReference: '@this.path',
 			DateTimeLiteral: 'date literal',
 			Colon: ':',
 			CompOp: 'comparison operator',
@@ -803,5 +804,47 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 		);
 		expect(validBraces.diagnostics.filter((d) => d.severity === 'error')).toEqual([]);
 		expect(validBraces.ast).not.toBeNull();
+	});
+
+	it('lexes and lowers @this.<path> references with unquoted and quoted segments while preserving @thisweek/@thisyear as DateTimeLiteral', () => {
+		const res = parseQuery(
+			"tag:@this.tags AND [status: = @this.properties.\"Review Status\"] AND [quote: = @this.properties.'quote\\'s'] AND [created: = @thisweek] AND [due: = @thisyear]",
+		);
+		expect(res.diagnostics).toEqual([]);
+		expect(res.ast).not.toBeNull();
+
+		const root = res.ast as LogicalNode;
+		expect(root.children).toHaveLength(5);
+		const tagNode = root.children[0] as ScopedFilterNode;
+		expect(tagNode.expr).toMatchObject({
+			type: 'VALUE_LEAF',
+			matcher: { kind: 'this', raw: '@this.tags', segments: ['tags'] },
+		});
+
+		const frozen = deepFreezeAST(res.ast!);
+		const frozenTag = (frozen as LogicalNode).children[0] as ScopedFilterNode;
+		const frozenLeaf = frozenTag.expr as Extract<typeof frozenTag.expr, { type: 'VALUE_LEAF' }>;
+		expect(Object.isFrozen(frozenLeaf.matcher)).toBe(true);
+		if (frozenLeaf.matcher.kind === 'this') {
+			expect(Object.isFrozen(frozenLeaf.matcher.segments)).toBe(true);
+		}
+	});
+
+	it('emits SYNTAX_ERROR for bare @this, trailing dot @this., empty segments @this..foo, @this."", and forbidden keys', () => {
+		const invalidQueries = [
+			'file:@this',
+			'file:@this.',
+			'file:@this..basename',
+			'file:@this.properties.""',
+			'file:@this.properties.__proto__',
+			'[status: = @this]',
+			'[status: = @this.]',
+			'@this.file.basename',
+		];
+		for (const q of invalidQueries) {
+			const res = parseQuery(q);
+			expect(res.ast).toBeNull();
+			expect(res.diagnostics.some((d) => d.code === 'SYNTAX_ERROR')).toBe(true);
+		}
 	});
 });

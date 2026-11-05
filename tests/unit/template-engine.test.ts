@@ -510,7 +510,7 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		expect(runQueries).not.toHaveBeenCalled();
 	});
 
-	it('exposes host note metadata via ◊host at the root scope, namespaces queries under query.*, and exposes vault/tz/language/platform globals', async () => {
+	it('exposes host note metadata via ◊host under this.*, namespaces queries under query.*, and exposes vault/tz/language/platform globals', async () => {
 		const runQueries = vi.fn(async () => ({
 			'◊host': [
 				{
@@ -552,12 +552,12 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const template = [
 			'{%- query myFirstQuery -%}tag:task{%- endquery -%}',
-			'Host: {{ file.basename }} ({{ file.path }})',
-			'Status: {{ properties.status }}',
-			'Aliases: {% for a in aliases %}{{ a }}{% unless forloop.last %}, {% endunless %}{% endfor %}',
-			'Tags: {{ tags | join: "+" }}',
-			'Heading: {{ headings[0].text }}',
-			'Block: {{ blocks.first }}',
+			'Host: {{ this.file.basename }} ({{ this.file.path }})',
+			'Status: {{ this.properties.status }}',
+			'Aliases: {% for a in this.aliases %}{{ a }}{% unless forloop.last %}, {% endunless %}{% endfor %}',
+			'Tags: {{ this.tags | join: "+" }}',
+			'Heading: {{ this.headings[0].text }}',
+			'Block: {{ this.blocks.first }}',
 			'Query items: {% for note in query.myFirstQuery %}{{ note.file.basename }};{% endfor %}',
 			'Hidden host in query: {{ query["◊host"] | default: "HIDDEN" }}',
 			'Env: {{ vault }} | {{ tz }} | {{ language }} | mac={{ platform.isMacOS }} | mobile={{ platform.isMobile }}',
@@ -657,19 +657,19 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'r_month_year={{ thismonth..thisyear }}',
 			'r_today_now={{ today..now }}',
 			'r_paren={{ (yesterday..tomorrow) }}',
-			'fmt_mod={{ file.modified | date: "%Y-%m-%d %H:%M" }}',
+			'fmt_mod={{ this.file.modified | date: "%Y-%m-%d %H:%M" }}',
 			'fmt_today={{ today | date: "%Y/%m/%d" }}',
 			'fmt_str_now={{ "now" | date: "%Y-%m-%d %H:%M" }}',
 			'fmt_to_str={{ today | date_to_string }}',
 			'where_today={% assign matching = query.notes | where_exp: "n", "n.file.created == today" %}{% for m in matching %}{{ m.file.basename }}{% endfor %}',
-			'cmp_created_today={% if file.created == today %}YES{% else %}NO{% endif %}',
-			'cmp_created_yesterday={% if file.created > yesterday %}YES{% else %}NO{% endif %}',
-			'cmp_created_tomorrow={% if file.created < tomorrow %}YES{% else %}NO{% endif %}',
-			'cmp_due_today={% if properties.due == today %}YES{% else %}NO{% endif %}',
-			'cmp_due_month={% if properties.due <= thismonth %}YES{% else %}NO{% endif %}',
-			'cmp_window_month={% if properties.window == thismonth %}YES{% else %}NO{% endif %}',
-			'cmp_null_neq={% if properties.missing != today %}YES{% else %}NO{% endif %}',
-			'cmp_null_eq={% if properties.missing == today %}YES{% else %}NO{% endif %}',
+			'cmp_created_today={% if this.file.created == today %}YES{% else %}NO{% endif %}',
+			'cmp_created_yesterday={% if this.file.created > yesterday %}YES{% else %}NO{% endif %}',
+			'cmp_created_tomorrow={% if this.file.created < tomorrow %}YES{% else %}NO{% endif %}',
+			'cmp_due_today={% if this.properties.due == today %}YES{% else %}NO{% endif %}',
+			'cmp_due_month={% if this.properties.due <= thismonth %}YES{% else %}NO{% endif %}',
+			'cmp_window_month={% if this.properties.window == thismonth %}YES{% else %}NO{% endif %}',
+			'cmp_null_neq={% if this.properties.missing != today %}YES{% else %}NO{% endif %}',
+			'cmp_null_eq={% if this.properties.missing == today %}YES{% else %}NO{% endif %}',
 			'iter_months={% for m in thismonth..thisyear %}{{ m }};{% endfor %}',
 			'iter_days={% for d in today-2d..today %}{{ d }};{% endfor %}',
 			'iter_mins={% for min in "2026-10-31T08:38"..now %}{{ min }};{% endfor %}',
@@ -855,7 +855,7 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		const refMs = Date.UTC(2026, 9, 31, 8, 39, 0, 0);
 		const res = await renderRhizomeTemplate(
 			[
-				'epoch_zero={{ file.created..today }}',
+				'epoch_zero={{ this.file.created..today }}',
 				'year_lit={{ 2020..today }}',
 				'year_lit_rhs={{ "2018-06"..2020 }}',
 				'num_range={{ (2020..2022) | join: "," }}',
@@ -925,7 +925,7 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 	it('seeds ◊host in renderRhizomeTemplate when runtimeContext.sourcePath is provided even with zero {% query %} blocks', async () => {
 		const capturedBatches: Array<Readonly<Record<string, string>>> = [];
 		const res = await renderRhizomeTemplate(
-			'Host={{ file.basename }} | Prop={{ properties.category }}',
+			'Host={{ this.file.basename }} | Prop={{ this.properties.category }}',
 			{
 				runQueries: async (batch) => {
 					capturedBatches.push(batch);
@@ -957,11 +957,11 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		const res = await renderRhizomeTemplate(
 			[
 				'{%- query notes -%}tag:note{%- endquery -%}',
-				'append={{ "Note: " | append: (file.basename | upcase) }}',
+				'append={{ "Note: " | append: (this.file.basename | upcase) }}',
 				'{% assign a = 3 %}{% assign b = 5 %}',
 				'nested={{ ((a | plus: 1) | times: (b | minus: 1)) }}',
 				'for_sorted={% for n in (query.notes | sort: "file.basename") %}{{ n.file.basename }};{% endfor %}',
-				'if_cond={% if (file.basename | downcase) == "readme" %}matched{% else %}nope{% endif %}',
+				'if_cond={% if (this.file.basename | downcase) == "readme" %}matched{% else %}nope{% endif %}',
 				'chain={{ (query.notes | sort: "file.stat.mtime desc")[0].file.basename }}',
 				'lit_str={{ ("hello" | upcase) }}',
 				'lit_num={{ (42 | plus: 8) }}',
@@ -1009,30 +1009,30 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		const res = await renderRhizomeTemplate(
 			[
 				'{%- query notes -%}* {%- endquery -%}',
-				'm_iso={{ file.modified | date: "YYYY-MM-DD HH:mm:ss.SSS" }}',
+				'm_iso={{ this.file.modified | date: "YYYY-MM-DD HH:mm:ss.SSS" }}',
 				'm_human={{ today | date: "dddd, MMMM Do YYYY" }}',
 				'm_escaped={{ now | date: "[Today is] ddd, MMM D [at] h:mm A" }}',
 				'm_backslash={{ today | date: "\\\\YYYY YYYY" }}',
 				'm_quarters_weeks={{ today | date: "Q Qo [W]WW Wo w wo DDD DDDD DDDo e E d dd" }}',
 				'm_week_years={{ "2026-01-01" | date: "gggg gg GGGG GG" }}',
-				'm_hours={{ file.modified | date: "H HH h hh k kk a A hmm hmmss Hmm Hmmss eHHmm" }}',
-				'm_frac={{ file.modified | date: "S SS SSS SSSS SSSSS SSSSSS" }}',
-				'm_unix={{ file.modified | date: "X | x" }}',
-				'm_zone_utc={{ file.modified | date: "Z ZZ z zz" }}',
-				'm_zone_ny={{ file.modified | date: "YYYY-MM-DD HH:mm Z ZZ", "America/New_York" }}',
-				'm_zone_offset={{ file.modified | date: "YYYY-MM-DD HH:mm Z ZZ", "+05:30" }}',
-				'm_zone_num={{ file.modified | date: "YYYY-MM-DD HH:mm Z ZZ", -480 }}',
-				'm_long={{ file.modified | date: "LT | LTS | L | LL | LLL | LLLL" }}',
-				'm_short_local={{ file.modified | date: "l | ll | lll | llll" }}',
+				'm_hours={{ this.file.modified | date: "H HH h hh k kk a A hmm hmmss Hmm Hmmss eHHmm" }}',
+				'm_frac={{ this.file.modified | date: "S SS SSS SSSS SSSSS SSSSSS" }}',
+				'm_unix={{ this.file.modified | date: "X | x" }}',
+				'm_zone_utc={{ this.file.modified | date: "Z ZZ z zz" }}',
+				'm_zone_ny={{ this.file.modified | date: "YYYY-MM-DD HH:mm Z ZZ", "America/New_York" }}',
+				'm_zone_offset={{ this.file.modified | date: "YYYY-MM-DD HH:mm Z ZZ", "+05:30" }}',
+				'm_zone_num={{ this.file.modified | date: "YYYY-MM-DD HH:mm Z ZZ", -480 }}',
+				'm_long={{ this.file.modified | date: "LT | LTS | L | LL | LLL | LLLL" }}',
+				'm_short_local={{ this.file.modified | date: "l | ll | lll | llll" }}',
 				'm_era={{ today | date: "y yy yyy yyyy yo N NNNN NNNNN" }}',
 				'm_empty={{ today | date: "" }}',
-				's_basic={{ file.modified | date: "%Y-%m-%d %H:%M:%S" }}',
+				's_basic={{ this.file.modified | date: "%Y-%m-%d %H:%M:%S" }}',
 				's_pct={{ today | date: "100%% in %Y" }}',
-				's_offset={{ file.modified | date: "%Y-%m-%d %H:%M %z", "+0530" }}',
+				's_offset={{ this.file.modified | date: "%Y-%m-%d %H:%M %z", "+0530" }}',
 				's_default={{ today | date }}',
 				'invalid_m={{ "not-a-date" | date: "YYYY-MM-DD" }}',
 				'invalid_s={{ "not-a-date" | date: "%Y-%m-%d" }}',
-				'nil_m={{ properties.missing | date: "YYYY-MM-DD" }}',
+				'nil_m={{ this.properties.missing | date: "YYYY-MM-DD" }}',
 				'pick_m={% assign rows = query.notes | pick: "file.basename as name", "file.modified | date: \'YYYY-MM-DD\' as mod" %}{% for r in rows %}{{ r.name }}:{{ r.mod }};{% endfor %}',
 			].join('\n'),
 			{

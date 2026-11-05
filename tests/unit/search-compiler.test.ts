@@ -729,4 +729,59 @@ describe('Step 6: PreparedQuery & AST deep freeze (Conformance Test 16c)', () =>
 
 		expect(normalizeAST(compiled.ast!)).toEqual(normalizeAST(compiled.prepared!.ast));
 	});
+
+	it('emits non-blocking WARN_MISSING_THIS_VALUE and WARN_THIS_TYPE_MISMATCH when hostDoc is supplied while keeping executable: true', () => {
+		const hostDoc = {
+			normalizationFingerprint: config.normalizationFingerprint,
+			file: {
+				path: 'Projects/Apollo.md',
+				name: 'Apollo.md',
+				basename: 'Apollo',
+				extension: 'md',
+				parent: 'Projects',
+				created: '2026-10-20T09:00',
+				modified: '2026-10-22T15:30',
+				size: 512,
+			},
+			aliases: [],
+			aliasLocations: [],
+			tags: ['space'],
+			tagLocations: [],
+			headings: [],
+			links: [],
+			embeds: [],
+			blocks: [],
+			propertyOccurrences: [],
+			propertyKeys: ['bad_score'],
+			properties: Object.assign(Object.create(null) as Record<string, unknown>, {
+				bad_score: 'not-a-number',
+			}),
+			propertyLocations: [],
+			diagnostics: [],
+		};
+
+		const missingRes = compileQuery(
+			'tag:@this.properties.nonexistent AND [score: = @this.properties.missing_num]',
+			config,
+			PINNED_REF_MS,
+			hostDoc,
+		);
+		expect(missingRes.executable).toBe(true);
+		expect(missingRes.prepared).not.toBeNull();
+		expect(missingRes.prepared?.hostDoc).toBe(hostDoc);
+		expect(missingRes.diagnostics.map((d) => d.code)).toEqual([
+			'WARN_MISSING_THIS_VALUE',
+			'WARN_MISSING_THIS_VALUE',
+		]);
+
+		const mismatchRes = compileQuery(
+			'[score: > @this.properties.bad_score]',
+			config,
+			PINNED_REF_MS,
+			hostDoc,
+		);
+		expect(mismatchRes.executable).toBe(true);
+		expect(mismatchRes.prepared).not.toBeNull();
+		expect(mismatchRes.diagnostics.map((d) => d.code)).toEqual(['WARN_THIS_TYPE_MISMATCH']);
+	});
 });

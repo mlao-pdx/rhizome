@@ -113,9 +113,9 @@ export function extractUserQueryMap(
 
 /**
  * Constructs the root LiquidJS scope object for Pass 2 rendering:
- * - Spreads the hosting note's 11 normalized fields (`file`, `aliases`, `aliasLocations`, `tags`,
+ * - Binds the hosting note's 11 normalized fields (`file`, `aliases`, `aliasLocations`, `tags`,
  *   `tagLocations`, `headings`, `links`, `embeds`, `blocks`, `properties`, `propertyLocations`)
- *   from `rawPayload['◊host'][0]` onto the root.
+ *   from `rawPayload['◊host'][0]` under `root.this`.
  * - Exposes user query results under `query.<name>` (excluding `'◊'`-prefixed internal keys).
  * - Exposes `vault`, `tz`, `language`, and `platform.*` at the root.
  * - Exposes all built-in relative temporal literals (`now`, `today`, `today-7d`, `yesterday+3d`,
@@ -143,7 +143,7 @@ export function buildRhizomeTemplateContext(
 			? (hostEntries[0] as Record<string, unknown> | null)
 			: null;
 
-	const root: Record<string, unknown> = {
+	const hostObject = Object.freeze({
 		file: hostMatch && 'file' in hostMatch ? hostMatch.file : null,
 		aliases:
 			hostMatch && Array.isArray(hostMatch.aliases) ? hostMatch.aliases : EMPTY_FROZEN_ARRAY,
@@ -173,6 +173,10 @@ export function buildRhizomeTemplateContext(
 			hostMatch && Array.isArray(hostMatch.propertyLocations)
 				? hostMatch.propertyLocations
 				: EMPTY_FROZEN_ARRAY,
+	});
+
+	const root: Record<string, unknown> = {
+		this: hostObject,
 		query: extractUserQueryMap(rawPayload),
 		vault,
 		tz: timeZone,

@@ -25,6 +25,7 @@ import {
 	RParen,
 	SearchLexer,
 	TagLiteral,
+	ThisReference,
 	WikiLinkValue,
 } from './tokens';
 import type { PropertyFilterNode, SearchAST, SearchDiagnostic } from './types';
@@ -228,6 +229,7 @@ export class SearchParser extends CstParser {
 		this.OR([
 			{ ALT: () => this.CONSUME(QuotedString) },
 			{ ALT: () => this.CONSUME(RegexLiteral) },
+			{ ALT: () => this.CONSUME(ThisReference) },
 			{ ALT: () => this.CONSUME(DateTimeLiteral) },
 			{ ALT: () => this.CONSUME(TagLiteral) },
 			{ ALT: () => this.CONSUME(Identifier) },
@@ -241,6 +243,7 @@ function isUnquotedValueToken(tok: IToken | undefined): tok is IToken {
 	return (
 		tok !== undefined &&
 		(tok.tokenType === Identifier ||
+			tok.tokenType === ThisReference ||
 			tok.tokenType === DateTimeLiteral ||
 			tok.tokenType === TagLiteral)
 	);
@@ -251,6 +254,7 @@ function isBareLiteralToken(tok: IToken | undefined): tok is IToken {
 		tok !== undefined &&
 		(tok.tokenType === QuotedString ||
 			tok.tokenType === RegexLiteral ||
+			tok.tokenType === ThisReference ||
 			tok.tokenType === DateTimeLiteral ||
 			tok.tokenType === WikiLinkValue)
 	);

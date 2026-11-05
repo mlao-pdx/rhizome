@@ -1,11 +1,15 @@
-import type { App } from 'obsidian';
-import type { PropertyTypeRegistry } from '@core/search';
+import { type App, normalizePath } from 'obsidian';
+import type { NormalizedDocument, PropertyTypeRegistry, ResolvedEngineConfig } from '@core/search';
+import { HOST_QUERY_KEY } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import { markSensitive } from './logger-format';
 import {
 	resolveDefaultTimeZone,
+	resolveGroupEngineConfig,
+	resolveHostDocument,
 	runVaultQuery,
 	sanitizeQueryEntries,
+	toVaultQueryMatch,
 	type VaultQueryCallback,
 	type VaultQueryMatch,
 	type VaultQueryOptions,
@@ -333,6 +337,8 @@ interface ActiveSubscription {
 	readonly onAbort: () => void;
 	readonly onUpdate: VaultQueryCallback | undefined;
 	readonly onReset: (() => void) | undefined;
+	readonly onSourcePathRename: ((newPath: string) => void) | undefined;
+	sourcePath: string | undefined;
 	lastPayloadHash: string;
 }
 
@@ -383,8 +389,13 @@ export class ActiveQueryRoster {
 		const entries = sanitizeQueryEntries(queries);
 		const signal = options?.signal;
 		const onReset = options?.onReset;
-		const hasUpdateQueries = entries.length > 0 && typeof onUpdate === 'function';
-		if ((!hasUpdateQueries && typeof onReset !== 'function') || signal?.aborted === true) {
+		const sourcePath =
+			typeof options?.sourcePath === 'string' && options.sourcePath.length > 0
+				? options.sourcePath
+				: undefined;
+		const hasUpdateTarget =
+			(entries.length > 0 || sourcePath !== undefined) && typeof onUpdate === 'function';
+		if ((!hasUpdateTarget && typeof onReset !== 'function') || signal?.aborted === true) {
 			return () => {};
 		}
 
@@ -401,6 +412,8 @@ export class ActiveQueryRoster {
 			onAbort,
 			onUpdate,
 			onReset,
+			onSourcePathRename: options?.onSourcePathRename,
+			sourcePath,
 			lastPayloadHash: hashVaultQueryResult(initialResult),
 		};
 		this.subscriptions.set(id, sub);
@@ -483,6 +496,34 @@ export class ActiveQueryRoster {
 		this.rerunPending = false;
 	}
 
+	/**
+	 * Updates `sourcePath` on any active subscription whose hosting note was renamed from
+	 * `oldPath` to `newPath`, invoking `onSourcePathRename` so mounted codeblocks stay
+	 * synchronized with the renamed note.
+	 */
+	handleFileRename(oldPath: string, newPath: string): void {
+		if (typeof oldPath !== 'string' || typeof newPath !== 'string' || !oldPath || !newPath) {
+			return;
+		}
+		const normOld = normalizePath(oldPath);
+		for (const sub of this.subscriptions.values()) {
+			if (sub.signal?.aborted) {
+				continue;
+			}
+			if (
+				sub.sourcePath !== undefined &&
+				(sub.sourcePath === oldPath || normalizePath(sub.sourcePath) === normOld)
+			) {
+				sub.sourcePath = newPath;
+				try {
+					sub.onSourcePathRename?.(newPath);
+				} catch {
+					// Ignore callback error during rename propagation
+				}
+			}
+		}
+	}
+
 	private async executeNudgePass(referenceTimeMs: number): Promise<void> {
 		if (this.subscriptions.size === 0) {
 			return;
@@ -503,7 +544,10 @@ export class ActiveQueryRoster {
 				this.subscriptions.delete(sub.id);
 				continue;
 			}
-			if (sub.entries.length === 0 || typeof sub.onUpdate !== 'function') {
+			const hasUpdateTarget =
+				(sub.entries.length > 0 || sub.sourcePath !== undefined) &&
+				typeof sub.onUpdate === 'function';
+			if (!hasUpdateTarget) {
 				continue;
 			}
 			const key = buildConfigGroupKey(sub.timeZone, sub.propertyTypes);
@@ -520,33 +564,85 @@ export class ActiveQueryRoster {
 		}
 
 		for (const group of groups.values()) {
+			const uniqueSourcePaths = new Set<string>();
+			for (const sub of group.subs) {
+				if (sub.sourcePath !== undefined) {
+					uniqueSourcePaths.add(sub.sourcePath);
+				}
+			}
+
+			let engineConfig: ResolvedEngineConfig | null = null;
+			const hostDocsByPath = new Map<string, NormalizedDocument | null>();
+			if (uniqueSourcePaths.size > 0) {
+				engineConfig = await resolveGroupEngineConfig(
+					this.app,
+					group.timeZone,
+					group.propertyTypes,
+					this.logger,
+				);
+				if (engineConfig) {
+					const resolveLinkPath = (rawTarget: string, linkSourcePath: string) =>
+						this.app.metadataCache.getFirstLinkpathDest?.(rawTarget, linkSourcePath)
+							?.path ?? null;
+					for (const sp of uniqueSourcePaths) {
+						const doc = resolveHostDocument(
+							this.app,
+							sp,
+							engineConfig,
+							resolveLinkPath,
+							this.logger,
+						);
+						hostDocsByPath.set(sp, doc ?? null);
+					}
+				}
+			}
+
 			const queryToDedupKey = new Map<string, string>();
 			const dedupQueries: Record<string, string> = Object.create(null) as Record<
 				string,
 				string
 			>;
+			const queryHostDocs: Record<string, NormalizedDocument | null | undefined> =
+				Object.create(null) as Record<string, NormalizedDocument | null | undefined>;
 			let qIdx = 0;
 
 			for (const sub of group.subs) {
+				const subSourceKey = sub.sourcePath ?? '';
+				const subHostDoc =
+					sub.sourcePath !== undefined
+						? (hostDocsByPath.get(sub.sourcePath) ?? null)
+						: undefined;
 				for (const [, rawQuery] of sub.entries) {
-					if (!queryToDedupKey.has(rawQuery)) {
+					const usesThis = /@this(?![a-zA-Z0-9_+-])/.test(rawQuery);
+					const compositeKey = usesThis
+						? `${subSourceKey}\0${rawQuery}`
+						: `\0${rawQuery}`;
+					if (!queryToDedupKey.has(compositeKey)) {
 						const dedupKey = `__q${qIdx++}`;
-						queryToDedupKey.set(rawQuery, dedupKey);
+						queryToDedupKey.set(compositeKey, dedupKey);
 						dedupQueries[dedupKey] = rawQuery;
+						if (usesThis && sub.sourcePath !== undefined) {
+							queryHostDocs[dedupKey] = subHostDoc;
+						}
 					}
 				}
 			}
 
-			const batchResult = await runVaultQuery(
-				this.app,
-				dedupQueries,
-				{
-					timeZone: group.timeZone,
-					propertyTypes: group.propertyTypes,
-					referenceTimeMs,
-				},
-				this.logger,
-			);
+			const batchResult =
+				qIdx > 0
+					? await runVaultQuery(
+							this.app,
+							dedupQueries,
+							{
+								timeZone: group.timeZone,
+								propertyTypes: group.propertyTypes,
+								referenceTimeMs,
+								queryHostDocs,
+								...(engineConfig ? { resolvedConfig: engineConfig } : {}),
+							},
+							this.logger,
+						)
+					: {};
 
 			for (const sub of group.subs) {
 				if (sub.signal?.aborted || !this.subscriptions.has(sub.id)) {
@@ -558,8 +654,17 @@ export class ActiveQueryRoster {
 				}
 
 				const subscriberResult: VaultQueryResult = {};
+				if (sub.sourcePath !== undefined) {
+					const hostDoc = hostDocsByPath.get(sub.sourcePath) ?? null;
+					subscriberResult[HOST_QUERY_KEY] = hostDoc ? [toVaultQueryMatch(hostDoc)] : [];
+				}
+				const subSourceKey = sub.sourcePath ?? '';
 				for (const [name, rawQuery] of sub.entries) {
-					const dedupKey = queryToDedupKey.get(rawQuery);
+					const usesThis = /@this(?![a-zA-Z0-9_+-])/.test(rawQuery);
+					const compositeKey = usesThis
+						? `${subSourceKey}\0${rawQuery}`
+						: `\0${rawQuery}`;
+					const dedupKey = queryToDedupKey.get(compositeKey);
 					if (
 						dedupKey !== undefined &&
 						Object.prototype.hasOwnProperty.call(batchResult, dedupKey)

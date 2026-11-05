@@ -11,7 +11,11 @@ import {
 } from '@codemirror/view';
 import type { App } from 'obsidian';
 import {
+	hasInternalRhizomeFlag,
 	initEngineConfig,
+	INTERNAL_RHIZOME_CODES,
+	type NormalizedDocument,
+	normalizeObsidianMetadata,
 	type PropertyTypeRegistry,
 	type ResolvedEngineConfig,
 } from '@core/search';
@@ -206,8 +210,75 @@ export function createRhizomeEditorExtension(app: App, logger?: LoggerPort): Ext
 	const configRefreshEffect = StateEffect.define<void>();
 	const analysisCache = new Map<string, CodeBlockAnalysis>();
 
+	let lastHostFile: unknown = undefined;
+	let lastHostCache: unknown = undefined;
+	let lastHostMtime: number | undefined = undefined;
+	let lastHostConfig: ResolvedEngineConfig | undefined = undefined;
+	let lastResolvedHost: {
+		hostDoc: NormalizedDocument | null | undefined;
+		cacheSignature: string;
+	} | null = null;
+	let hostSigCounter = 0;
+
+	const resolveActiveHostDoc = (): {
+		hostDoc: NormalizedDocument | null | undefined;
+		cacheSignature: string;
+	} => {
+		const workspaceWithActive = app.workspace as {
+			getActiveFile?: () => ReturnType<typeof app.vault.getMarkdownFiles>[number] | null;
+		};
+		if (typeof workspaceWithActive?.getActiveFile !== 'function') {
+			return { hostDoc: undefined, cacheSignature: '' };
+		}
+		const activeFile = workspaceWithActive.getActiveFile();
+		if (!activeFile) {
+			return { hostDoc: null, cacheSignature: 'null' };
+		}
+		const cache = app.metadataCache.getFileCache(activeFile);
+		const mtime = activeFile.stat?.mtime ?? 0;
+		if (
+			lastResolvedHost !== null &&
+			lastHostFile === activeFile &&
+			lastHostCache === cache &&
+			lastHostMtime === mtime &&
+			lastHostConfig === cachedConfig
+		) {
+			return lastResolvedHost;
+		}
+		lastHostFile = activeFile;
+		lastHostCache = cache;
+		lastHostMtime = mtime;
+		lastHostConfig = cachedConfig;
+
+		if (
+			hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)
+		) {
+			lastResolvedHost = { hostDoc: null, cacheSignature: `${activeFile.path}:ignored` };
+			return lastResolvedHost;
+		}
+		try {
+			const resolveLinkPath = (rawTarget: string, sourcePath: string) =>
+				app.metadataCache.getFirstLinkpathDest?.(rawTarget, sourcePath)?.path ?? null;
+			const hostDoc = normalizeObsidianMetadata(
+				activeFile,
+				cache,
+				cachedConfig,
+				[],
+				resolveLinkPath,
+			);
+			const sig = `${activeFile.path}:${mtime}:${++hostSigCounter}`;
+			lastResolvedHost = { hostDoc, cacheSignature: sig };
+			return lastResolvedHost;
+		} catch {
+			lastResolvedHost = { hostDoc: null, cacheSignature: `${activeFile.path}:err` };
+			return lastResolvedHost;
+		}
+	};
+
 	const getCachedAnalysis = (source: string): CodeBlockAnalysis => {
-		const hit = analysisCache.get(source);
+		const { hostDoc, cacheSignature } = resolveActiveHostDoc();
+		const cacheKey = `${cacheSignature}\0${source}`;
+		const hit = analysisCache.get(cacheKey);
 		if (hit) {
 			return hit;
 		}
@@ -217,8 +288,8 @@ export function createRhizomeEditorExtension(app: App, logger?: LoggerPort): Ext
 				analysisCache.delete(oldestKey);
 			}
 		}
-		const computed = analyzeRhizomeCodeBlock(source, cachedConfig, Date.now());
-		analysisCache.set(source, computed);
+		const computed = analyzeRhizomeCodeBlock(source, cachedConfig, Date.now(), hostDoc);
+		analysisCache.set(cacheKey, computed);
 		return computed;
 	};
 

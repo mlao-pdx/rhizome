@@ -739,5 +739,79 @@ describe('runVaultQuery', () => {
 			);
 			expect(typeof explainLog?.meta?.['durationMs']).toBe('number');
 		});
+
+		it('resolves options.sourcePath in O(1) prior to query compilation, populates results["◊host"], and evaluates @this.* queries against hostDoc', async () => {
+			let markdownFilesScanCount = 0;
+			const app = makeMockApp({
+				typesJson: JSON.stringify({ types: { priority: 'number' } }),
+				notes: [
+					{
+						path: 'Projects/Apollo.md',
+						cache: {
+							frontmatter: {
+								'Review Status': 'active',
+								priority: 3,
+								tags: ['space'],
+							},
+						},
+					},
+					{
+						path: 'Notes/Task1.md',
+						cache: {
+							frontmatter: {
+								status: 'active',
+								priority: 5,
+								tags: ['space/lunar'],
+							},
+						},
+					},
+					{
+						path: 'Notes/Task2.md',
+						cache: {
+							frontmatter: {
+								status: 'archived',
+								priority: 1,
+								tags: ['earth'],
+							},
+						},
+					},
+				],
+				onGetMarkdownFiles: () => {
+					markdownFilesScanCount++;
+				},
+			});
+
+			// 1. With @this.* queries: resolves host note and scans vault once
+			const res = await runVaultQuery(
+				app,
+				{
+					matching:
+						'tag:@this.tags AND [status: = @this.properties."Review Status"] AND [priority: > @this.properties.priority]',
+				},
+				{
+					timeZone: 'UTC',
+					sourcePath: 'Projects/Apollo.md',
+				},
+			);
+
+			expect(res['◊host']).toHaveLength(1);
+			expect(res['◊host']?.[0]?.file.basename).toBe('Apollo');
+			expect(res.matching?.map((m) => m.file.path)).toEqual(['Notes/Task1.md']);
+			expect(markdownFilesScanCount).toBe(2);
+
+			// 2. With zero queries (e.g. a codeblock only rendering {{ this.file.basename }}): populates ◊host without scanning vault
+			markdownFilesScanCount = 0;
+			const zeroQueryRes = await runVaultQuery(
+				app,
+				{},
+				{
+					timeZone: 'UTC',
+					sourcePath: 'Projects/Apollo.md',
+				},
+			);
+			expect(zeroQueryRes['◊host']).toHaveLength(1);
+			expect(zeroQueryRes['◊host']?.[0]?.file.basename).toBe('Apollo');
+			expect(markdownFilesScanCount).toBe(1);
+		});
 	});
 });

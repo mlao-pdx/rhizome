@@ -3,6 +3,7 @@ export * from './scopes';
 export * from './config';
 export * from './temporal';
 export * from './property-coercion';
+export * from './host-reference';
 export * from './metadata-normalizer';
 export * from './tokens';
 export * from './literals';

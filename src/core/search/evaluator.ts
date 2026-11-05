@@ -188,8 +188,11 @@ function evalCompiledSearchNode(doc: NormalizedDocument, node: CompiledSearchNod
 			});
 		}
 		case 'PROPERTY_COMPARE': {
+			if (node.comparisons.length === 0) return false;
 			const entries = getTypedPropertyEntries(doc, node.lowerKey);
-			return entries.some((entry) => evalCompiledComparisonOnEntry(entry, node.comparison));
+			return entries.some((entry) =>
+				node.comparisons.some((comp) => evalCompiledComparisonOnEntry(entry, comp)),
+			);
 		}
 	}
 }

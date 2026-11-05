@@ -158,6 +158,9 @@ export function formatLeafMatcher(matcher: LeafMatcher): string {
 	if (matcher.kind === 'regex') {
 		return `/${matcher.pattern}/${matcher.flags}`;
 	}
+	if (matcher.kind === 'this') {
+		return matcher.raw;
+	}
 	return matcher.quoted ? encodeDoubleQuoted(matcher.value) : matcher.value;
 }
 
@@ -192,6 +195,9 @@ export function formatRhsDisplay(valueExpr: ValueExprAST | undefined): string {
 	if (!valueExpr || valueExpr.type !== 'VALUE_LEAF') return '...';
 	if (valueExpr.matcher.kind === 'regex') {
 		return `/${valueExpr.matcher.pattern}/${valueExpr.matcher.flags}`;
+	}
+	if (valueExpr.matcher.kind === 'this') {
+		return valueExpr.matcher.raw;
 	}
 	return valueExpr.matcher.quoted ? `"${valueExpr.matcher.value}"` : valueExpr.matcher.value;
 }

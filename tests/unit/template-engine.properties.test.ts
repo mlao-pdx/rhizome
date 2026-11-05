@@ -102,7 +102,7 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 							`{% query ${e.name}${e.explain ? ' explain' : ''} %}${e.query}{% endquery %}\nCOUNT_${e.name}={{ query.${e.name}.size | default: -1 }}`,
 					)
 					.concat([
-						'HOST={{ file.basename }}',
+						'HOST={{ this.file.basename }}',
 						'HIDDEN_HOST={{ query["◊host"] | default: "NONE" }}',
 						'RANGE={{ yesterday..tomorrow }}',
 						'CMP={% if today == thisyear and yesterday < today and tomorrow > today %}OK{% endif %}',
@@ -366,7 +366,7 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 				expect(formatMomentDate(ms, 'YYYY-MM-DD', 'UTC', 'UTC')).toBe(isoDate);
 
 				const res = await renderRhizomeTemplate(
-					`M={{ file.created | date: ${JSON.stringify(momentFmt)} }}\nS={{ file.created | date: ${JSON.stringify(strftimeFmt)} }}`,
+					`M={{ this.file.created | date: ${JSON.stringify(momentFmt)} }}\nS={{ this.file.created | date: ${JSON.stringify(strftimeFmt)} }}`,
 					{
 						runQueries: async () => ({
 							'◊host': [{ file: { created: ms }, properties: {} }],

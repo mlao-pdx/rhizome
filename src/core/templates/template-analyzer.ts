@@ -11,6 +11,7 @@ import {
 	LIQUID_BLOCK_COMMENT_PATTERN,
 	LIQUID_INLINE_COMMENT_PATTERN,
 	LParen,
+	type NormalizedDocument,
 	Not,
 	Or,
 	QuotedString,
@@ -21,6 +22,7 @@ import {
 	SearchLexer,
 	type SourceSpan,
 	TagLiteral,
+	ThisReference,
 	WikiLinkValue,
 } from '@core/search';
 import { offsetRangeToSourceSpan, parseQueryTagArgs, scanQueryBlockSpans } from './query-tag';
@@ -244,6 +246,7 @@ function analyzeQueryBody(
 	referenceTimeMs: number,
 	tokensOut: CodeBlockTokenSpan[],
 	diagsOut: CodeBlockDiagnosticSpan[],
+	hostDoc?: NormalizedDocument | null,
 ): void {
 	const body = block.query;
 	const baseOffset = block.bodySpan.startOffset;
@@ -284,7 +287,7 @@ function analyzeQueryBody(
 			tokensOut.push({ startOffset, endOffset, kind: 'query-keyword' });
 		} else if (type === CompOp || type === Colon) {
 			tokensOut.push({ startOffset, endOffset, kind: 'query-operator' });
-		} else if (type === DateTimeLiteral) {
+		} else if (type === DateTimeLiteral || type === ThisReference) {
 			tokensOut.push({ startOffset, endOffset, kind: 'query-date' });
 		} else if (type === RegexLiteral) {
 			tokensOut.push({ startOffset, endOffset, kind: 'query-regex' });
@@ -310,7 +313,7 @@ function analyzeQueryBody(
 		}
 	}
 
-	const compileRes = compileQuery(body, config, referenceTimeMs);
+	const compileRes = compileQuery(body, config, referenceTimeMs, hostDoc);
 	for (const d of compileRes.diagnostics) {
 		let startOffset: number;
 		let endOffset: number;
@@ -344,6 +347,7 @@ export function analyzeRhizomeCodeBlock(
 	source: string,
 	config: ResolvedEngineConfig,
 	referenceTimeMs: number,
+	hostDoc?: NormalizedDocument | null,
 ): CodeBlockAnalysis {
 	const { env } = parseRhizomeTemplatePass1(source);
 	const queries: ExtractedQueryBlock[] = [...env.queries];
@@ -413,7 +417,7 @@ export function analyzeRhizomeCodeBlock(
 			scanOuterLiquidRegion(source, outerCursor, q.fullSpan.startOffset, rawTokens);
 		}
 		scanHeaderAndFooterTokens(source, q, rawTokens);
-		analyzeQueryBody(source, q, config, referenceTimeMs, rawTokens, rawDiags);
+		analyzeQueryBody(source, q, config, referenceTimeMs, rawTokens, rawDiags, hostDoc);
 		outerCursor = Math.max(outerCursor, q.fullSpan.endOffset);
 	}
 	if (outerCursor < source.length) {

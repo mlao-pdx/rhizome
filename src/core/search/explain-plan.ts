@@ -23,6 +23,7 @@ import {
 	resolvePropertyTypeWithOrigin,
 } from './explain-helpers';
 import { lintQueryAST } from './linter';
+import { coerceHostScalarForProperty, resolveThisReference } from './host-reference';
 import { validateRegexLiteral } from './literals';
 import { parseAndLowerQuery } from './parser';
 import { FORBIDDEN_KEYS, STRICT_NUMBER_RE } from './property-coercion';
@@ -32,6 +33,7 @@ import {
 	isValidPropertyType,
 	type EngineConfig,
 	type LeafMatcher,
+	type NormalizedDocument,
 	type ObsidianPropertyType,
 	type PropertyFilterNode,
 	type PropertyOperator,
@@ -103,6 +105,26 @@ function spanKey(span: SourceSpan): string {
 	return `${span.startOffset}:${span.endOffset}`;
 }
 
+function describeScopeThisLeaf(
+	matcher: Extract<LeafMatcher, { kind: 'this' }>,
+	formatPlainStringMatch: (val: string) => string,
+	hostDoc: NormalizedDocument | null | undefined,
+): string {
+	const rawCode = formatInlineCode(matcher.raw);
+	if (hostDoc === undefined) {
+		return `matches host note value ${rawCode}`;
+	}
+	const res = resolveThisReference(hostDoc, matcher.segments);
+	if (!res.resolved) {
+		return `⚠️ ${rawCode} is missing or empty on the host note (evaluates to \`false\`)`;
+	}
+	if (res.values.length === 1) {
+		return `${formatPlainStringMatch(String(res.values[0]!))} (from ${rawCode})`;
+	}
+	const joined = res.values.map((v) => formatPlainStringMatch(String(v))).join(' OR ');
+	return `(${joined}) (from ${rawCode})`;
+}
+
 function describePropertyLeaf(
 	matcher: LeafMatcher,
 	propType: ObsidianPropertyType,
@@ -114,6 +136,7 @@ function describePropertyLeaf(
 	validRefTime: boolean,
 	todayLocalWindow: string | undefined,
 	footnotes: FootnoteRegistry,
+	hostDoc?: NormalizedDocument | null,
 ): string {
 	if (matcher.kind === 'regex') {
 		const valid = validateRegexLiteral(matcher.pattern, matcher.flags) !== null;
@@ -125,6 +148,54 @@ function describePropertyLeaf(
 		return isRawTarget
 			? `${valid ? 'has raw text matching' : '❌ invalid regex'} ${link}`
 			: `${valid ? 'matches' : '❌ invalid regex'} ${link}`;
+	}
+
+	if (matcher.kind === 'this') {
+		const rawCode = formatInlineCode(matcher.raw);
+		if (
+			propType === 'checkbox' &&
+			(operator === '<' || operator === '>' || operator === '<=' || operator === '>=')
+		) {
+			return `❌ ${rawCode} (ordering comparison is not supported on \`checkbox\` properties)`;
+		}
+		if (hostDoc === undefined) {
+			return `compares against host note value ${rawCode}`;
+		}
+		const res = resolveThisReference(hostDoc, matcher.segments);
+		if (!res.resolved) {
+			return `⚠️ ${rawCode} is missing or empty on the host note (evaluates to \`false\`)`;
+		}
+		const validDescs: string[] = [];
+		for (const val of res.values) {
+			const coerced = coerceHostScalarForProperty(val, propType, timeZone, referenceTimeMs);
+			if (!coerced.ok) continue;
+			const syntheticMatcher: LeafMatcher = {
+				kind: 'string',
+				value: String(val),
+				quoted: propType === 'text' || propType === 'multitext' || propType === 'tags',
+			};
+			validDescs.push(
+				describePropertyLeaf(
+					syntheticMatcher,
+					propType,
+					operator,
+					timeZone,
+					configuredTimeZone,
+					tzValid,
+					referenceTimeMs,
+					true,
+					todayLocalWindow,
+					footnotes,
+				),
+			);
+		}
+		if (validDescs.length === 0) {
+			return `⚠️ ${rawCode} has no valid \`${propType}\` values on the host note (evaluates to \`false\`)`;
+		}
+		if (validDescs.length === 1) {
+			return `${validDescs[0]!} (from ${rawCode})`;
+		}
+		return `(${validDescs.join(' OR ')}) (from ${rawCode})`;
 	}
 
 	const rawLit = formatInlineCode(formatLeafMatcher(matcher));
@@ -255,6 +326,7 @@ export function explainQuery(
 	configOrResolved: ResolvedEngineConfig | EngineConfig,
 	referenceTimeMs: number,
 	heading = 'Query Explain Plan',
+	hostDoc?: NormalizedDocument | null,
 ): string {
 	const configDiagnostics: SearchDiagnostic[] = [];
 	let resolvedConfig: ResolvedEngineConfig | null = null;
@@ -309,6 +381,7 @@ export function explainQuery(
 			effectiveConfig,
 			effectiveRefTimeMs,
 			parsed.invalidPropertyNodes,
+			hostDoc,
 		);
 		resolvedAst = valRes.ast;
 		valDiagnostics = valRes.diagnostics;
@@ -618,7 +691,9 @@ export function explainQuery(
 						const leafDesc =
 							m.kind === 'regex'
 								? `matches ${formatDirectRegexLink(m, footnotes)}`
-								: sem.formatPlainStringMatch(m.value);
+								: m.kind === 'this'
+									? describeScopeThisLeaf(m, sem.formatPlainStringMatch, hostDoc)
+									: sem.formatPlainStringMatch(m.value);
 						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
 						const leafDiag = consumeDiagLinksForSpan(node.expr.span);
 						const remDiag = consumeUnattachedContainedDiags(node.span);
@@ -636,7 +711,9 @@ export function explainQuery(
 						renderValueExprBullets(node.expr, `${indent}  `, sem.singularTarget, (m) =>
 							m.kind === 'regex'
 								? `matches ${formatDirectRegexLink(m, footnotes)}`
-								: sem.formatPlainStringMatch(m.value),
+								: m.kind === 'this'
+									? describeScopeThisLeaf(m, sem.formatPlainStringMatch, hostDoc)
+									: sem.formatPlainStringMatch(m.value),
 						);
 						const remDiag = consumeUnattachedContainedDiags(node.span);
 						if (remDiag) {
@@ -688,6 +765,7 @@ export function explainQuery(
 							validRefTime,
 							todayLocalWindow,
 							footnotes,
+							hostDoc,
 						);
 						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
 						const leafDiag = consumeDiagLinksForSpan(node.valueExpr.span);
@@ -721,6 +799,7 @@ export function explainQuery(
 									validRefTime,
 									todayLocalWindow,
 									footnotes,
+									hostDoc,
 								),
 						);
 						const remDiag = consumeUnattachedContainedDiags(node.span);
