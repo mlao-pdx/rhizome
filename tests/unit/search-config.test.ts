@@ -51,9 +51,18 @@ function createFixtureDoc(): NormalizedDocument {
 				origin: '[[Projects/Active/Sprint-12.md#Overview|Sprint-12]]',
 			},
 		],
+		cssclasses: ['wide-page', 'cards'],
 		headings: [
-			{ text: 'Overview', level: 1 },
-			{ text: 'Action Items', level: 2 },
+			{
+				text: 'Overview',
+				level: 1,
+				origin: '[[Projects/Active/Sprint-12.md#Overview|Sprint-12]]',
+			},
+			{
+				text: 'Action Items',
+				level: 2,
+				origin: '[[Projects/Active/Sprint-12.md#Action Items|Sprint-12]]',
+			},
 		],
 		links: [
 			{
@@ -95,7 +104,16 @@ function createFixtureDoc(): NormalizedDocument {
 				origin: '[[Projects/Active/Sprint-12.md|Sprint-12]]',
 			},
 		],
-		blocks: ['summary-block', 'decision-1'],
+		blocks: [
+			{
+				id: 'summary-block',
+				origin: '[[Projects/Active/Sprint-12.md#^summary-block|Sprint-12]]',
+			},
+			{
+				id: 'decision-1',
+				origin: '[[Projects/Active/Sprint-12.md#^decision-1|Sprint-12]]',
+			},
+		],
 		propertyOccurrences: [],
 		propertyKeys: [],
 		properties: Object.create(null) as Record<string, unknown>,
@@ -123,11 +141,11 @@ describe('types & constants', () => {
 			'checkbox',
 			'date',
 			'datetime',
-			'tags',
 		]);
 		for (const t of VALID_PROPERTY_TYPES_LIST) {
 			expect(isValidPropertyType(t)).toBe(true);
 		}
+		expect(isValidPropertyType('tags')).toBe(false);
 		expect(isValidPropertyType('boolean')).toBe(false);
 		expect(isValidPropertyType('float')).toBe(false);
 		expect(isValidPropertyType('TEXT')).toBe(false);

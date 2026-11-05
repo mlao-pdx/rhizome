@@ -113,8 +113,8 @@ export function extractUserQueryMap(
 
 /**
  * Constructs the root LiquidJS scope object for Pass 2 rendering:
- * - Binds the hosting note's 11 normalized fields (`file`, `aliases`, `aliasLocations`, `tags`,
- *   `tagLocations`, `headings`, `links`, `embeds`, `blocks`, `properties`, `propertyLocations`)
+ * - Binds the hosting note's 12 normalized fields (`file`, `aliases`, `aliasLocations`, `tags`,
+ *   `tagLocations`, `cssclasses`, `headings`, `links`, `embeds`, `blocks`, `properties`, `propertyLocations`)
  *   from `rawPayload['◊host'][0]` under `root.this`.
  * - Exposes user query results under `query.<name>` (excluding `'◊'`-prefixed internal keys).
  * - Exposes `vault`, `tz`, `language`, and `platform.*` at the root.
@@ -155,6 +155,10 @@ export function buildRhizomeTemplateContext(
 		tagLocations:
 			hostMatch && Array.isArray(hostMatch.tagLocations)
 				? hostMatch.tagLocations
+				: EMPTY_FROZEN_ARRAY,
+		cssclasses:
+			hostMatch && Array.isArray(hostMatch.cssclasses)
+				? hostMatch.cssclasses
 				: EMPTY_FROZEN_ARRAY,
 		headings:
 			hostMatch && Array.isArray(hostMatch.headings)

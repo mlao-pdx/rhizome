@@ -87,12 +87,12 @@ function distributionCaseArb(kind: 'scope' | 'property') {
 		const config = evaluatorConfig(sample.timeZone);
 		const targetArb: fc.Arbitrary<DistributionTarget> =
 			kind === 'scope'
-				? printableScopedFilterArb(config)
+				? printableScopedFilterArb(config).filter(
+						(target) => (target.operator ?? ':') === ':',
+					)
 				: fc
 						.constantFrom(
 							...Object.keys(config.propertyTypes),
-							'aliases',
-							'tags',
 							'unknown',
 							' SCORE ',
 							'Due Date',

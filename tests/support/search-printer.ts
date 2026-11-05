@@ -63,6 +63,11 @@ function printSearchAST(ast: SearchAST, parentOp?: 'AND' | 'OR' | 'NOT'): string
 			return ast.syntax === '!' ? `!${child}` : `NOT ${child}`;
 		}
 		case 'SCOPED_FILTER': {
+			const operator = ast.operator ?? ':';
+			const scopeName = ast.rawScope === '#' ? 'tag' : ast.scope;
+			if (operator !== ':') {
+				return `${scopeName}:${operator}${printValueExpr(ast.expr)}`;
+			}
 			if (
 				ast.rawScope === '#' &&
 				ast.expr.type === 'VALUE_LEAF' &&
@@ -72,7 +77,6 @@ function printSearchAST(ast: SearchAST, parentOp?: 'AND' | 'OR' | 'NOT'): string
 			) {
 				return ast.expr.matcher.value;
 			}
-			const scopeName = ast.rawScope === '#' ? 'tag' : ast.scope;
 			if (ast.expr.type === 'VALUE_LEAF') {
 				return `${scopeName}:${printLeafMatcher(ast.expr.matcher)}`;
 			}

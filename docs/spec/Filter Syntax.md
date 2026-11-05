@@ -24,9 +24,9 @@
    - All diagnostic objects are pure, JSON-serializable POJOs using `null` (never `undefined`) for optional fields (`line: number | null`, `hint: string | null`, `span: SourceSpan | null`).
    - Malformed stored property values on a note normalize to `{ kind: 'invalid' }` without crashing vault queries, attach a `DocumentDiagnostic` to `doc.diagnostics`, and are surfaced in `VaultEvaluationReport.propertyDiagnostics` whenever a query filters on that non-virtual property key.
 7. **Hybrid Property Model (Occurrence Stream + Key-Order Array + Per-Key Local Value Order)**:
-   - `propertyOccurrences: PropertyOccurrence[]` preserves cache-level occurrence order (`Object.entries(frontmatter)` followed by the caller-supplied `inlineProperties` array).
-   - `propertyKeys: string[]` stores the exact first-seen order of normalized property keys from `propertyOccurrences` (excluding `tag`, `tags`, `alias`, `aliases`, and `◊internalrhizome`, which are omitted from `propertyKeys` and `properties` while remaining in `propertyOccurrences`).
-   - `properties: Record<string, unknown>` exposes an $O(1)$ null-prototype lookup table with per-key local occurrence order for all non-omitted keys.
+   - `propertyOccurrences: PropertyOccurrence[]` preserves cache-level occurrence order (`Object.entries(frontmatter)` followed by the caller-supplied `inlineProperties` array) for user properties. Obsidian's default system properties (`tags`, `aliases`, `cssclasses`)—along with legacy singular keys (`tag`, `alias`, `cssclass`, which Obsidian 1.9+ no longer recognizes as system properties, and scalar values, which Rhizome accepts forgivingly under _read forgivingly, write critically_) and `◊internalrhizome`—are promoted to first-class document fields and scopes (`tags`, `aliases`, `cssclasses`) and are never stored in `propertyOccurrences`, `propertyKeys`, `properties`, or `propertyLocations`.
+   - `propertyKeys: string[]` stores the exact first-seen order of normalized user property keys from `propertyOccurrences`.
+   - `properties: Record<string, unknown>` exposes an $O(1)$ null-prototype lookup table with per-key local occurrence order for all user properties.
 
 ---
 
@@ -39,11 +39,10 @@ export type ObsidianPropertyType =
   | 'number'
   | 'checkbox'
   | 'date'
-  | 'datetime'
-  | 'tags';
+  | 'datetime';
 
 export const VALID_PROPERTY_TYPES_LIST: readonly ObsidianPropertyType[] = Object.freeze([
-  'text', 'multitext', 'number', 'checkbox', 'date', 'datetime', 'tags'
+  'text', 'multitext', 'number', 'checkbox', 'date', 'datetime'
 ]);
 
 const PRIVATE_VALID_PROPERTY_TYPES = new Set<string>(VALID_PROPERTY_TYPES_LIST);
@@ -53,10 +52,9 @@ export function isValidPropertyType(val: unknown): val is ObsidianPropertyType {
 }
 
 export const VIRTUAL_FILE_KEYS_LIST: readonly string[] = Object.freeze([
-  'file.mtime',
-  'file.ctime',
+  'file.modified',
+  'file.created',
   'file.size',
-  'file.ext',
   'file.extension',
   'file.name',
   'file.basename',
@@ -106,9 +104,9 @@ export type DateParseResult =
 /**
  * Target-Type Consistency Invariant:
  * Coercing a value for target type T MUST ONLY produce:
- * - { kind: 'null' } (when input is null or undefined)
+ * - { kind: 'null' } (when input is null, undefined, or "")
  * - { kind: 'invalid', raw, expectedType: T, reason, hint } (when input is incompatible with T)
- * - { kind: 'text' } (when T is 'text' | 'multitext' | 'tags')
+ * - { kind: 'text' } (when T is 'text' | 'multitext')
  * - { kind: T } (when T is 'number' | 'checkbox' | 'date' | 'datetime')
  */
 export type TypedPropertyValue =
@@ -163,24 +161,26 @@ export interface DocumentDiagnostic {
   hint: string | null;
 }
 
-export interface NormalizedFileStat {
-  ctime: number; // Safe integer UTC epoch ms within [-8.64e15, 8.64e15]
-  mtime: number; // Safe integer UTC epoch ms within [-8.64e15, 8.64e15]
-  size: number;  // Safe integer >= 0
-}
-
 export interface NormalizedFileInfo {
   path: string;
   name: string;
   basename: string;
   extension: string;
   parent: string; // "" for vault root
-  stat: NormalizedFileStat;
+  created: string;
+  modified: string;
+  size: number;
 }
 
 export interface NormalizedHeading {
   text: string;
   level: 1 | 2 | 3 | 4 | 5 | 6;
+  origin: string;              // "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
+}
+
+export interface NormalizedBlock {
+  id: string;                  // Authored-case block ID with any leading '^' stripped
+  origin: string;              // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
 }
 
 export interface NormalizedLink {
@@ -220,12 +220,13 @@ export interface NormalizedDocument {
   aliasLocations: NormalizedAliasLocation[]; // Full occurrence stream preserving authored casing, duplicates, and order (frontmatter -> inline)
   tags: string[];                            // Authored-case, '#'-stripped, sorted & deduplicated tags
   tagLocations: NormalizedTagLocation[];     // Full occurrence stream preserving authored casing, duplicates, and order (frontmatter -> inline)
+  cssclasses: string[];                      // Deduplicated CSS class names in first-seen order from frontmatter cssclasses/cssclass
   headings: NormalizedHeading[];
   links: NormalizedLink[];                   // Outgoing links (frontmatterLinks + inline links, excluding embeds)
   embeds: NormalizedLink[];                  // Outgoing embeds
-  blocks: string[];                          // Authored-case block IDs with any leading '^' stripped
-  propertyOccurrences: PropertyOccurrence[]; // Cache-level occurrence stream
-  propertyKeys: string[];                    // Exact first-seen order of trimmed authored property keys
+  blocks: NormalizedBlock[];                 // Authored-case block IDs with any leading '^' stripped and resolved origin WikiLink
+  propertyOccurrences: PropertyOccurrence[]; // Cache-level occurrence stream (strictly user properties)
+  propertyKeys: string[];                    // Exact first-seen order of trimmed authored property keys (strictly user properties)
   properties: Record<string, unknown>;       // Null-prototype O(1) lookup map with authored keys and Collision Resolution Rule
   propertyLocations: NormalizedPropertyLocation[]; // Full occurrence stream of non-omitted properties with origin
   diagnostics: DocumentDiagnostic[];         // Non-fatal document property diagnostics
@@ -274,29 +275,33 @@ export interface NotNode {
 
 export type LeafMatcher =
   | { readonly kind: 'string'; readonly value: string; readonly quoted: boolean }
-  | { readonly kind: 'regex'; readonly pattern: string; readonly flags: string };
+  | { readonly kind: 'regex'; readonly pattern: string; readonly flags: string }
+  | { readonly kind: 'this'; readonly raw: string; readonly segments: readonly string[] };
 
 export type ValueExprAST =
   | { readonly type: 'VALUE_LOGICAL'; readonly operator: 'AND' | 'OR'; readonly children: readonly ValueExprAST[] }
   | { readonly type: 'VALUE_NOT'; readonly syntax: 'NOT' | '!'; readonly child: ValueExprAST }
   | { readonly type: 'VALUE_LEAF'; readonly matcher: LeafMatcher };
 
+export type ScopeOperator = ':' | '=' | '!=' | '<' | '>' | '<=' | '>=';
+
 export interface ScopedFilterNode {
   readonly type: 'SCOPED_FILTER';
   readonly scope: string;    // Trimmed canonicalName from ResolvedEngineConfig
   readonly rawScope: string; // Authored scope token text, or '#' when lowered from TagShorthand
+  readonly operator?: ScopeOperator; // Defaults to ':' when omitted
   readonly expr: ValueExprAST;
   readonly span?: SourceSpan;
 }
 
-export type PropertyOperator = 'EXISTS' | ':' | '=' | '!=' | '<' | '>' | '<=' | '>=';
+export type PropertyOperator = 'EXISTS' | 'EMPTY' | ':' | '=' | '!=' | '<' | '>' | '<=' | '>=';
 
 export interface PropertyFilterNode {
   readonly type: 'PROPERTY_FILTER';
   readonly key: string;             // Decoded, trimmed, lowercased property key
   readonly rawKey: string;          // Decoded property key (with outer quotes stripped if quoted)
   readonly operator: PropertyOperator;
-  readonly valueExpr?: ValueExprAST; // Present iff operator !== 'EXISTS'
+  readonly valueExpr?: ValueExprAST; // Present iff operator !== 'EXISTS' && operator !== 'EMPTY'
   readonly span?: SourceSpan;
 }
 
@@ -309,6 +314,7 @@ export type DiagnosticCode =
   | 'ERROR_TYPE_MISMATCH'
   | 'ERROR_INVALID_OPERATOR_FOR_TYPE'
   | 'WARN_SINGLE_VALUE_CONTRADICTION'
+  | 'WARN_MISSING_THIS_VALUE'
   | 'HINT_PROP_NEQ_EXISTENCE'
   | 'HINT_PROPERTY_MATCHES_SCOPE'
   | 'HINT_AMBIGUOUS_PRECEDENCE'
@@ -395,7 +401,7 @@ export interface VaultEvaluationReport {
 2. **Obsidian `types.json` Property Type Normalization & Collision Check**:
    - `rawConfig.propertyTypes` is populated from Obsidian’s `.obsidian/types.json` (`typesJson.types: Record<string, ObsidianPropertyType>`) or runtime `app.metadataTypeManager`.
    - Trims and lowercases every key in `rawConfig.propertyTypes`.
-   - Verifies `isValidPropertyType(propType)` using the private Set (`'text'`, `'multitext'`, `'number'`, `'checkbox'`, `'date'`, `'datetime'`, `'tags'`). Unregistered properties default to `'text'` (except reserved `tag`/`tags` $\to$ `'tags'` and `alias`/`aliases` $\to$ `'multitext'`).
+   - Verifies `isValidPropertyType(propType)` using the private Set (`'text'`, `'multitext'`, `'number'`, `'checkbox'`, `'date'`, `'datetime'`). Unregistered user properties default to `'text'`. Obsidian's default system properties (`tags`, `aliases`, `cssclasses`, which are list properties in Obsidian 1.9+)—plus legacy singular keys (`tag`, `alias`, `cssclass`) and scalar forms that Rhizome accepts forgivingly—are promoted to scopes and are never stored as user properties.
    - Rejects case collisions in `types.json` that map to **different** types (e.g., `{ Status: 'text', status: 'number' }` $\to$ `ERROR_INVALID_CONFIG`; identical types `{ Status: 'date', status: 'date' }` are deduplicated cleanly).
    - Freezes `normalizedTypes` with `Object.freeze()`.
 3. **Normalization Fingerprint (`normalizationFingerprint`)**:
@@ -418,19 +424,21 @@ export interface VaultEvaluationReport {
 
 ### 2.3 Built-In Scope Registry Table
 
-| Canonical Name (`scope`) | Accepted Lowercase Aliases                 | `extract(doc)`                                                                                                                         | `matchString(target, queryValue, quoted)` Policy                                                |
-| :----------------------- | :----------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------- |
-| `file`                   | `file`, `filename`                         | `[doc.file.name, doc.file.basename]`                                                                                                   | Case-insensitive substring (`target.toLowerCase().includes(queryValue.toLowerCase())`).         |
-| `path`                   | `path`, `folder`                           | `[doc.file.path]`                                                                                                                      | Case-insensitive substring.                                                                     |
-| `ext`                    | `ext`, `extension`                         | `[doc.file.extension]`                                                                                                                 | Strips optional leading `.` from `queryValue`; case-insensitive **exact** equality (`t === q`). |
-| `tag`                    | `tag` _(plus `#` shorthand)_               | `doc.tags`                                                                                                                             | Prepends `#` if missing on `queryValue`; matches `t === q \|\| t.startsWith(q + '/')`.          |
-| `aliases`                | `aliases`, `alias`                         | `doc.aliases`                                                                                                                          | Case-insensitive substring.                                                                     |
-| `headings`               | `headings`, `heading`, `header`, `headers` | `doc.headings.map(h => h.text)`                                                                                                        | Case-insensitive substring.                                                                     |
-| `links`                  | `links`, `link`, `outlink`, `outlinks`     | `doc.links.flatMap(l => l.resolvedPath ? [l.link, l.rawTarget, l.resolvedPath, l.displayText] : [l.link, l.rawTarget, l.displayText])` | Case-insensitive substring.                                                                     |
-| `embeds`                 | `embeds`, `embed`                          | `doc.embeds.flatMap(e => e.resolvedPath ? [e.link, e.rawTarget, e.resolvedPath] : [e.link, e.rawTarget])`                              | Case-insensitive substring.                                                                     |
-| `blocks`                 | `blocks`, `block`                          | `doc.blocks`                                                                                                                           | Strips optional leading `^` from `queryValue`; case-insensitive **exact** equality (`t === q`). |
+| Canonical Name (`scope`) | Accepted Lowercase Aliases                 | `extract(doc)`                                                                                                                         | `matchString(target, queryValue, quoted)` Policy (`:`)                                          | Comparison Normalization (`=`, `!=`, `<`, `>`, `<=`, `>=`) |
+| :----------------------- | :----------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------- | :--------------------------------------------------------- |
+| `file`                   | `file`, `filename`                         | `[doc.file.name, doc.file.basename]`                                                                                                   | Case-insensitive substring (`target.toLowerCase().includes(queryValue.toLowerCase())`).         | `.toLowerCase()`                                           |
+| `path`                   | `path`, `folder`                           | `[doc.file.path]`                                                                                                                      | Case-insensitive substring.                                                                     | `.toLowerCase()`                                           |
+| `ext`                    | `ext`, `extension`                         | `[doc.file.extension]`                                                                                                                 | Strips optional leading `.` from `queryValue`; case-insensitive **exact** equality (`t === q`). | Strips optional leading `.`, `.toLowerCase()`              |
+| `tag`                    | `tag` _(plus `#` shorthand)_               | `doc.tags`                                                                                                                             | Strips leading `#` (`normalizeTagBody`); matches `t === q \|\| t.startsWith(q + '/')`.          | `normalizeTagBody` (strips leading `#`, `.toLowerCase()`)  |
+| `aliases`                | `aliases`, `alias`                         | `doc.aliases`                                                                                                                          | Case-insensitive substring.                                                                     | `.toLowerCase()`                                           |
+| `cssclasses`             | `cssclasses`, `cssclass`                   | `doc.cssclasses`                                                                                                                       | Case-insensitive **exact** equality (`t.toLowerCase() === q.toLowerCase()`).                    | `.toLowerCase()`                                           |
+| `headings`               | `headings`, `heading`, `header`, `headers` | `doc.headings.map(h => h.text)`                                                                                                        | Case-insensitive substring.                                                                     | `.toLowerCase()`                                           |
+| `links`                  | `links`, `link`, `outlink`, `outlinks`     | `doc.links.flatMap(l => l.resolvedPath ? [l.link, l.rawTarget, l.resolvedPath, l.displayText] : [l.link, l.rawTarget, l.displayText])` | Case-insensitive substring.                                                                     | `.toLowerCase()`                                           |
+| `embeds`                 | `embeds`, `embed`                          | `doc.embeds.flatMap(e => e.resolvedPath ? [e.link, e.rawTarget, e.resolvedPath] : [e.link, e.rawTarget])`                              | Case-insensitive substring.                                                                     | `.toLowerCase()`                                           |
+| `blocks`                 | `blocks`, `block`                          | `doc.blocks.map(b => b.id)`                                                                                                            | Strips optional leading `^` from `queryValue`; case-insensitive **exact** equality (`t === q`). | Strips optional leading `^`, `.toLowerCase()`              |
 
 - **No `resolvedLinks` or Backlink Scopes**: The DSL does not support `resolvedLinks` or backlink scopes (`backlink:`, `backlinks:`, `referencedLinks:`). Normalization and scoped filtering operate strictly on per-note metadata (`links` and `embeds` inspect only outgoing references from the note's own `CachedMetadata`).
+- **Scope Comparisons Are Lexicographical, Not Count/Existence**: On any scope, comparison operators (`=`, `!=`, `<`, `>`, `<=`, `>=`) compare each extracted target string against the normalized right-hand side string using exact equality (`=`, `!=`) or UTF-16 code-unit lexicographical ordering (`<`, `>`, `<=`, `>=`). In particular, `tag: > 0` or `alias: > 0` compares each tag or alias string lexicographically against the text `"0"` (matching values whose normalized text sorts after `"0"`), **not** "has more than 0 tags/aliases". Because system metadata (`tags`, `aliases`, `cssclasses`) is queried via scopes rather than `[...]` property filters, use a regex scope filter such as `tag:/./`, `aliases:/./`, or `cssclasses:/./` to test whether a note has at least one value in that scope (and `!tag:/./`, `!aliases:/./`, or `!cssclasses:/./` to match notes with none).
 
 ### 2.4 Extended Temporal Model: ISO Literals, Relative `@` Anchors, Day Offsets & Positional Ranges (`[s1, e2)` Iff $s_1 < e_2$)
 
@@ -469,12 +477,12 @@ export interface VaultEvaluationReport {
 
 ### 2.5 Property Type & Comparison Operator Matrix (`[key]` / `[key:]` / `[key: expr]` / `[key: op rhs]`)
 
-| Resolved Property Type            | `EXISTS` (`[k]`)                     | `EMPTY` (`[k:]` / `[k:""]`)                                             | `:` (`[k: expr]`)                                                             | `=`, `!=` (`[k: = leaf]`)                                                                                                                               | `<`, `>`, `<=`, `>=` (`[k: < leaf]`)                                                                                                                     |
-| :-------------------------------- | :----------------------------------- | :---------------------------------------------------------------------- | :---------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`text` / `multitext` / `tags`** | `true` if key is present on the note | `true` if key is present and all entries are empty (`null`, `""`, `[]`) | Case-insensitive substring (or hierarchical on `tags`) or `/regex/` per entry | Unquoted or quoted string (no regex). Case-insensitive equality (`a.toLowerCase() === b.toLowerCase()`).                                                | Unquoted or quoted string (no regex). UTF-16 code-unit ordering on `.toLowerCase()` (`a < b`).                                                           |
-| **`number`**                      | `true` if key is present on the note | `true` if key is present and all entries are empty (`null`, `""`, `[]`) | Numeric equality (`===`) or `/regex/` on `entry.raw`                          | Requires **unquoted** valid number literal. Numeric `===` / `!==`.                                                                                      | Requires **unquoted** valid number literal. Numeric `<, >, <=, >=`.                                                                                      |
-| **`checkbox`**                    | `true` if key is present on the note | `true` if key is present and all entries are empty (`null`, `""`, `[]`) | Boolean equality on unquoted `true` or `false` (no regex)                     | Requires **unquoted** `true` or `false`. Boolean `===` / `!==`.                                                                                         | **Rejected at compile time** (`ERROR_INVALID_OPERATOR_FOR_TYPE`).                                                                                        |
-| **`date` / `datetime`**           | `true` if key is present on the note | `true` if key is present and all entries are empty (`null`, `""`, `[]`) | Interval containment (`=`) or `/regex/` on `entry.raw`                        | Quoted or unquoted valid temporal expression $Q = [q_s, q_e)$. Containment: `=` is $d_s \ge q_s \land d_e \le q_e$; `!=` is $d_s < q_s \lor d_e > q_e$. | Quoted or unquoted valid temporal expression $Q = [q_s, q_e)$. `<` is $d_e \le q_s$; `>=` is $d_s \ge q_s$; `>` is $d_s \ge q_e$; `<=` is $d_e \le q_e$. |
+| Resolved Property Type   | `EXISTS` (`[k]`)                     | `EMPTY` (`[k:]` / `[k:""]`)                                             | `:` (`[k: expr]`)                                         | `=`, `!=` (`[k: = leaf]`)                                                                                                                               | `<`, `>`, `<=`, `>=` (`[k: < leaf]`)                                                                                                                     |
+| :----------------------- | :----------------------------------- | :---------------------------------------------------------------------- | :-------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`text` / `multitext`** | `true` if key is present on the note | `true` if key is present and all entries are empty (`null`, `""`, `[]`) | Case-insensitive substring or `/regex/` per entry         | Unquoted or quoted string (no regex). Case-insensitive equality (`a.toLowerCase() === b.toLowerCase()`).                                                | Unquoted or quoted string (no regex). UTF-16 code-unit ordering on `.toLowerCase()` (`a < b`).                                                           |
+| **`number`**             | `true` if key is present on the note | `true` if key is present and all entries are empty (`null`, `""`, `[]`) | Numeric equality (`===`) or `/regex/` on `entry.raw`      | Requires **unquoted** valid number literal. Numeric `===` / `!==`.                                                                                      | Requires **unquoted** valid number literal. Numeric `<, >, <=, >=`.                                                                                      |
+| **`checkbox`**           | `true` if key is present on the note | `true` if key is present and all entries are empty (`null`, `""`, `[]`) | Boolean equality on unquoted `true` or `false` (no regex) | Requires **unquoted** `true` or `false`. Boolean `===` / `!==`.                                                                                         | **Rejected at compile time** (`ERROR_INVALID_OPERATOR_FOR_TYPE`).                                                                                        |
+| **`date` / `datetime`**  | `true` if key is present on the note | `true` if key is present and all entries are empty (`null`, `""`, `[]`) | Interval containment (`=`) or `/regex/` on `entry.raw`    | Quoted or unquoted valid temporal expression $Q = [q_s, q_e)$. Containment: `=` is $d_s \ge q_s \land d_e \le q_e$; `!=` is $d_s < q_s \lor d_e > q_e$. | Quoted or unquoted valid temporal expression $Q = [q_s, q_e)$. `<` is $d_e \le q_s$; `>=` is $d_s \ge q_s$; `>` is $d_s \ge q_e$; `<=` is $d_e \le q_e$. |
 
 - **Five-State Property Presence & Value Model**:
   1. **Property not present (`![prop]`)**: Matches notes with 0 occurrences of `prop`.
@@ -485,11 +493,11 @@ export interface VaultEvaluationReport {
 
 ### 2.6 Virtual `file.*` Properties vs. Stored User Properties
 
-The 9 virtual property keys are `VIRTUAL_FILE_KEYS_LIST` (`file.mtime`, `file.ctime`, `file.size`, `file.ext`, `file.extension`, `file.name`, `file.basename`, `file.path`, `file.parent`), checked via `isVirtualFileKey(key)`:
+The 8 virtual property keys are `VIRTUAL_FILE_KEYS_LIST` (`file.modified`, `file.created`, `file.size`, `file.extension`, `file.name`, `file.basename`, `file.path`, `file.parent`), checked via `isVirtualFileKey(key)`:
 
-- In queries (`[file.size > 1024]`), virtual keys **always** resolve against `doc.file` and never inspect `doc.propertyOccurrences`.
-- In document normalization (`normalizeObsidianMetadata`), authored properties in frontmatter or inline fields use `resolveUserPropertyType(key, resolvedConfig.propertyTypes)` (which checks `tag`/`tags`, `alias`/`aliases`, and `resolvedConfig.propertyTypes`, without applying virtual `file.*` types to user-authored properties).
-- In `collectReferencedPropertyKeys(ast)`, virtual keys (`isVirtualFileKey(k) === true`) are **excluded**, so a query `[file.size > 1024]` never reports diagnostics for a shadowed user property named `"file.size"`.
+- In queries (`[file.size: > 1024]`), virtual keys **always** resolve against `doc.file` and never inspect `doc.propertyOccurrences`.
+- In document normalization (`normalizeObsidianMetadata`), authored user properties in frontmatter or inline fields use `resolveUserPropertyType(key, resolvedConfig.propertyTypes)` (which looks up `resolvedConfig.propertyTypes` and defaults to `'text'`, without applying virtual `file.*` types to user-authored properties; system scope keys `tag`/`tags`, `alias`/`aliases`, and `cssclass`/`cssclasses` are promoted to scopes before user property coercion).
+- In `collectReferencedPropertyKeys(ast)`, virtual keys (`isVirtualFileKey(k) === true`) are **excluded**, so a query `[file.size: > 1024]` never reports diagnostics for a shadowed user property named `"file.size"`.
 
 ---
 
@@ -542,6 +550,12 @@ export const And = createToken({ name: 'And', pattern: /AND(?![^\s()\[\]])/, lab
 export const Not = createToken({ name: 'Not', pattern: /NOT(?![^\s()\[\]])/, label: 'NOT' });
 
 export const BangNot = createToken({ name: 'BangNot', pattern: /!(?![=\s])/, label: '!' });
+
+export const ThisReference = createToken({
+  name: 'ThisReference',
+  pattern: /@this(?![a-zA-Z0-9_+-])(?:\.(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s.()[\]{}:"'><=!]*))*(?![^\s()[\]])/,
+  label: '@this.path'
+});
 
 // Matches:
 // - ISO dates/datetimes (with optional ±Nd day offset on YYYY-MM-DD)
@@ -598,6 +612,7 @@ export const ALL_TOKENS = [
   And,
   Not,
   BangNot,
+  ThisReference,
   DateTimeLiteral,
   Colon,
   CompOp,
@@ -634,7 +649,7 @@ Parenthesized     ::= "(" OrExpression ")"
 
 PropertyFilter    ::= "[" PropertyKey ( ":" ( CompOp ValueLeaf | ValueNotExpr )? )? "]"
 
-ScopedOperator    ::= ScopeName ":" ValueNotExpr
+ScopedOperator    ::= ScopeName ":" ( CompOp ValueLeaf | ValueNotExpr )
 
 ValueOrExpr       ::= ValueAndExpr ( "OR" ValueAndExpr )*
 ValueAndExpr      ::= ValueNotExpr ( "AND"? ValueNotExpr )*
@@ -649,12 +664,15 @@ TagShorthand      ::= TagLiteral
 
 ValueLeaf         ::= QuotedString
                     | RegexLiteral
+                    | ThisReference
                     | DateTimeLiteral
                     | TagLiteral
                     | Identifier
 ```
 
 ### 3.4 Normative Literal Decoding & AST Lowering Rules
+
+`ThisReference` lowers to a `this` leaf with its authored `raw` text and decoded path `segments`. `@this.<path>` resolves against the hosting note's normalized payload; array projections such as `@this.tags` and `@this.blocks.id` compare against each resolved scalar. Missing or empty host values evaluate the leaf as false and produce `WARN_MISSING_THIS_VALUE` when host validation is available.
 
 1. **Empty Query Lowering**: If `Query` contains no `OrExpression` (empty or whitespace-only input), return `ast: { type: 'MATCH_ALL' }`.
 2. **`QuotedString` Escape Decoding (`decodeQuotedString(rawTokenText): string`)**:
@@ -692,13 +710,15 @@ ValueLeaf         ::= QuotedString
 2. **Validate Every `RegexLiteral`**:
    - Verify `flags` contains only unique characters from `{'i', 'm', 's', 'u'}` and `new RegExp(pattern, flags)` succeeds.
    - **Precedence Rule**: If a `RegexLiteral` fails validation (e.g., `[priority = /foo(/]`), emit `SYNTAX_ERROR` on that leaf and **skip all Step 4 operator and type validation on any `PropertyFilterNode` containing that invalid regex leaf**.
-3. **Resolve Scopes**:
+3. **Resolve Scopes & Validate Scope Comparison Operators**:
    - If `rawScope === '#'`, construct the `ScopedFilterNode` with `scope: 'tag'`.
    - Otherwise look up `resolvedConfig.getScope(rawScope)`. If found, construct the `ScopedFilterNode` with `scope: def.canonicalName` (do not mutate `readonly` properties on already-constructed public AST nodes). If not found, emit `ERROR_UNKNOWN_SCOPE`.
+   - If `(node.operator ?? ':') !== ':'` and `node.expr` did not fail Step 2 regex validation and `containsRegexLeaf(node.expr)` is `true`, emit `ERROR_INVALID_OPERATOR_FOR_TYPE` (`Operator "${op}" cannot be used with ${def.canonicalName}/regex.`).
 4. **Validate Property Filters (With Short-Circuit Precedence)**:
    - Skip any `PropertyFilterNode` whose `valueExpr` already failed Step 2 regex syntax validation.
+   - If `getSystemScopeForPropertyKey(node.key)` returns a built-in system scope (`'tag'`, `'aliases'`, or `'cssclasses'` for keys `tag`, `tags`, `alias`, `aliases`, `cssclass`, `cssclasses`), emit `SYNTAX_ERROR` (`"${node.key}" is a built-in note scope, not a property.`, with a hint such as `Use "${systemScope}:${rhs}" instead.`) and **stop validating this `PropertyFilterNode`**.
    - Resolve `propType = resolveQueryPropertyType(node.key, resolvedConfig.propertyTypes)`.
-   - If `node.operator === 'EXISTS'`, validation succeeds.
+   - If `node.operator === 'EXISTS' || node.operator === 'EMPTY'`, validation succeeds.
    - Otherwise, inspect `node.valueExpr` leaves:
      - **Step 4a (Operator / Matcher Kind Compatibility First)**:
        - If `node.operator` is `=`, `!=`, `<`, `>`, `<=`, or `>=`, and `valueExpr` contains a valid `regex` leaf $\to$ emit `ERROR_INVALID_OPERATOR_FOR_TYPE` and **stop validating this `PropertyFilterNode`**.
@@ -736,13 +756,12 @@ ValueLeaf         ::= QuotedString
    - The reference oracle (`oracleEvaluateVault` / `oracleEvaluateDoc`) consumes the same `PreparedQuery` (guaranteeing identical `resolvedConfig` and `referenceTimeMs`) and may repeat regex construction and literal parsing per candidate for simplicity.
 2. **Document Normalization Compatibility Check**:
    - Before evaluating any document `doc` in `docs`, both `evaluateVault` and `oracleEvaluateVault` verify `doc.normalizationFingerprint === prepared.resolvedConfig.normalizationFingerprint`. If any document has a mismatched fingerprint, evaluation throws an Error.
-3. **Existential Property Quantifier & Type-Directed `:` / `tags` Semantics**:
-   - `[key op rhs]` evaluates `doc.propertyOccurrences` (or virtual `file.*` entries) for `key`, discarding `{ kind: 'null' }` and `{ kind: 'invalid' }`. Returns `true` iff **at least one** valid entry satisfies `op` against `rhs`.
+3. **Existential Property & Scope Quantifier Semantics**:
+   - `[key op rhs]` evaluates `doc.propertyOccurrences` (or virtual `file.*` entries) for `key`, discarding `{ kind: 'null' }` and `{ kind: 'invalid' }`. Returns `true` iff **at least one** valid entry satisfies `op` against `rhs`. Built-in system scope keys (`tag`, `tags`, `alias`, `aliases`, `cssclass`, `cssclasses`) are rejected in `[...]` at compile time (`SYNTAX_ERROR`) with a hint to use the corresponding scope (`tag:`, `aliases:`, `cssclasses:`).
    - For `operator === ':'`:
      - On `date`, `datetime`, `number`, and `checkbox` properties, non-regex leaves act as syntactic sugar for typed `=` equality (`compareDateIntervals(entry.interval, '=', rhsInterval)` for temporal properties, `entry.value === rhsNum` for numbers, `entry.value === rhsBool` for checkboxes), while regex leaves on `date`, `datetime`, and `number` match `entry.raw`.
-     - On `tags` properties (`tags` / `tag` or any user property configured with type `'tags'`), non-regex leaves strip leading `#` (`normalizeTagBody(s) = s.trim().replace(/^#+/, '').toLowerCase()`) and apply hierarchical tag matching (`hierarchicalTagMatch`: `t === q || t.startsWith(q + '/')`, returning `false` when either side normalizes to `""`), while regex leaves test `normalizeTagBody(entry.value)`.
-     - On `text` and `multitext` properties (including `aliases`), non-regex leaves perform case-insensitive substring matching (`substringStringMatch`), and regex leaves test `entry.value`.
-   - For comparison operators (`=`, `!=`, `<`, `>`, `<=`, `>=`) on `tags` properties, both `entry.value` and `rhs` are normalized via `normalizeTagBody` before comparison so leading `#` is optional (`[tags = #work]` and `[tags = work]` are equivalent).
+     - On `text` and `multitext` properties, non-regex leaves perform case-insensitive substring matching (`substringStringMatch`), and regex leaves test `entry.value`.
+   - For comparison operators (`=`, `!=`, `<`, `>`, `<=`, `>=`) on scopes (`scope: op leaf`), both extracted target strings and `leaf` (or `@this.*` resolved scalars) are normalized via `normalizeScopeComparisonOperand(canonicalScope, raw)` (`tag` strips `#` and lowercases, `ext` strips `.` and lowercases, `blocks` strips `^` and lowercases, all other scopes lowercase) and compared with exact equality (`=`/`!=`) or UTF-16 code-unit lexicographical ordering (`<`, `>`, `<=`, `>=`; empty normalized `tag` operands never match). Consequently, `tag: > 0` or `alias: > 0` compares each tag or alias string lexicographically against the literal text `"0"`, **not** tag/alias count or existence; to check whether a note has at least one value in a scope, use a regex scope filter such as `tag:/./` or `aliases:/./`. Regexes with comparison operators on scopes emit `ERROR_INVALID_OPERATOR_FOR_TYPE`.
 4. **Per-Entry Property `:` Groups**: `[status: (draft AND active)]` evaluates `draft AND active` against **one single property value** at a time.
 5. **Per-Target Scoped Groups**: `scope:(expr)` extracts `targets = scopeDef.extract(doc)` and returns `true` iff **at least one single string $t \in \text{targets}$** satisfies the entire `expr`. If `targets` is empty, `scope:(expr)` is **always `false`** (even when `expr` contains negation).
 6. **Quoting Policy**: Quoting affects token grouping and escaping (and disallows numeric/boolean coercion on `:`, `=`, `!=`, `<`, `>`, `<=`, `>=`), **not** the scope’s matching policy. Each scope retains its registered `matchString` policy.
@@ -753,24 +772,27 @@ ValueLeaf         ::= QuotedString
 
 ### 4.3 Diagnostic & Hint Trigger Catalog (Emitted Once Per Offending AST Node / Edge)
 
-| Code                              | Severity  | Exact Trigger Condition                                                                                                                                                                                                                                                                     | Issue & Hint                                                                                                                                                      |
-| :-------------------------------- | :-------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `SYNTAX_ERROR`                    | `error`   | Query $> 4096$ chars, recursion depth $> 32$, lexer/parser error, empty `WikiLinkValue` / `PropertyKey`, invalid/duplicate regex flags, `new RegExp` `SyntaxError`, or **reversed/empty date range (`s1 >= e2` in `<Atom1>..<Atom2>`)**. _(Short-circuits Step 4 validation on that node)._ | Blocks execution. For reversed date ranges, sets `hint: "Use ${rightRaw}..${leftRaw}"` (when `s2 < e1`).                                                          |
-| `ERROR_INVALID_CONFIG`            | `error`   | Invalid IANA `timeZone`, invalid `referenceTimeMs`, invalid `ObsidianPropertyType`, conflicting property-key casing types, or scope alias collision across different definitions.                                                                                                           | Returned by `initEngineConfig` or Step 0 of `compileQuery`.                                                                                                       |
-| `ERROR_UNKNOWN_SCOPE`             | `error`   | `ScopedFilterNode` (with `rawScope !== '#'`) not found via `resolvedConfig.getScope(rawScope)`.                                                                                                                                                                                             | Suggests closest scope via Levenshtein ($\le 2$) or synonym (`tags` $\to$ `tag`, `prop` $\to$ `[prop:]`).                                                         |
-| `ERROR_INVALID_OPERATOR_FOR_TYPE` | `error`   | Valid regex used with `=`, `!=`, `<`, `>`, `<=`, `>=` (any type) or with `:` on `checkbox`; or `<, >, <=, >=` used on `checkbox`. _(Checked before `ERROR_TYPE_MISMATCH`)._                                                                                                                 | `Operator "${op}" cannot be used with ${propType}/regex.`                                                                                                         |
-| `ERROR_TYPE_MISMATCH`             | `error`   | Non-regex leaf in `[key op val]` fails validation for `key`‘s resolved `ObsidianPropertyType` (excluding `REVERSED_RANGE`, which emits `SYNTAX_ERROR`).                                                                                                                                     | `"${val}" is not a valid ${propType} for property "${key}".`                                                                                                      |
-| `WARN_SINGLE_VALUE_CONTRADICTION` | `warning` | An `AND` node contains two direct equality predicates on the **same canonical single-valued field** (`ext:` / `[file.ext = ...]`, `[file.name = ...]`, `[file.basename = ...]`, `[file.path = ...]`, `[file.parent = ...]`) with different normalized target values.                        | `A single file cannot match both "${a}" and "${b}" on the same single-valued field.` Hint: `Did you mean "OR"?`                                                   |
-| `HINT_PROP_NEQ_EXISTENCE`         | `hint`    | Every `PropertyFilterNode` with `operator === '!='`.                                                                                                                                                                                                                                        | `"[${key} != ...]" requires "${key}" to exist.` Hint: `To exclude notes (including notes missing "${key}"), use "![${key} = ...]".`                               |
-| `HINT_AMBIGUOUS_PRECEDENCE`       | `hint`    | An `OR` `LogicalNode` has a child `AND` `LogicalNode` with `parenthesized !== true`.                                                                                                                                                                                                        | `Evaluated as "(A AND B) OR C".` Hint: `Add parentheses to make precedence explicit.`                                                                             |
-| `HINT_WIKILINK_BRACKETS_IN_SCOPE` | `hint`    | Every `WikiLinkValue` token lowered into a `VALUE_LEAF`.                                                                                                                                                                                                                                    | `Wikilink brackets "[[...]]" are not needed.` Hint: `Stripped "[[...]]" automatically.`                                                                           |
-| `HINT_UNCLOSED_REGEX`             | `hint`    | Every unquoted string `LeafMatcher` starting with `'/'` (`value !== '//'`) in a regex-capable leaf position (`ScopedFilterNode` or valid non-`checkbox` `PropertyFilterNode` with `operator === ':'`).                                                                                      | `Unquoted "${rawValue}" starts with "/" and is searched as literal text.` Hint: `Add a closing "/" for a regular expression, or wrap in quotes for literal text.` |
+| Code                              | Severity  | Exact Trigger Condition                                                                                                                                                                                                                                                                                                                                                                           | Issue & Hint                                                                                                                                                                       |
+| :-------------------------------- | :-------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SYNTAX_ERROR`                    | `error`   | Query $> 4096$ chars, recursion depth $> 32$, lexer/parser error, empty `WikiLinkValue` / `PropertyKey`, built-in system scope key (`tag`/`tags`, `alias`/`aliases`, `cssclass`/`cssclasses`) used in `[...]`, invalid/duplicate regex flags, `new RegExp` `SyntaxError`, or **reversed/empty date range (`s1 >= e2` in `<Atom1>..<Atom2>`)**. _(Short-circuits Step 4 validation on that node)._ | Blocks execution. For system scope keys in `[...]`, suggests `${systemScope}:...`. For reversed date ranges, sets `hint: "Use ${rightRaw}..${leftRaw}"` (when `s2 < e1`).          |
+| `ERROR_INVALID_CONFIG`            | `error`   | Invalid IANA `timeZone`, invalid `referenceTimeMs`, invalid `ObsidianPropertyType`, conflicting property-key casing types, or scope alias collision across different definitions.                                                                                                                                                                                                                 | Returned by `initEngineConfig` or Step 0 of `compileQuery`.                                                                                                                        |
+| `ERROR_UNKNOWN_SCOPE`             | `error`   | `ScopedFilterNode` (with `rawScope !== '#'`) not found via `resolvedConfig.getScope(rawScope)`.                                                                                                                                                                                                                                                                                                   | Suggests closest scope via Levenshtein ($\le 2$) or synonym (`tags` $\to$ `tag`, `prop` $\to$ `[prop:]`).                                                                          |
+| `ERROR_INVALID_OPERATOR_FOR_TYPE` | `error`   | Valid regex used with `=`, `!=`, `<`, `>`, `<=`, `>=` (any property type or scope) or with `:` on `checkbox`; or `<, >, <=, >=` used on `checkbox`. _(Checked before `ERROR_TYPE_MISMATCH`)._                                                                                                                                                                                                     | `Operator "${op}" cannot be used with ${propTypeOrScope}/regex.`                                                                                                                   |
+| `ERROR_TYPE_MISMATCH`             | `error`   | Non-regex leaf in `[key op val]` fails validation for `key`‘s resolved `ObsidianPropertyType` (excluding `REVERSED_RANGE`, which emits `SYNTAX_ERROR`).                                                                                                                                                                                                                                           | `"${val}" is not a valid ${propType} for property "${key}".`                                                                                                                       |
+| `WARN_SINGLE_VALUE_CONTRADICTION` | `warning` | An `AND` node contains two direct equality predicates on the **same canonical single-valued field** (`ext:` / `ext:=` / `[file.extension: = ...]`, `path:=` / `[file.path: = ...]`, `[file.name: = ...]`, `[file.basename: = ...]`, `[file.parent: = ...]`) with different normalized target values.                                                                                              | `A single file cannot match both "${a}" and "${b}" on the same single-valued field.` Hint: `Did you mean "OR"?`                                                                    |
+| `HINT_PROP_NEQ_EXISTENCE`         | `hint`    | Every `PropertyFilterNode` or `ScopedFilterNode` with `operator === '!='`.                                                                                                                                                                                                                                                                                                                        | `"[${key}:!=${rhs}]" requires "${key}" to exist.` / `"${scope}:!=${rhs}" requires "${scope}" to have at least one value.` Hint: `Use "![${key}:=${rhs}]"` / `"!${scope}:=${rhs}".` |
+| `HINT_PROPERTY_MATCHES_SCOPE`     | `hint`    | Every valid `PropertyFilterNode` with `operator === ':'` and a `valueExpr` whose `key` matches a registered scope canonical name or alias.                                                                                                                                                                                                                                                        | `The property "${key}" matches the name/an alias of scope "${canonical}".` Hint: `Did you mean "${canonical}:${rhs}" instead?`                                                     |
+| `HINT_AMBIGUOUS_PRECEDENCE`       | `hint`    | An `OR` `LogicalNode` has a child `AND` `LogicalNode` with `parenthesized !== true`.                                                                                                                                                                                                                                                                                                              | `Evaluated as "(A AND B) OR C".` Hint: `Add parentheses to make precedence explicit.`                                                                                              |
+| `HINT_WIKILINK_BRACKETS_IN_SCOPE` | `hint`    | Every `WikiLinkValue` token lowered into a `VALUE_LEAF`.                                                                                                                                                                                                                                                                                                                                          | `Wikilink brackets "[[...]]" are not needed.` Hint: `Stripped "[[...]]" automatically.`                                                                                            |
+| `HINT_UNCLOSED_REGEX`             | `hint`    | Every unquoted string `LeafMatcher` starting with `'/'` (`value !== '//'`) in a regex-capable leaf position (`ScopedFilterNode` with `operator === ':'` or valid non-`checkbox` `PropertyFilterNode` with `operator === ':'`).                                                                                                                                                                    | `Unquoted "${rawValue}" starts with "/" and is searched as literal text.` Hint: `Add a closing "/" for a regular expression, or wrap in quotes for literal text.`                  |
 
 ---
 
 ## 5. Reference Normalizer, Positional Range Engine, Deep AST Freezer & Oracle Evaluator (`reference-engine.ts`)
 
-> **Implementation Scope Note**: The reference module below provides the normative implementation of `initEngineConfig`, `parseTemporalExpr`, `normalizeObsidianMetadata`, `deepFreezeAST`, `normalizeAST`, and `oracleEvaluateVault` / `oracleEvaluateDoc`. The implementation team is responsible for implementing the Chevrotain `SearchParser`, `compileQuery` (returning `PreparedQuery`), `evaluateVault` (with once-per-query compiled regex/literal caching), and the `fast-check` test suite in `search.spec.ts`.
+> **Historical reference:** The reference implementation below predates `@this` host references and the current virtual `file.*` names and payload shape. Use `src/core/search/` for the authoritative implementation of those features.
+
+> **Implementation Scope Note**: The reference module below illustrates the earlier normalizer, temporal engine, AST freezer, and oracle design. The current parser, compiler, evaluator, and tests live under `src/core/search/` and `tests/`.
 
 ```typescript
 import { Temporal } from '@js-temporal/polyfill';
@@ -903,8 +925,11 @@ export function decodeWikiLinkValue(rawTokenText: string): string {
 const substringStringMatch = (target: string, queryValue: string): boolean =>
   target.toLowerCase().includes(queryValue.toLowerCase());
 
+export const stripTagHash = (raw: string): string =>
+  raw.trim().replace(/^#+/, '').trim();
+
 export const normalizeTagBody = (raw: string): string =>
-  raw.trim().replace(/^#+/, '').toLowerCase();
+  stripTagHash(raw).toLowerCase();
 
 export const hierarchicalTagMatch = (target: string, queryValue: string): boolean => {
   const t = normalizeTagBody(target);
@@ -950,6 +975,13 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
       matchString: substringStringMatch
     },
     {
+      canonicalName: 'cssclasses',
+      aliases: Object.freeze(['cssclasses', 'cssclass']),
+      extract: (doc: NormalizedDocument) => doc.cssclasses,
+      matchString: (target: string, queryValue: string) =>
+        target.toLowerCase() === queryValue.toLowerCase()
+    },
+    {
       canonicalName: 'headings',
       aliases: Object.freeze(['headings', 'heading', 'header', 'headers']),
       extract: (doc: NormalizedDocument) => doc.headings.map((h) => h.text),
@@ -978,7 +1010,7 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
     {
       canonicalName: 'blocks',
       aliases: Object.freeze(['blocks', 'block']),
-      extract: (doc: NormalizedDocument) => doc.blocks,
+      extract: (doc: NormalizedDocument) => doc.blocks.map((b) => b.id),
       matchString: (target: string, queryValue: string) => {
         const q = queryValue.toLowerCase();
         const normQ = q.startsWith('^') ? q.slice(1) : q;
@@ -987,6 +1019,14 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
     }
   ].map((s) => Object.freeze(s))
 );
+
+export function normalizeScopeComparisonOperand(canonicalScope: string, raw: string): string {
+  const scope = canonicalScope.trim().toLowerCase();
+  if (scope === 'tag') return normalizeTagBody(raw);
+  if (scope === 'ext') return raw.replace(/^\./, '').toLowerCase();
+  if (scope === 'blocks') return raw.replace(/^\^/, '').toLowerCase();
+  return raw.toLowerCase();
+}
 
 const VALID_SCOPE_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_-]*$/;
 const RESERVED_KEYWORDS = new Set(['and', 'or', 'not']);
@@ -1019,7 +1059,7 @@ export function initEngineConfig(
         code: 'ERROR_INVALID_CONFIG',
         severity: 'error',
         issue: `Unsupported ObsidianPropertyType "${String(propType)}" for key "${rawKey}".`,
-        hint: 'Allowed types: text, multitext, number, checkbox, date, datetime, tags.',
+        hint: 'Allowed types: text, multitext, number, checkbox, date, datetime.',
         span: null
       });
       continue;
@@ -1448,8 +1488,25 @@ export const OMITTED_PROPERTY_VIEW_KEYS: ReadonlySet<string> = new Set([
   'tags',
   'alias',
   'aliases',
+  'cssclass',
+  'cssclasses',
   '◊internalrhizome',
 ]);
+
+const SYSTEM_SCOPE_PROPERTY_KEYS: ReadonlyMap<string, 'tag' | 'aliases' | 'cssclasses'> = new Map([
+  ['tag', 'tag'],
+  ['tags', 'tag'],
+  ['alias', 'aliases'],
+  ['aliases', 'aliases'],
+  ['cssclass', 'cssclasses'],
+  ['cssclasses', 'cssclasses'],
+]);
+
+export function getSystemScopeForPropertyKey(
+  lowerKey: string
+): 'tag' | 'aliases' | 'cssclasses' | undefined {
+  return SYSTEM_SCOPE_PROPERTY_KEYS.get(lowerKey.trim().toLowerCase());
+}
 
 export function buildPropertiesViews(occurrences: readonly PropertyOccurrence[]): {
   propertyKeys: string[];
@@ -1515,7 +1572,7 @@ export function coercePropertyValue(
   propType: ObsidianPropertyType,
   timeZone: string
 ): TypedPropertyValue {
-  if (val === null || val === undefined) return { kind: 'null' };
+  if (val === null || val === undefined || val === '') return { kind: 'null' };
 
   switch (propType) {
     case 'number': {
@@ -1662,8 +1719,7 @@ export function coercePropertyValue(
     }
 
     case 'text':
-    case 'multitext':
-    case 'tags': {
+    case 'multitext': {
       if (val instanceof Date) {
         if (Number.isNaN(val.getTime())) {
           return {
@@ -1709,8 +1765,6 @@ export function resolveUserPropertyType(
   lowerKey: string,
   normalizedRegistry: Readonly<PropertyTypeRegistry>
 ): ObsidianPropertyType {
-  if (lowerKey === 'tags' || lowerKey === 'tag') return 'tags';
-  if (lowerKey === 'aliases' || lowerKey === 'alias') return 'multitext';
   return Object.prototype.hasOwnProperty.call(normalizedRegistry, lowerKey)
     ? normalizedRegistry[lowerKey]
     : 'text';
@@ -1802,6 +1856,64 @@ export function normalizeObsidianMetadata(
     });
   };
 
+  const aliasSet = new Set<string>();
+  const aliasLocations: Array<{ alias: string; source: 'frontmatter' | 'inline'; origin: string }> = [];
+  const tagSet = new Set<string>();
+  const tagLocations: Array<{ tag: string; source: 'frontmatter' | 'inline'; origin: string }> = [];
+  const cssclassSet = new Set<string>();
+  const noteOrigin = `[[${tfile.path}|${tfile.basename}]]`;
+  const wikilinkUnsafeRe = /[[\]#^|\r\n]/;
+  const forHeadingOrigin = (headingText: string) =>
+    headingText.trim().length === 0 || wikilinkUnsafeRe.test(headingText)
+      ? noteOrigin
+      : `[[${tfile.path}#${headingText}|${tfile.basename}]]`;
+  const forBlockOrigin = (cleanedId: string) =>
+    cleanedId.trim().length === 0 || wikilinkUnsafeRe.test(cleanedId)
+      ? noteOrigin
+      : `[[${tfile.path}#^${cleanedId}|${tfile.basename}]]`;
+
+  const recordSystemScopeEntry = (
+    systemScope: 'tag' | 'aliases' | 'cssclasses',
+    val: unknown,
+    source: 'frontmatter' | 'inline'
+  ) => {
+    const items = Array.isArray(val) ? val : [val];
+    if (systemScope === 'cssclasses') {
+      if (source !== 'frontmatter') return;
+      for (const item of items) {
+        if (typeof item !== 'string') continue;
+        for (const tok of item.split(/\s+/)) {
+          if (tok.length > 0) cssclassSet.add(tok);
+        }
+      }
+      return;
+    }
+    if (systemScope === 'aliases') {
+      for (const item of items) {
+        const s = sanitizeScalar(item);
+        if (!s.valid) continue;
+        const tv = coercePropertyValue(item, 'multitext', timeZone);
+        if (tv.kind === 'text') {
+          aliasSet.add(tv.value);
+          aliasLocations.push({ alias: tv.value, source, origin: noteOrigin });
+        }
+      }
+      return;
+    }
+    for (const item of items) {
+      const s = sanitizeScalar(item);
+      if (!s.valid) continue;
+      const tv = coercePropertyValue(item, 'text', timeZone);
+      if (tv.kind === 'text') {
+        const stripped = stripTagHash(tv.value);
+        if (stripped) {
+          tagSet.add(stripped);
+          tagLocations.push({ tag: stripped, source, origin: noteOrigin });
+        }
+      }
+    }
+  };
+
   const addOccurrence = (
     rawKey: string,
     val: unknown,
@@ -1811,6 +1923,13 @@ export function normalizeObsidianMetadata(
     if (source === 'frontmatter' && rawKey === 'position') return;
     const key = rawKey.trim().toLowerCase();
     if (!key || FORBIDDEN_KEYS.has(key) || FORBIDDEN_KEYS.has(rawKey)) return;
+
+    const systemScope = getSystemScopeForPropertyKey(key);
+    if (systemScope !== undefined) {
+      recordSystemScopeEntry(systemScope, val, source);
+      return;
+    }
+    if (OMITTED_PROPERTY_VIEW_KEYS.has(key)) return;
 
     const line = sanitizeLineNumber(rawLine);
     const propertyType = resolveUserPropertyType(key, propertyTypes);
@@ -1862,35 +1981,24 @@ export function normalizeObsidianMetadata(
   }
 
   const { propertyKeys, properties } = buildPropertiesViews(propertyOccurrences);
+  const propertyLocations = propertyOccurrences.map((occ) => ({
+    property: occ.rawKey.trim(),
+    value: Array.isArray(occ.rawValue) ? [...occ.rawValue] : occ.rawValue === '' ? null : occ.rawValue,
+    source: occ.source,
+    origin: noteOrigin
+  }));
 
-  const tagSet = new Set<string>();
   for (const t of cache?.tags ?? []) {
-    const body = t.tag.trim().replace(/^#+/, '').toLowerCase();
-    if (body) tagSet.add(`#${body}`);
-  }
-  for (const occ of propertyOccurrences) {
-    if (occ.key === 'tags' || occ.key === 'tag') {
-      for (const tv of occ.typedValues) {
-        if (tv.kind === 'text') {
-          const body = tv.value.trim().replace(/^#+/, '').toLowerCase();
-          if (body) tagSet.add(`#${body}`);
-        }
-      }
-    }
-  }
-
-  const aliases: string[] = [];
-  for (const occ of propertyOccurrences) {
-    if (occ.key === 'aliases' || occ.key === 'alias') {
-      for (const tv of occ.typedValues) {
-        if (tv.kind === 'text') aliases.push(tv.value);
-      }
+    const stripped = stripTagHash(t.tag);
+    if (stripped) {
+      tagSet.add(stripped);
+      tagLocations.push({ tag: stripped, source: 'inline', origin: noteOrigin });
     }
   }
 
   const normalizeLink = (
     l: { link: string; displayText?: string },
-    source: 'body' | 'frontmatter' | 'embed'
+    source: 'inline' | 'frontmatter' | 'embed'
   ) => {
     const raw = l.link;
     let rawTarget = raw;
@@ -1925,13 +2033,14 @@ export function normalizeObsidianMetadata(
       resolvedPath,
       subpath,
       displayText: l.displayText ?? raw,
-      source
+      source,
+      origin: noteOrigin
     };
   };
 
   const links = [
-    ...(cache?.links ?? []).map((l) => normalizeLink(l, 'body')),
-    ...(cache?.frontmatterLinks ?? []).map((l) => normalizeLink(l, 'frontmatter'))
+    ...(cache?.frontmatterLinks ?? []).map((l) => normalizeLink(l, 'frontmatter')),
+    ...(cache?.links ?? []).map((l) => normalizeLink(l, 'inline'))
   ];
   const embeds = (cache?.embeds ?? []).map((e) => normalizeLink(e, 'embed'));
 
@@ -1940,6 +2049,11 @@ export function normalizeObsidianMetadata(
   if (!Number.isSafeInteger(tfile.stat.size) || tfile.stat.size < 0) {
     throw new Error(`Invalid file stat size: ${tfile.stat.size}`);
   }
+
+  const blocks = Object.values(cache?.blocks ?? {})
+    .map((b) => b.id.replace(/^\^+/, ''))
+    .filter((id) => id.length > 0)
+    .map((id) => ({ id, origin: forBlockOrigin(id) }));
 
   return {
     normalizationFingerprint,
@@ -1951,20 +2065,23 @@ export function normalizeObsidianMetadata(
       parent: tfile.parent?.path && tfile.parent.path !== '/' ? tfile.parent.path : '',
       stat: { ctime, mtime, size: tfile.stat.size }
     },
-    aliases,
+    aliases: Array.from(aliasSet),
+    aliasLocations,
     tags: Array.from(tagSet).sort(),
+    tagLocations,
+    cssclasses: Array.from(cssclassSet),
     headings: (cache?.headings ?? []).map((h) => ({
       text: h.heading,
-      level: (Number.isFinite(h.level) ? Math.min(6, Math.max(1, Math.trunc(h.level))) : 1) as 1 | 2 | 3 | 4 | 5 | 6
+      level: (Number.isFinite(h.level) ? Math.min(6, Math.max(1, Math.trunc(h.level))) : 1) as 1 | 2 | 3 | 4 | 5 | 6,
+      origin: forHeadingOrigin(h.heading)
     })),
     links,
     embeds,
-    blocks: Object.keys(cache?.blocks ?? {}).map((b) =>
-      b.startsWith('^') ? b.slice(1).toLowerCase() : b.toLowerCase()
-    ),
+    blocks,
     propertyOccurrences,
     propertyKeys,
     properties,
+    propertyLocations,
     diagnostics
   };
 }
@@ -2057,14 +2174,43 @@ function evalAstNode(
           : resolvedConfig.getScope(ast.scope);
       if (!def) throw new Error(`Unresolved scope in AST: ${ast.scope}`);
       const targets = def.extract(doc);
-      return targets.some((target) => evalValueExprOnTarget(target, ast.expr, def));
+      const op = ast.operator ?? ':';
+      if (op === ':') {
+        return targets.some((target) => evalValueExprOnTarget(target, ast.expr, def));
+      }
+      if (ast.expr.type !== 'VALUE_LEAF' || ast.expr.matcher.kind === 'regex') return false;
+      const canonical = def.canonicalName;
+      const isTag = canonical.trim().toLowerCase() === 'tag';
+      const b = normalizeScopeComparisonOperand(canonical, ast.expr.matcher.value);
+      if (isTag && b.length === 0) return false;
+      return targets.some((target) => {
+        const a = normalizeScopeComparisonOperand(canonical, target);
+        if (isTag && a.length === 0) return false;
+        switch (op) {
+          case '=':  return a === b;
+          case '!=': return a !== b;
+          case '<':  return a < b;
+          case '>':  return a > b;
+          case '<=': return a <= b;
+          case '>=': return a >= b;
+        }
+      });
     }
     case 'PROPERTY_FILTER': {
       const lowerKey = ast.key.trim().toLowerCase();
+      if (ast.operator === 'EXISTS') {
+        return isVirtualFileKey(lowerKey) || doc.propertyOccurrences.some((occ) => occ.key === lowerKey);
+      }
+      if (ast.operator === 'EMPTY') {
+        if (!isVirtualFileKey(lowerKey) && !doc.propertyOccurrences.some((occ) => occ.key === lowerKey)) {
+          return false;
+        }
+        const entries = getTypedPropertyEntries(doc, lowerKey);
+        return entries.every((e) => e.kind === 'null');
+      }
       const entries = getTypedPropertyEntries(doc, lowerKey);
       const validEntries = entries.filter((e) => e.kind !== 'null' && e.kind !== 'invalid');
       if (validEntries.length === 0) return false;
-      if (ast.operator === 'EXISTS') return true;
       const propType = resolveQueryPropertyType(lowerKey, resolvedConfig.propertyTypes);
       return validEntries.some((entry) =>
         evalPropertyEntry(entry, propType, ast.operator, ast.valueExpr!, resolvedConfig.timeZone, referenceTimeMs)
@@ -2132,9 +2278,6 @@ function evalColonExprOnEntry(
     case 'VALUE_LEAF': {
       if (expr.matcher.kind === 'regex') {
         if (propType === 'checkbox' || entry.kind === 'checkbox') return false;
-        if (propType === 'tags') {
-          return entry.kind === 'text' && testRegex(normalizeTagBody(entry.value), expr.matcher);
-        }
         const target = entry.kind === 'text' ? entry.value : entry.raw;
         return testRegex(target, expr.matcher);
       }
@@ -2168,8 +2311,6 @@ function evalColonExprOnEntry(
           }
           return compareDateIntervals(entry.interval, '=', res.interval);
         }
-        case 'tags':
-          return entry.kind === 'text' && hierarchicalTagMatch(entry.value, rhsRaw);
         case 'text':
         case 'multitext':
           return entry.kind === 'text' && substringStringMatch(entry.value, rhsRaw);
@@ -2231,8 +2372,8 @@ function evalPropertyEntry(
       return compareDateIntervals(entry.interval, op, res.interval);
     }
     case 'text': {
-      const a = propType === 'tags' ? normalizeTagBody(entry.value) : entry.value.toLowerCase();
-      const b = propType === 'tags' ? normalizeTagBody(rhsRaw) : rhsRaw.toLowerCase();
+      const a = entry.value.toLowerCase();
+      const b = rhsRaw.toLowerCase();
       switch (op) {
         case '=':  return a === b;
         case '!=': return a !== b;
@@ -2282,6 +2423,7 @@ export function normalizeAST(ast: SearchAST): SearchAST {
       let normExpr = normalizeValueExprAST(ast.expr);
       if (
         ast.scope === 'tag' &&
+        (ast.operator ?? ':') === ':' &&
         normExpr.type === 'VALUE_LEAF' &&
         normExpr.matcher.kind === 'string'
       ) {
@@ -2299,11 +2441,20 @@ export function normalizeAST(ast: SearchAST): SearchAST {
         type: 'SCOPED_FILTER',
         scope: ast.scope,
         rawScope: ast.scope,
+        ...(ast.operator !== undefined && ast.operator !== ':' ? { operator: ast.operator } : {}),
         expr: normExpr
       };
     }
     case 'PROPERTY_FILTER': {
       const lowerKey = ast.key.trim().toLowerCase();
+      if (ast.operator === 'EMPTY') {
+        return {
+          type: 'PROPERTY_FILTER',
+          key: lowerKey,
+          rawKey: lowerKey,
+          operator: 'EMPTY'
+        };
+      }
       return {
         type: 'PROPERTY_FILTER',
         key: lowerKey,
@@ -2338,6 +2489,8 @@ export function normalizeAST(ast: SearchAST): SearchAST {
 
 ## 6. Invariant Verification Suite (`fast-check`) & Complete Conformance Matrix
 
+> **Historical examples:** Some examples below predate the current bracket syntax and virtual `file.*` names. Use Sections 2.6 and 3.3 for the current query contract.
+
 ### 6.1 Formal Property-Based Invariants & Printable Executable AST Contract
 
 1. **Strict TypeScript Build, Lexer, Parser & Deep-Freeze Smoke Test**:
@@ -2347,16 +2500,16 @@ export function normalizeAST(ast: SearchAST): SearchAST {
    - For any generated `NormalizedDocument` and any `VaultEvaluationReport`, `JSON.parse(JSON.stringify(obj))` has identical JSON content to `obj`, no `undefined` values exist on `PropertyOccurrence`, `DocumentDiagnostic`, or `SearchDiagnostic`, and `__proto__`, `constructor`, and `prototype` never appear in `doc.propertyKeys` or `doc.properties`.
    - Evaluating a `PreparedQuery` against a `NormalizedDocument` with a mismatched `normalizationFingerprint` throws an error.
 3. **Hybrid Property Ordering & Aggregation Invariant**:
-   - `doc.propertyKeys` equals the deduplicated sequence of `occ.key` in exact order of first appearance in `doc.propertyOccurrences`, excluding `tag`, `tags`, `alias`, `aliases`, and `◊internalrhizome` (`OMITTED_PROPERTY_VIEW_KEYS`).
-   - For each `k` in `doc.propertyKeys`, if `k` appeared once in `propertyOccurrences`, `doc.properties[k]` equals `occ.rawValue`; if `k` appeared $\ge 2$ times, `doc.properties[k]` equals the 1-level concatenation of `rawValue` across all occurrences of `k` in local occurrence order (frontmatter values in original list order followed by inline values in order of appearance).
+   - `doc.propertyKeys` equals the deduplicated sequence of `occ.rawKey.trim()` in exact order of first appearance in `doc.propertyOccurrences`, excluding `tag`, `tags`, `alias`, `aliases`, `cssclass`, `cssclasses`, and `◊internalrhizome` (`OMITTED_PROPERTY_VIEW_KEYS`).
+   - For each `k` in `doc.propertyKeys`, if `k` appeared once in `propertyOccurrences`, `doc.properties[k]` equals `occ.rawValue` (with vacuous top-level `""`/`undefined` normalized to `null`); if `k` appeared $\ge 2$ times, `doc.properties[k]` merges non-vacuous occurrences using the Collision Resolution Rule in local occurrence order (frontmatter values in original list order followed by inline values in order of appearance).
 4. **Target-Type Coercion & Non-Throwing Reference-Time Invariant**:
-   - For any generated JSON primitive, `undefined`, or standard `Date` instance, `coercePropertyValue(val, propType, tz)` never throws and returns only `{ kind: 'null' }`, `{ kind: 'invalid', expectedType: propType }`, `{ kind: 'text' }` (when `propType` is `'text'|'multitext'|'tags'`), or `{ kind: propType }`.
+   - For any generated JSON primitive, `undefined`, or standard `Date` instance, `coercePropertyValue(val, propType, tz)` never throws and returns only `{ kind: 'null' }`, `{ kind: 'invalid', expectedType: propType }`, `{ kind: 'text' }` (when `propType` is `'text'|'multitext'`), or `{ kind: propType }`.
    - Calling `parseTemporalExpr` or `compileQuery` with any arbitrary number for `referenceTimeMs` (including `NaN`, `±Infinity`, or out-of-range numbers) never throws an uncaught exception.
 5. **Printable Executable AST Round-Trip & `normalizeAST` Idempotence**:
    - `normalizeAST(normalizeAST(ast))` deeply equals `normalizeAST(ast)`.
    - `printableExecutableAstArb(resolvedConfig, refMs)` constructs ASTs satisfying:
      1. **Logical Arity**: `LogicalNode.children.length >= 2` and `VALUE_LOGICAL.children.length >= 2`; `MatchAllNode` only at root.
-     2. **Operator/RHS Shape**: `operator === 'EXISTS'` has `valueExpr === undefined`; `operator === ':'` allows `VALUE_LOGICAL`, `VALUE_NOT`, or `VALUE_LEAF`; `=`, `!=`, `<`, `>`, `<=`, `>=` require a single non-regex `VALUE_LEAF`.
+     2. **Operator/RHS Shape**: `operator === 'EXISTS' || operator === 'EMPTY'` has `valueExpr === undefined`; `operator === ':'` allows `VALUE_LOGICAL`, `VALUE_NOT`, or `VALUE_LEAF`; `=`, `!=`, `<`, `>`, `<=`, `>=` require a single non-regex `VALUE_LEAF`.
      3. **Scope Membership**: `ScopedFilterNode.scope` is a registered canonical scope name in `resolvedConfig`.
      4. **Context-Specific String Printability (for Scopes & Property `:` Leaves)**: Unquoted string leaves (`quoted: false`) inside parenthesized `ValueOrExpr` match `/^[a-zA-Z_][a-zA-Z0-9_-]{0,15}$/` (excluding `"AND"`, `"OR"`, `"NOT"`); direct unparenthesized RHS leaves (`ValueLeaf`) also allow hyphen-prefixed identifiers (`-[a-zA-Z_][a-zA-Z0-9_-]{0,15}`). Quoted string leaves (`quoted: true`) are printed with `"` and escaped via `\"`, `\\`, `\n`, `\r`, `\t` (preserving `quoted` identically across print + parse).
      5. **Type-Valid Comparison Leaves (Overrides Rule 4 for Property `=`, `!=`, `<`, `>`, `<=`, `>=`)**: Resolved via `resolveQueryPropertyType(key, resolvedConfig.propertyTypes)`: `'number'` uses unquoted `/^-?\d{1,6}(?:\.\d{1,3})?$/`; `'checkbox'` uses unquoted `"true"`/`"false"`; `'date'`/`'datetime'` uses temporal literals that pass `parseTemporalExpr(..., { allowYearOnly: true, allowRelative: true, timeZone: resolvedConfig.timeZone, referenceTimeMs: refMs }).ok === true`; text-like types use Rule 4.

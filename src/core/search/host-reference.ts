@@ -1,5 +1,4 @@
 import { FORBIDDEN_KEYS, STRICT_NUMBER_RE } from './property-coercion';
-import { normalizeTagBody } from './scopes';
 import { parseTemporalExpr } from './temporal';
 import type { DateInterval, NormalizedDocument, ObsidianPropertyType } from './types';
 
@@ -9,12 +8,6 @@ export type CoercedHostPropertyTarget =
 	| { readonly ok: true; readonly kind: 'number'; readonly rhsNum: number }
 	| { readonly ok: true; readonly kind: 'checkbox'; readonly rhsBool: boolean }
 	| { readonly ok: true; readonly kind: 'temporal'; readonly rhsInterval: DateInterval }
-	| {
-			readonly ok: true;
-			readonly kind: 'tags';
-			readonly rhsRaw: string;
-			readonly rhsTag: string;
-	  }
 	| {
 			readonly ok: true;
 			readonly kind: 'text';
@@ -69,6 +62,8 @@ function lookupRootSegment(hostDoc: NormalizedDocument, segment: string): unknow
 			return hostDoc.tags;
 		case 'taglocations':
 			return hostDoc.tagLocations;
+		case 'cssclasses':
+			return hostDoc.cssclasses;
 		case 'headings':
 			return hostDoc.headings;
 		case 'links':
@@ -119,8 +114,8 @@ function collectScalars(val: unknown, out: ResolvedHostScalar[]): boolean {
 
 /**
  * Resolves a decoded `@this.<segments>` path against `hostDoc`.
- * Exposes the exact 11-field `VaultQueryMatch` surface (`file`, `aliases`, `aliasLocations`,
- * `tags`, `tagLocations`, `headings`, `links`, `embeds`, `blocks`, `properties`, `propertyLocations`)
+ * Exposes the exact 12-field `VaultQueryMatch` surface (`file`, `aliases`, `aliasLocations`,
+ * `tags`, `tagLocations`, `cssclasses`, `headings`, `links`, `embeds`, `blocks`, `properties`, `propertyLocations`)
  * with exact-then-case-insensitive key matching and array indexing/mapping.
  */
 export function resolveThisReference(
@@ -240,13 +235,6 @@ export function coerceHostScalarForProperty(
 			}
 			return { ok: true, kind: 'temporal', rhsInterval: res.interval };
 		}
-		case 'tags':
-			return {
-				ok: true,
-				kind: 'tags',
-				rhsRaw: raw,
-				rhsTag: normalizeTagBody(raw),
-			};
 		case 'text':
 		case 'multitext':
 			return {

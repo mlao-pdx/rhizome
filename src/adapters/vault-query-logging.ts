@@ -10,7 +10,14 @@ import {
 import type { LoggerPort } from '@ports/logger-port';
 import { markSensitive } from './logger-format';
 
-const BUILTIN_PROPERTY_KEYS: ReadonlySet<string> = new Set(['alias', 'aliases', 'tag', 'tags']);
+const BUILTIN_PROPERTY_KEYS: ReadonlySet<string> = new Set([
+	'alias',
+	'aliases',
+	'tag',
+	'tags',
+	'cssclass',
+	'cssclasses',
+]);
 const MAX_SAMPLE_FILES = 5;
 
 export interface ParsedTypesJsonResult {

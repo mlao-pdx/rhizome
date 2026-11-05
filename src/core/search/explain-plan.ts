@@ -19,6 +19,7 @@ import {
 	formatEpochTimestamp,
 	formatInlineCode,
 	formatLeafMatcher,
+	formatScopeStringMatch,
 	formatSourceCaretSnippet,
 	resolvePropertyTypeWithOrigin,
 } from './explain-helpers';
@@ -27,9 +28,9 @@ import { coerceHostScalarForProperty, resolveThisReference } from './host-refere
 import { validateRegexLiteral } from './literals';
 import { parseAndLowerQuery } from './parser';
 import { FORBIDDEN_KEYS, STRICT_NUMBER_RE } from './property-coercion';
-import { normalizeTagBody } from './scopes';
 import { isValidReferenceTimeMs, parseTemporalExpr } from './temporal';
 import {
+	getSystemScopeForPropertyKey,
 	isValidPropertyType,
 	type EngineConfig,
 	type LeafMatcher,
@@ -172,7 +173,7 @@ function describePropertyLeaf(
 			const syntheticMatcher: LeafMatcher = {
 				kind: 'string',
 				value: String(val),
-				quoted: propType === 'text' || propType === 'multitext' || propType === 'tags',
+				quoted: propType === 'text' || propType === 'multitext',
 			};
 			validDescs.push(
 				describePropertyLeaf(
@@ -268,29 +269,6 @@ function describePropertyLeaf(
 					return `is outside ${intervalCode}${intervalFn} (in ${formatInlineCode(timeZone)}${tzFn})${fallbackNote}`;
 				default:
 					return `${win.plainEnglish} (expanded window ${intervalCode}${intervalFn}${tzFn})${fallbackNote}`;
-			}
-		}
-		case 'tags': {
-			const normTag = normalizeTagBody(matcher.value);
-			const hashTagCode = formatInlineCode(`#${normTag}`);
-			const subTagCode = formatInlineCode(`#${normTag}/...`);
-			switch (operator) {
-				case ':':
-					return `is ${hashTagCode} or a nested tag under ${subTagCode} (case-insensitive)`;
-				case '=':
-					return `equals exact tag ${hashTagCode} (case-insensitive)`;
-				case '!=':
-					return `does not equal exact tag ${hashTagCode} (case-insensitive)`;
-				case '<':
-					return `comes alphabetically before tag ${hashTagCode} (case-insensitive)`;
-				case '<=':
-					return `comes alphabetically at or before tag ${hashTagCode} (case-insensitive)`;
-				case '>':
-					return `comes alphabetically after tag ${hashTagCode} (case-insensitive)`;
-				case '>=':
-					return `comes alphabetically at or after tag ${hashTagCode} (case-insensitive)`;
-				default:
-					return `matches tag ${hashTagCode} (case-insensitive)`;
 			}
 		}
 		case 'text':
@@ -684,22 +662,31 @@ export function explainQuery(
 							? ` (alias for ${formatInlineCode(`${node.scope}:`)})`
 							: '';
 					const scopeTargetLabel = `${formatInlineCode(node.scope)}${scopeFn}${aliasParen}`;
+					const scopeOp = node.operator ?? ':';
+					const formatScopeValue = (val: string): string =>
+						formatScopeStringMatch(node.scope, scopeOp, val);
 					const invalidPrefix = invalidRegexNodes.has(node) ? '❌ ' : '';
 
 					if (node.expr.type === 'VALUE_LEAF') {
 						const m = node.expr.matcher;
+						const invalidRegexComparison = m.kind === 'regex' && scopeOp !== ':';
 						const leafDesc =
 							m.kind === 'regex'
-								? `matches ${formatDirectRegexLink(m, footnotes)}`
+								? invalidRegexComparison
+									? ''
+									: `matches ${formatDirectRegexLink(m, footnotes)}`
 								: m.kind === 'this'
-									? describeScopeThisLeaf(m, sem.formatPlainStringMatch, hostDoc)
-									: sem.formatPlainStringMatch(m.value);
+									? describeScopeThisLeaf(m, formatScopeValue, hostDoc)
+									: formatScopeValue(m.value);
 						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
 						const leafDiag = consumeDiagLinksForSpan(node.expr.span);
 						const remDiag = consumeUnattachedContainedDiags(node.span);
+						const description = invalidRegexComparison
+							? `Operator ${formatInlineCode(scopeOp)} cannot be used with a regular expression`
+							: `At least one ${scopeTargetLabel} ${leafDesc}`;
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ${invalidPrefix}At least one ${scopeTargetLabel} ${leafDesc}.${exactDiagSuffix}${leafDiag}${remDiag}`,
+							`${indent}  ${invalidPrefix}${description}.${exactDiagSuffix}${leafDiag}${remDiag}`,
 						);
 					} else {
 						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
@@ -712,8 +699,8 @@ export function explainQuery(
 							m.kind === 'regex'
 								? `matches ${formatDirectRegexLink(m, footnotes)}`
 								: m.kind === 'this'
-									? describeScopeThisLeaf(m, sem.formatPlainStringMatch, hostDoc)
-									: sem.formatPlainStringMatch(m.value),
+									? describeScopeThisLeaf(m, formatScopeValue, hostDoc)
+									: formatScopeValue(m.value),
 						);
 						const remDiag = consumeUnattachedContainedDiags(node.span);
 						if (remDiag) {
@@ -724,6 +711,16 @@ export function explainQuery(
 				}
 				case 'PROPERTY_FILTER': {
 					const keyCode = formatInlineCode(node.key);
+					const systemScope = getSystemScopeForPropertyKey(node.key);
+					if (systemScope !== undefined) {
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						bulletLines.push(`${indent}- ${sliceCode}`);
+						bulletLines.push(
+							`${indent}  ${keyCode} is a built-in note scope, not a property (use ${formatInlineCode(`${systemScope}:`)} instead).${exactDiagSuffix}${remDiag}`,
+						);
+						return;
+					}
 					const typeInfo = resolvePropertyTypeWithOrigin(
 						node.key,
 						effectiveConfig.propertyTypes,
@@ -863,7 +860,7 @@ export function explainQuery(
 	// SECTION 3: Concept Reference
 	// =========================================================================
 	lines.push('## Concept Reference', '');
-	lines.push(renderIntervalComparisonDiagram(), '');
+	lines.push(renderIntervalComparisonDiagram(effectiveRefTimeMs, effectiveConfig.timeZone), '');
 	lines.push(footnotes.renderDefinitions());
 
 	return lines.join('\n');

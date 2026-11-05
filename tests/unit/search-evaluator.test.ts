@@ -189,7 +189,7 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		assertEval(labelDocs, '[label:null]', config, ['l-literal-null.md']);
 	});
 
-	it('evaluates property colon as typed equality on number, date, and checkbox, hierarchical tag matching on tags, regex on raw/normalized representations, and per-entry logical grouping', () => {
+	it('evaluates property colon as typed equality on number, date, and checkbox, regex on raw/normalized representations, and per-entry logical grouping', () => {
 		const config = makeConfig();
 		const fm1 = {
 			num: ' 1.5e2 ',
@@ -209,18 +209,18 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 			makeDoc(config, 'raw1.md', { frontmatter: fm1 }),
 			makeDoc(config, 'raw2.md', { frontmatter: fm2 }),
 		];
-		for (const q of '[num: /1\\.5e2/];[day: 2026-10];[day: @today];[day: (@today OR @yesterday)];[day: /^2026-10/];[flag: true];[multi: (alpha AND !two)];[multi: (/^alpha/ AND !/two$/)];[tags: #work/urgent];[tags: work/urgent];[tags: = #project];[tags: = project]'.split(
+		for (const q of '[num: /1\\.5e2/];[day: 2026-10];[day: @today];[day: (@today OR @yesterday)];[day: /^2026-10/];[flag: true];[multi: (alpha AND !two)];[multi: (/^alpha/ AND !/two$/)];tag:#work/urgent;tag:work/urgent;tag:=#project;tag:=project'.split(
 			';',
 		)) {
 			assertEval(docs, q, config, ['raw1.md']);
 		}
-		for (const q of '[num: 150];[num: 1.5e2];[num: (150 OR 200)];[tags: #work];[tags: work];[tags: /^work/]'.split(
+		for (const q of '[num: 150];[num: 1.5e2];[num: (150 OR 200)];tag:#work;tag:work;tag:/^work/'.split(
 			';',
 		)) {
 			assertEval(docs, q, config, ['raw1.md', 'raw2.md']);
 		}
-		assertEval(docs, '[tags: = #work]', config, ['raw2.md']);
-		assertEval(docs, '[tags: = work]', config, ['raw2.md']);
+		assertEval(docs, 'tag:=#work', config, ['raw2.md']);
+		assertEval(docs, 'tag:=work', config, ['raw2.md']);
 		assertEval(docs, '[flag: false]', config, ['raw2.md']);
 		assertEval(docs, '[multi: (alpha AND beta)]', config, []);
 		assertEval(docs, '[multi: (beta OR gamma)]', config, ['raw1.md', 'raw2.md']);
@@ -286,30 +286,70 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		});
 		const docs = [doc1, doc2];
 
-		// Case-sensitive regex on tag:, [tags:], and blocks: matches authored casing
+		// Case-sensitive regex on tag: and blocks: matches authored casing
 		assertEval(docs, 'tag:/^Work/', config, ['upper.md']);
 		assertEval(docs, 'tag:/^work/', config, ['lower.md']);
 		assertEval(docs, 'tag:/^BodyTag$/', config, ['upper.md']);
 		assertEval(docs, 'tag:/^bodytag$/', config, ['lower.md']);
-		assertEval(docs, '[tags: /^Work/]', config, ['upper.md']);
-		assertEval(docs, '[tags: /^work/]', config, ['lower.md']);
 		assertEval(docs, 'blocks:/^Blk-Alpha$/', config, ['upper.md']);
 		assertEval(docs, 'blocks:/^blk-alpha$/', config, ['lower.md']);
 
 		// Case-insensitive regex (/.../i) and non-regex queries match both
 		for (const q of [
 			'tag:/^work/i',
-			'[tags: /^work/i]',
 			'#work',
 			'tag:work',
-			'[tags: work]',
-			'[tags: = work/urgent]',
+			'tag: = work/urgent',
 			'blocks:/^blk-alpha$/i',
 			'blocks:blk-alpha',
 			'blocks:^BLK-ALPHA',
 		]) {
 			assertEval(docs, q, config, ['upper.md', 'lower.md']);
 		}
+	});
+
+	it('evaluates cssclasses scope and comparison operators across string scopes', () => {
+		const config = makeConfig();
+		const docs = [
+			makeDoc(config, 'Wide.md', {
+				frontmatter: {
+					cssclasses: ['wide-page', 'cards'],
+					tags: ['work', 'work/urgent'],
+					aliases: ['Alpha', 'Zulu'],
+				},
+				headings: [{ heading: 'Overview', level: 1 }],
+				blocks: { b: { id: 'b' } },
+			}),
+			makeDoc(config, 'Narrow.md', {
+				frontmatter: {
+					cssclasses: ['narrow'],
+					tags: ['personal'],
+					aliases: ['Beta'],
+				},
+			}),
+		];
+
+		assertEval(docs, 'cssclasses:wide-page', config, ['Wide.md']);
+		assertEval(docs, 'cssclass:=wide-page', config, ['Wide.md']);
+		assertEval(docs, 'cssclasses: = WIDE-PAGE', config, ['Wide.md']);
+		assertEval(docs, 'cssclasses:/^wide/', config, ['Wide.md']);
+		assertEval(docs, 'cssclasses:!=wide-page', config, ['Wide.md', 'Narrow.md']);
+		assertEval(docs, 'cssclasses: >m', config, ['Wide.md', 'Narrow.md']);
+
+		assertEval(docs, 'aliases: = Alpha', config, ['Wide.md']);
+		assertEval(docs, 'aliases: = alpha', config, ['Wide.md']);
+		assertEval(docs, 'aliases: != Alpha', config, ['Wide.md', 'Narrow.md']);
+
+		assertEval(docs, 'tag: = work', config, ['Wide.md']);
+		assertEval(docs, 'tag: = work/urgent', config, ['Wide.md']);
+		assertEval(docs, 'tag: != work', config, ['Wide.md', 'Narrow.md']);
+		assertEval(docs, 'tag: < work', config, ['Narrow.md']);
+
+		assertEval(docs, 'blocks: = b', config, ['Wide.md']);
+		assertEval(docs, 'headings: = Overview', config, ['Wide.md']);
+		assertEval(docs, 'path: = Wide.md', config, ['Wide.md']);
+		assertEval(docs, 'file: = Wide', config, ['Wide.md']);
+		assertEval(docs, 'ext: = .md', config, ['Wide.md', 'Narrow.md']);
 	});
 
 	it('rejects bare text and regex queries while matching explicit file:, path:, aliases:, and tag: scopes', () => {
@@ -373,14 +413,12 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 				flag: true,
 				day: '2026-10-22',
 				label: 'hello',
-				tags: ['work'],
 			},
 		});
 		corruptedDoc.propertyOccurrences[0]!.typedValues = [{ kind: 'text', value: '10' }];
 		corruptedDoc.propertyOccurrences[1]!.typedValues = [{ kind: 'number', value: 1, raw: '1' }];
 		corruptedDoc.propertyOccurrences[2]!.typedValues = [{ kind: 'number', value: 0, raw: '0' }];
 		corruptedDoc.propertyOccurrences[3]!.typedValues = [{ kind: 'number', value: 5, raw: '5' }];
-		corruptedDoc.propertyOccurrences[4]!.typedValues = [{ kind: 'number', value: 7, raw: '7' }];
 
 		expect(evaluateDoc(corruptedDoc, prepare('[num: = 10]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[num: 10]', config))).toBe(false);
@@ -390,8 +428,6 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 		expect(evaluateDoc(corruptedDoc, prepare('[day: 2026-10-22]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[label: = 5]', config))).toBe(false);
 		expect(evaluateDoc(corruptedDoc, prepare('[label: 5]', config))).toBe(false);
-		expect(evaluateDoc(corruptedDoc, prepare('[tags: = work]', config))).toBe(false);
-		expect(evaluateDoc(corruptedDoc, prepare('[tags: work]', config))).toBe(false);
 	});
 
 	it('evaluates @this.* across scalar properties, array overlap, deep indexing, and unresolved/uncoercible fallbacks identically in evaluator and oracle', () => {
@@ -449,11 +485,10 @@ describe('Phase 6 supplemental evaluator unit tests', () => {
 			'Notes/Match.md',
 		]);
 
-		// Hierarchical tag overlap (`tag:@this.tags` & `[tags: @this.tags]`) vs exact (`[tags: = @this.tags.0]`)
+		// Hierarchical tag overlap (`tag:@this.tags`) vs exact (`tag: = @this.tags.0`)
 		assertHostQuery('tag:@this.tags', ['Notes/Match.md']);
-		assertHostQuery('[tags: @this.tags]', ['Notes/Match.md']);
 		assertHostQuery('!tag:@this.tags', ['Notes/Other.md']);
-		assertHostQuery('[tags: = @this.tags.0]', []);
+		assertHostQuery('tag: = @this.tags.0', []);
 
 		// Deep array/object traversal (`@this.links.0.rawTarget`, `@this.links.rawTarget`, `@this.file.ext`)
 		const linkCandidate = makeDoc(config, 'Notes/TargetA.md', {});

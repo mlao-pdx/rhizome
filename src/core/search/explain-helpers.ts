@@ -17,6 +17,7 @@ import {
 	type PropertyOperator,
 	type PropertyTypeRegistry,
 	type ScopedFilterNode,
+	type ScopeOperator,
 	type SearchAST,
 	type SourceSpan,
 	type ValueExprAST,
@@ -30,7 +31,7 @@ export {
 	formatValueExprInner,
 };
 
-export type PropertyTypeOrigin = 'virtual' | 'built-in' | 'configured' | 'default';
+export type PropertyTypeOrigin = 'virtual' | 'configured' | 'default';
 
 export interface ResolvedPropertyTypeInfo {
 	readonly type: ObsidianPropertyType;
@@ -67,20 +68,6 @@ export function resolvePropertyTypeWithOrigin(
 			type: resolveQueryPropertyType(lowerKey, registry),
 			origin: 'virtual',
 			originLabel: 'virtual (file.*)',
-		};
-	}
-	if (lowerKey === 'tags' || lowerKey === 'tag') {
-		return {
-			type: 'tags',
-			origin: 'built-in',
-			originLabel: 'built-in',
-		};
-	}
-	if (lowerKey === 'aliases' || lowerKey === 'alias') {
-		return {
-			type: 'multitext',
-			origin: 'built-in',
-			originLabel: 'built-in',
 		};
 	}
 	if (Object.prototype.hasOwnProperty.call(registry, lowerKey)) {
@@ -243,7 +230,11 @@ export function formatAuthoredFilter(node: ScopedFilterNode | PropertyFilterNode
 			if (node.rawScope === '#') {
 				return rhs.startsWith('#') ? rhs : `#${rhs}`;
 			}
-			return `${node.rawScope}:${rhs}`;
+			const op = node.operator ?? ':';
+			if (op === ':') {
+				return `${node.rawScope}:${rhs}`;
+			}
+			return `${node.rawScope}:${op}${rhs}`;
 		}
 		case 'PROPERTY_FILTER': {
 			if (node.operator === 'EXISTS') {
@@ -318,6 +309,15 @@ export function describeScopeSemantics(scope: string): ScopeSemanticsInfo {
 				formatPlainStringMatch: (val) =>
 					`contains ${formatInlineCode(val)} (case-insensitive)`,
 			};
+		case 'cssclasses':
+			return {
+				friendlyTitle: 'CSS class filter',
+				singularTarget: 'CSS class',
+				targetsDescription: 'frontmatter `cssclasses`',
+				matchRuleDescription: 'case-insensitive exact match',
+				formatPlainStringMatch: (val) =>
+					`equals ${formatInlineCode(val)} (case-insensitive)`,
+			};
 		case 'headings':
 			return {
 				friendlyTitle: 'Heading filter',
@@ -369,6 +369,56 @@ export function describeScopeSemantics(scope: string): ScopeSemanticsInfo {
 				formatPlainStringMatch: (val) => `matches ${formatInlineCode(val)}`,
 			};
 		}
+	}
+}
+
+export function formatScopeStringMatch(
+	scope: string,
+	operator: ScopeOperator,
+	value: string,
+): string {
+	const sem = describeScopeSemantics(scope);
+	if (operator === ':') {
+		return sem.formatPlainStringMatch(value);
+	}
+	if (scope === 'tag') {
+		const normTag = normalizeTagBody(value);
+		const hashTagCode = formatInlineCode(`#${normTag}`);
+		switch (operator) {
+			case '=':
+				return `equals exact tag ${hashTagCode} (case-insensitive)`;
+			case '!=':
+				return `does not equal exact tag ${hashTagCode} (case-insensitive)`;
+			case '<':
+				return `comes alphabetically before tag ${hashTagCode} (case-insensitive)`;
+			case '<=':
+				return `comes alphabetically at or before tag ${hashTagCode} (case-insensitive)`;
+			case '>':
+				return `comes alphabetically after tag ${hashTagCode} (case-insensitive)`;
+			case '>=':
+				return `comes alphabetically at or after tag ${hashTagCode} (case-insensitive)`;
+		}
+	}
+	let displayVal = value;
+	if (scope === 'ext') {
+		displayVal = value.toLowerCase().replace(/^\./, '');
+	} else if (scope === 'blocks') {
+		displayVal = `^${value.toLowerCase().replace(/^\^/, '')}`;
+	}
+	const valCode = formatInlineCode(displayVal);
+	switch (operator) {
+		case '=':
+			return `equals ${valCode} (case-insensitive)`;
+		case '!=':
+			return `does not equal ${valCode} (case-insensitive)`;
+		case '<':
+			return `comes alphabetically before ${valCode} (case-insensitive)`;
+		case '<=':
+			return `comes alphabetically at or before ${valCode} (case-insensitive)`;
+		case '>':
+			return `comes alphabetically after ${valCode} (case-insensitive)`;
+		case '>=':
+			return `comes alphabetically at or after ${valCode} (case-insensitive)`;
 	}
 }
 

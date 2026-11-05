@@ -116,7 +116,7 @@ export function normalizeValueExprAST(expr: ValueExprAST): ValueExprAST {
 
 /**
  * Produces a canonical `SearchAST` with `span` and `parenthesized` stripped,
- * negation syntax normalized to `'NOT'`, `tag` scope string leaves prefixed with `'#'`,
+ * negation syntax normalized to `'NOT'`, default `tag` scope string leaves prefixed with `'#'`,
  * property keys lowercased, and nested `LOGICAL` nodes of the same operator flattened.
  */
 export function normalizeAST(ast: SearchAST): SearchAST {
@@ -133,6 +133,7 @@ export function normalizeAST(ast: SearchAST): SearchAST {
 			let normExpr = normalizeValueExprAST(ast.expr);
 			if (
 				ast.scope === 'tag' &&
+				(ast.operator ?? ':') === ':' &&
 				normExpr.type === 'VALUE_LEAF' &&
 				normExpr.matcher.kind === 'string'
 			) {
@@ -150,6 +151,9 @@ export function normalizeAST(ast: SearchAST): SearchAST {
 				type: 'SCOPED_FILTER',
 				scope: ast.scope,
 				rawScope: ast.scope,
+				...(ast.operator !== undefined && ast.operator !== ':'
+					? { operator: ast.operator }
+					: {}),
 				expr: normExpr,
 			};
 		}

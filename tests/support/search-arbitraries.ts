@@ -45,7 +45,7 @@ export function printableScopedFilterArb(
 				.map((name) => resolvedConfig.getScope(name)!.canonicalName),
 		),
 	);
-	return fc
+	const colonArb = fc
 		.tuple(
 			fc.constantFrom(...scopeNames),
 			fc.boolean(),
@@ -71,6 +71,44 @@ export function printableScopedFilterArb(
 			}
 			return { type: 'SCOPED_FILTER' as const, scope, rawScope: scope, expr };
 		});
+	const comparisonMatcherArb: fc.Arbitrary<LeafMatcher> = fc.oneof(
+		unquotedIdentifierArb.map((value) => ({
+			kind: 'string' as const,
+			value,
+			quoted: false,
+		})),
+		quotedValueArb.map((value) => ({
+			kind: 'string' as const,
+			value,
+			quoted: true,
+		})),
+		unquotedIdentifierArb.map((value) => ({
+			kind: 'string' as const,
+			value: `-${value}`,
+			quoted: false,
+		})),
+	);
+	const comparisonArb: fc.Arbitrary<ScopedFilterNode> = fc
+		.tuple(
+			fc.constantFrom(...scopeNames),
+			fc.constantFrom(
+				'=' as const,
+				'!=' as const,
+				'<' as const,
+				'>' as const,
+				'<=' as const,
+				'>=' as const,
+			),
+			comparisonMatcherArb,
+		)
+		.map(([scope, operator, matcher]) => ({
+			type: 'SCOPED_FILTER' as const,
+			scope,
+			rawScope: scope,
+			operator,
+			expr: { type: 'VALUE_LEAF' as const, matcher },
+		}));
+	return fc.oneof({ weight: 4, arbitrary: colonArb }, { weight: 1, arbitrary: comparisonArb });
 }
 
 export const unsignedNumberLiteralArb = fc

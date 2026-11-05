@@ -6,7 +6,7 @@ import {
 	type CompiledValueExprNode,
 } from './execution-plan';
 import { getTypedPropertyEntries, hasPropertyOccurrence } from './oracle';
-import { hierarchicalTagMatch, normalizeTagBody, substringStringMatch } from './scopes';
+import { scopeTargetsMatchComparison, substringStringMatch } from './scopes';
 import { compareDateIntervals } from './temporal';
 import type {
 	DocumentDiagnostic,
@@ -49,9 +49,6 @@ function evalCompiledColonExpr(
 			return !evalCompiledColonExpr(entry, expr.child);
 		case 'COLON_REGEX': {
 			if (expr.propType === 'checkbox' || entry.kind === 'checkbox') return false;
-			if (expr.propType === 'tags') {
-				return entry.kind === 'text' && expr.regex.test(entry.value);
-			}
 			const target = entry.kind === 'text' ? entry.value : entry.raw;
 			return expr.regex.test(target);
 		}
@@ -64,8 +61,6 @@ function evalCompiledColonExpr(
 				(entry.kind === 'date' || entry.kind === 'datetime') &&
 				compareDateIntervals(entry.interval, '=', expr.rhsInterval)
 			);
-		case 'COLON_TAG':
-			return entry.kind === 'text' && hierarchicalTagMatch(entry.value, expr.rhsRaw);
 		case 'COLON_TEXT':
 			return entry.kind === 'text' && substringStringMatch(entry.value, expr.value);
 	}
@@ -113,27 +108,6 @@ function evalCompiledComparisonOnEntry(
 				comparison.rhsInterval,
 			);
 		}
-		case 'tags': {
-			if (entry.kind !== 'text') return false;
-			const a = normalizeTagBody(entry.value);
-			const b = comparison.rhsTag;
-			switch (comparison.operator) {
-				case '=':
-					return a === b;
-				case '!=':
-					return a !== b;
-				case '<':
-					return a < b;
-				case '>':
-					return a > b;
-				case '<=':
-					return a <= b;
-				case '>=':
-					return a >= b;
-				default:
-					return false;
-			}
-		}
 		case 'text': {
 			if (entry.kind !== 'text') return false;
 			const a = entry.value.toLowerCase();
@@ -171,6 +145,15 @@ function evalCompiledSearchNode(doc: NormalizedDocument, node: CompiledSearchNod
 		case 'SCOPED_FILTER': {
 			const targets = node.scopeDef.extract(doc);
 			return targets.some((t) => evalCompiledValueExpr(t, node.expr, node.scopeDef));
+		}
+		case 'SCOPED_COMPARE': {
+			const targets = node.scopeDef.extract(doc);
+			return scopeTargetsMatchComparison(
+				node.scopeDef.canonicalName,
+				targets,
+				node.operator,
+				node.normalizedRhsValues,
+			);
 		}
 		case 'PROPERTY_EXISTS': {
 			return hasPropertyOccurrence(doc, node.lowerKey);

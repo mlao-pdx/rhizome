@@ -41,7 +41,7 @@ export function initEngineConfig(
 				code: 'ERROR_INVALID_CONFIG',
 				severity: 'error',
 				issue: `Unsupported ObsidianPropertyType "${String(propType)}" for key "${rawKey}".`,
-				hint: 'Allowed types: text, multitext, number, checkbox, date, datetime, tags.',
+				hint: 'Allowed types: text, multitext, number, checkbox, date, datetime.',
 				span: null,
 			});
 			continue;

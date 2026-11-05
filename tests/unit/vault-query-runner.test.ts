@@ -248,6 +248,7 @@ describe('runVaultQuery', () => {
 			'aliasLocations',
 			'tags',
 			'tagLocations',
+			'cssclasses',
 			'headings',
 			'links',
 			'embeds',

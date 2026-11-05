@@ -98,16 +98,26 @@ function lintUnclosedRegexInValueExpr(
 function extractSingleValueEquality(child: SearchAST): SingleValueEquality | null {
 	if (
 		child.type === 'SCOPED_FILTER' &&
-		child.scope === 'ext' &&
 		child.expr.type === 'VALUE_LEAF' &&
 		child.expr.matcher.kind === 'string'
 	) {
+		const op = child.operator ?? ':';
 		const raw = child.expr.matcher.value;
-		return {
-			field: 'file.extension',
-			normalized: raw.trim().toLowerCase().replace(/^\./, ''),
-			raw,
-		};
+		if (child.scope === 'ext' && (op === ':' || op === '=')) {
+			return {
+				field: 'file.extension',
+				normalized: raw.toLowerCase().replace(/^\./, ''),
+				raw,
+			};
+		}
+		if (child.scope === 'path' && op === '=') {
+			return {
+				field: 'file.path',
+				normalized: raw.toLowerCase(),
+				raw,
+			};
+		}
+		return null;
 	}
 
 	if (
@@ -120,7 +130,7 @@ function extractSingleValueEquality(child: SearchAST): SingleValueEquality | nul
 		if (child.key === 'file.extension') {
 			return {
 				field: 'file.extension',
-				normalized: raw.trim().toLowerCase().replace(/^\./, ''),
+				normalized: raw.toLowerCase(),
 				raw,
 			};
 		}
@@ -221,9 +231,26 @@ export function lintQueryAST(
 			case 'MATCH_ALL':
 				return;
 
-			case 'SCOPED_FILTER':
-				lintUnclosedRegexInValueExpr(node.expr, node.span ?? null, diagnostics);
+			case 'SCOPED_FILTER': {
+				const op = node.operator ?? ':';
+				if (
+					op === '!=' &&
+					!(node.expr.type === 'VALUE_LEAF' && node.expr.matcher.kind === 'regex')
+				) {
+					const scopeDisplay = node.rawScope === '#' ? 'tag' : node.rawScope.trim();
+					const rhsDisplay = formatRhsDisplay(node.expr);
+					diagnostics.push({
+						code: 'HINT_PROP_NEQ_EXISTENCE',
+						severity: 'hint',
+						issue: `"${scopeDisplay}:!=${rhsDisplay}" requires "${node.scope}" to have at least one value.`,
+						hint: `To exclude notes (including notes with no "${node.scope}" values), use "!${scopeDisplay}:=${rhsDisplay}".`,
+						span: node.span ?? null,
+					});
+				} else if (op === ':') {
+					lintUnclosedRegexInValueExpr(node.expr, node.span ?? null, diagnostics);
+				}
 				return;
+			}
 
 			case 'PROPERTY_FILTER': {
 				if (!invalidPropertyNodes?.has(node)) {

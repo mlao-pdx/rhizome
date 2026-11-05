@@ -1,3 +1,4 @@
+import { Temporal } from '@js-temporal/polyfill';
 import type { ResolvedPropertyTypeInfo } from './explain-helpers';
 import { formatInlineCode } from './explain-helpers';
 import type { SearchDiagnostic } from './types';
@@ -46,38 +47,55 @@ export class FootnoteRegistry {
 	}
 }
 
-export function renderIntervalComparisonDiagram(): string {
+export function renderIntervalComparisonDiagram(referenceTimeMs: number, timeZone: string): string {
+	let today: Temporal.PlainDate;
+	try {
+		today = Temporal.Instant.fromEpochMilliseconds(referenceTimeMs)
+			.toZonedDateTimeISO(timeZone)
+			.toPlainDate();
+	} catch {
+		today = Temporal.Instant.fromEpochMilliseconds(referenceTimeMs)
+			.toZonedDateTimeISO('UTC')
+			.toPlainDate();
+	}
+	const day = (offset: number): string => today.add({ days: offset }).toString();
+
 	return [
 		'```mermaid',
 		'gantt',
 		'    title [Half-Open) Interval Comparison Matches',
-		'    dateFormat YYYY-MM-DD HH:mm:ss',
-		'    axisFormat %S',
-		'    tickInterval 1second',
+		'    dateFormat YYYY-MM-DD',
+		'    axisFormat %Y-%m-%d',
+		'    tickInterval 1day',
 		'    todayMarker off',
 		'',
-		'    section Given:',
-		'    [2 <= Criteria < 5)            :crit,   1970-01-01 00:00:02, 1970-01-01 00:00:05',
+		'    section Given',
+		`    [${day(-1)} <= Criteria < ${day(2)})            :crit,   ${day(-1)}, ${day(2)}`,
 		'',
 		'    section : OR =',
-		'    Note matches exactly           :active, 1970-01-01 00:00:02, 1970-01-01 00:00:05',
-		'    Note starts and ends within    :active, 1970-01-01 00:00:03, 1970-01-01 00:00:04',
+		`    Value matches exactly           :active, ${day(-1)}, ${day(2)}`,
+		`    Value starts and ends within    :active, ${day(0)}, ${day(1)}`,
 		'',
 		'    section !=',
-		'    Note starts before             :active, 1970-01-01 00:00:01, 1970-01-01 00:00:04',
-		'    Note ends after                :active, 1970-01-01 00:00:03, 1970-01-01 00:00:06',
+		`    Value starts before             :active, ${day(-2)}, ${day(1)}`,
+		`    Value ends after                :active, ${day(0)}, ${day(3)}`,
 		'',
 		'    section <',
-		'    Note ends at start or before   :active, 1970-01-01 00:00:01, 1970-01-01 00:00:02',
+		`    Value ends at start or before   :active, ${day(-2)}, ${day(-1)}`,
 		'',
 		'    section <=',
-		'    Note ends at end or before     :active, 1970-01-01 00:00:01, 1970-01-01 00:00:05',
+		`    Value ends at end or before     :active, ${day(-2)}, ${day(2)}`,
 		'',
 		'    section >=',
-		'    Note starts at start or after  :active, 1970-01-01 00:00:02, 1970-01-01 00:00:06',
+		`    Value starts at start or after  :active, ${day(-1)}, ${day(3)}`,
 		'',
 		'    section >',
-		'    Note starts at end or after    :active, 1970-01-01 00:00:05, 1970-01-01 00:00:06',
+		`    Value starts at end or after    :active, ${day(2)}, ${day(3)}`,
+		'',
+		'    section some<br>built-ins',
+		`    @yesterday                      :active, ${day(-1)}, ${day(0)}`,
+		`    @today                          :active, ${day(0)}, ${day(1)}`,
+		`    @tomorrow                       :active, ${day(1)}, ${day(2)}`,
 		'```',
 	].join('\n');
 }
@@ -126,47 +144,52 @@ export function refScopeFootnote(registry: FootnoteRegistry, canonicalScope: str
 		case 'tag':
 			return registry.ref(
 				'scope-tag',
-				'**Tag Scope (`#tag` / `tag:`)**: Searches all tags on a note across YAML frontmatter, inline properties, and note body. String queries match hierarchically and case-insensitively (`#work` matches both `#work` and `#work/project`, with any leading `#` stripped).',
+				'**Tag Scope (`#tag` / `tag:`)**: Searches tags across frontmatter, inline properties, and the note body. The default match is hierarchical and case-insensitive; comparison operators use exact equality or alphabetical ordering.',
 			);
 		case 'file':
 			return registry.ref(
 				'scope-file',
-				'**File Scope (`file:` / `filename:`)**: Searches the note filename both with extension (`file.name`) and without extension (`file.basename`) using case-insensitive substring matching.',
+				'**File Scope (`file:` / `filename:`)**: Searches the note filename both with extension (`file.name`) and without extension (`file.basename`), with case-insensitive substring matching by default.',
 			);
 		case 'path':
 			return registry.ref(
 				'scope-path',
-				'**Path Scope (`path:` / `folder:`)**: Searches the note vault-relative path (`file.path`) using case-insensitive substring matching.',
+				'**Path Scope (`path:` / `folder:`)**: Searches the note vault-relative path (`file.path`), with case-insensitive substring matching by default.',
 			);
 		case 'ext':
 			return registry.ref(
 				'scope-ext',
-				'**Extension Scope (`ext:` / `extension:`)**: Matches the note file extension (`file.extension`) using case-insensitive exact equality after stripping any leading `.` from the query value.',
+				'**Extension Scope (`ext:` / `extension:`)**: Matches the note file extension (`file.extension`), with case-insensitive exact equality by default after stripping any leading `.` from the query value.',
 			);
 		case 'aliases':
 			return registry.ref(
 				'scope-aliases',
-				'**Aliases Scope (`aliases:` / `alias:`)**: Searches all note `aliases` declared in frontmatter using case-insensitive substring matching.',
+				'**Aliases Scope (`aliases:` / `alias:`)**: Searches all note `aliases` declared in frontmatter and inline properties using case-insensitive substring matching for `:` (or exact/alphabetical comparison for `=`, `!=`, `<`, `<=`, `>`, `>=`).',
+			);
+		case 'cssclasses':
+			return registry.ref(
+				'scope-cssclasses',
+				'**CSS Classes Scope (`cssclasses:` / `cssclass:`)**: Matches frontmatter `cssclasses` using case-insensitive exact equality (or alphabetical comparison for `<`, `<=`, `>`, `>=`).',
 			);
 		case 'headings':
 			return registry.ref(
 				'scope-headings',
-				'**Headings Scope (`headings:` / `heading:` / `section:`)**: Searches markdown section heading text (`#` through `######`) in the note using case-insensitive substring matching.',
+				'**Headings Scope (`headings:` / `heading:` / `header:` / `headers:`)**: Searches markdown section heading text (`#` through `######`) in the note, with case-insensitive substring matching by default.',
 			);
 		case 'links':
 			return registry.ref(
 				'scope-links',
-				'**Outgoing Links Scope (`links:` / `link:` / `outlink:`)**: Searches outgoing links from frontmatter and note body (`link`, `rawTarget`, resolved vault path `resolvedPath`, and `displayText`) using case-insensitive substring matching.',
+				'**Outgoing Links Scope (`links:` / `link:` / `outlink:`)**: Searches outgoing links from frontmatter and note body (`link`, `rawTarget`, resolved vault path `resolvedPath`, and `displayText`), with case-insensitive substring matching by default.',
 			);
 		case 'embeds':
 			return registry.ref(
 				'scope-embeds',
-				'**Embeds Scope (`embeds:` / `embed:`)**: Searches embedded notes and attachments (`link`, `rawTarget`, and resolved vault path `resolvedPath`) using case-insensitive substring matching.',
+				'**Embeds Scope (`embeds:` / `embed:`)**: Searches embedded notes and attachments (`link`, `rawTarget`, and resolved vault path `resolvedPath`), with case-insensitive substring matching by default.',
 			);
 		case 'blocks':
 			return registry.ref(
 				'scope-blocks',
-				'**Blocks Scope (`blocks:` / `block:`)**: Matches note block identifiers (`^block-id`) using case-insensitive exact equality after stripping any leading `^` from the query value.',
+				'**Blocks Scope (`blocks:` / `block:`)**: Matches note block identifiers (`^block-id`), with case-insensitive exact equality by default after stripping any leading `^` from the query value.',
 			);
 		default: {
 			const id = `scope-custom-${slugifyScopeName(canonicalScope)}`;
@@ -229,19 +252,6 @@ export function refPropertyFootnote(
 		}
 	}
 
-	if (typeInfo.origin === 'built-in') {
-		if (lowerKey === 'tags' || lowerKey === 'tag') {
-			return registry.ref(
-				'prop-tags',
-				'**Predetermined Property (`tags`)**: Built-in Obsidian frontmatter `tags` property. Always resolves to type `tags`: `:` matches hierarchically (`#a` or `#a/...`), `=` and `!=` test exact normalized tag equality, and `<`, `<=`, `>`, `>=` compare normalized tag names alphabetically.',
-			);
-		}
-		return registry.ref(
-			'prop-aliases',
-			'**Predetermined Property (`aliases`)**: Built-in Obsidian `aliases` property. Always resolves to type `multitext`: `:` tests case-insensitive substring containment, `=` and `!=` test case-insensitive exact equality, and `<`, `<=`, `>`, `>=` compare values alphabetically.',
-		);
-	}
-
 	if (typeInfo.origin === 'default') {
 		return registry.ref(
 			'prop-untyped',
@@ -279,11 +289,6 @@ export function refPropertyFootnote(
 			return registry.ref(
 				'prop-datetime',
 				'**Configured `datetime` Property**: Configured in `propertyTypes` as `datetime`. Stored timestamps and query literals expand into half-open UTC epoch millisecond intervals `[start, end)` in the active timezone and are compared using interval algebra.',
-			);
-		case 'tags':
-			return registry.ref(
-				'prop-tags-configured',
-				'**Configured `tags` Property**: Configured in `propertyTypes` as `tags`. Normalizes values by stripping any leading `#` and lowercasing: `:` matches hierarchically (`#a` or `#a/...`), `=` and `!=` test exact tag equality, and `<`, `<=`, `>`, `>=` compare tags alphabetically.',
 			);
 	}
 }

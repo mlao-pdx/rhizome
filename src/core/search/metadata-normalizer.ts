@@ -10,20 +10,22 @@ import {
 } from './property-coercion';
 import { stripTagHash } from './scopes';
 import { formatEpochMsToMinuteIso, MAX_SAFE_EPOCH_MS } from './temporal';
-import type {
-	DocumentDiagnostic,
-	DocumentDiagnosticCode,
-	NormalizedAliasLocation,
-	NormalizedDocument,
-	NormalizedFileInfo,
-	NormalizedHeading,
-	NormalizedLink,
-	NormalizedPropertyLocation,
-	NormalizedTagLocation,
-	PropertyOccurrence,
-	ResolvedEngineConfig,
-	SanitizedScalar,
-	TypedPropertyValue,
+import {
+	getSystemScopeForPropertyKey,
+	type DocumentDiagnostic,
+	type DocumentDiagnosticCode,
+	type NormalizedAliasLocation,
+	type NormalizedBlock,
+	type NormalizedDocument,
+	type NormalizedFileInfo,
+	type NormalizedHeading,
+	type NormalizedLink,
+	type NormalizedPropertyLocation,
+	type NormalizedTagLocation,
+	type PropertyOccurrence,
+	type ResolvedEngineConfig,
+	type SanitizedScalar,
+	type TypedPropertyValue,
 } from './types';
 
 const internalFileEpochMsMap = new WeakMap<
@@ -134,6 +136,8 @@ interface PrecomputedHeadingOrigin {
 export interface OriginWikiLinkResolver {
 	readonly noteOrigin: string;
 	resolve(itemPos: ObsidianPosInput | null | undefined): string;
+	forHeading(headingText: string): string;
+	forBlock(cleanedBlockId: string): string;
 }
 
 /**
@@ -150,6 +154,31 @@ export function createOriginWikiLinkResolver(
 	const noteOrigin = `[[${filePath}|${fileBasename}]]`;
 	const blockEntries: PrecomputedBlockOrigin[] = [];
 	const blockOriginCache = new Map<string, string>();
+	const headingOriginCache = new Map<string, string>();
+
+	const forBlock = (cleanedId: string): string => {
+		if (cleanedId.trim().length === 0 || WIKILINK_UNSAFE_RE.test(cleanedId)) {
+			return noteOrigin;
+		}
+		let origin = blockOriginCache.get(cleanedId);
+		if (origin === undefined) {
+			origin = `[[${filePath}#^${cleanedId}|${fileBasename}]]`;
+			blockOriginCache.set(cleanedId, origin);
+		}
+		return origin;
+	};
+
+	const forHeading = (headingText: string): string => {
+		if (headingText.trim().length === 0 || WIKILINK_UNSAFE_RE.test(headingText)) {
+			return noteOrigin;
+		}
+		let origin = headingOriginCache.get(headingText);
+		if (origin === undefined) {
+			origin = `[[${filePath}#${headingText}|${fileBasename}]]`;
+			headingOriginCache.set(headingText, origin);
+		}
+		return origin;
+	};
 
 	if (blocks) {
 		let orderIndex = 0;
@@ -164,11 +193,7 @@ export function createOriginWikiLinkResolver(
 			if (!isValidOffset(bStart) || !isValidOffset(bEnd) || bStart > bEnd) {
 				continue;
 			}
-			let origin = blockOriginCache.get(cleanedId);
-			if (origin === undefined) {
-				origin = `[[${filePath}#^${cleanedId}|${fileBasename}]]`;
-				blockOriginCache.set(cleanedId, origin);
-			}
+			const origin = forBlock(cleanedId);
 			blockEntries.push({
 				startOffset: bStart,
 				endOffset: bEnd,
@@ -185,25 +210,13 @@ export function createOriginWikiLinkResolver(
 
 	const headingEntries: PrecomputedHeadingOrigin[] = [];
 	if (headings) {
-		const headingOriginCache = new Map<string, string>();
 		for (let i = 0; i < headings.length; i++) {
 			const h = headings[i]!;
 			const hStart = h.position?.start?.offset;
 			if (!isValidOffset(hStart)) {
 				continue;
 			}
-			let origin: string;
-			if (h.heading.trim().length > 0 && !WIKILINK_UNSAFE_RE.test(h.heading)) {
-				const cached = headingOriginCache.get(h.heading);
-				if (cached !== undefined) {
-					origin = cached;
-				} else {
-					origin = `[[${filePath}#${h.heading}|${fileBasename}]]`;
-					headingOriginCache.set(h.heading, origin);
-				}
-			} else {
-				origin = noteOrigin;
-			}
+			const origin = forHeading(h.heading);
 			headingEntries.push({
 				startOffset: hStart,
 				orderIndex: i,
@@ -215,6 +228,8 @@ export function createOriginWikiLinkResolver(
 
 	return {
 		noteOrigin,
+		forHeading,
+		forBlock,
 		resolve(itemPos: ObsidianPosInput | null | undefined): string {
 			const itemStartOffset = itemPos?.start?.offset;
 			if (!isValidOffset(itemStartOffset)) {
@@ -374,6 +389,76 @@ export function normalizeObsidianMetadata(
 		});
 	};
 
+	// Note: Obsidian's native WikiLink display-value suggestions (`[[Note|Alias]]`) only inspect
+	// YAML frontmatter `aliases`. Inline `alias`/`aliases` properties are indexed read-only into
+	// `aliases` and `aliasLocations` here; copying inline aliases into frontmatter will be
+	// provided as an explicit user-invoked command rather than an automatic background mutation.
+	const aliasSet = new Set<string>();
+	const aliasLocations: NormalizedAliasLocation[] = [];
+	const tagSet = new Set<string>();
+	const tagLocations: NormalizedTagLocation[] = [];
+	const cssclassSet = new Set<string>();
+
+	const recordSystemScopeEntry = (
+		systemScope: 'tag' | 'aliases' | 'cssclasses',
+		val: unknown,
+		source: 'frontmatter' | 'inline',
+		rawPosition?: ObsidianPosInput | null,
+	): void => {
+		const items = Array.isArray(val) ? (val as readonly unknown[]) : [val];
+		if (systemScope === 'cssclasses') {
+			if (source !== 'frontmatter') return;
+			for (const item of items) {
+				if (typeof item !== 'string') continue;
+				for (const tok of item.split(/\s+/)) {
+					if (tok.length > 0) {
+						cssclassSet.add(tok);
+					}
+				}
+			}
+			return;
+		}
+
+		const occOrigin =
+			source === 'frontmatter'
+				? originResolver.noteOrigin
+				: originResolver.resolve(rawPosition);
+
+		if (systemScope === 'aliases') {
+			for (const item of items) {
+				const s = sanitizeScalar(item);
+				if (!s.valid) continue;
+				const tv = coercePropertyValue(item, 'multitext', timeZone);
+				if (tv.kind === 'text') {
+					aliasSet.add(tv.value);
+					aliasLocations.push({
+						alias: tv.value,
+						source,
+						origin: occOrigin,
+					});
+				}
+			}
+			return;
+		}
+
+		for (const item of items) {
+			const s = sanitizeScalar(item);
+			if (!s.valid) continue;
+			const tv = coercePropertyValue(item, 'text', timeZone);
+			if (tv.kind === 'text') {
+				const stripped = stripTagHash(tv.value);
+				if (stripped) {
+					tagSet.add(stripped);
+					tagLocations.push({
+						tag: stripped,
+						source,
+						origin: occOrigin,
+					});
+				}
+			}
+		}
+	};
+
 	const addOccurrence = (
 		rawKey: string,
 		val: unknown,
@@ -393,6 +478,15 @@ export function normalizeObsidianMetadata(
 			return;
 		}
 
+		const systemScope = getSystemScopeForPropertyKey(key);
+		if (systemScope !== undefined) {
+			recordSystemScopeEntry(systemScope, val, source, rawPosition);
+			return;
+		}
+		if (OMITTED_PROPERTY_VIEW_KEYS.has(key)) {
+			return;
+		}
+
 		const line = sanitizeLineNumber(rawLine);
 		const propertyType = resolveUserPropertyType(key, propertyTypes);
 		const occurrenceIndex = propertyOccurrences.length;
@@ -403,17 +497,9 @@ export function normalizeObsidianMetadata(
 			for (const item of val as readonly unknown[]) {
 				const s = sanitizeScalar(item);
 				if (!s.valid) continue;
-				let scalar = s.scalar;
-				let itemForCoerce: unknown = item;
-				if (propertyType === 'tags' && typeof scalar === 'string') {
-					const stripped = stripTagHash(scalar);
-					if (!stripped) continue;
-					scalar = stripped;
-					itemForCoerce = stripped;
-				}
-				sanitizedList.push(scalar);
+				sanitizedList.push(s.scalar);
 				const valueIndex = typedValues.length;
-				const tv = coercePropertyValue(itemForCoerce, propertyType, timeZone);
+				const tv = coercePropertyValue(item, propertyType, timeZone);
 				typedValues.push(tv);
 				recordDocDiagnosticIfInvalid(
 					tv,
@@ -438,19 +524,7 @@ export function normalizeObsidianMetadata(
 		} else {
 			const s = sanitizeScalar(val);
 			if (!s.valid) return;
-			let scalar = s.scalar;
-			let valForCoerce: unknown = val;
-			if (propertyType === 'tags' && typeof scalar === 'string') {
-				const stripped = stripTagHash(scalar);
-				if (!stripped) {
-					scalar = null;
-					valForCoerce = null;
-				} else {
-					scalar = stripped;
-					valForCoerce = stripped;
-				}
-			}
-			const tv = coercePropertyValue(valForCoerce, propertyType, timeZone);
+			const tv = coercePropertyValue(val, propertyType, timeZone);
 			recordDocDiagnosticIfInvalid(tv, key, rawKey, source, line, occurrenceIndex, 0);
 			propertyOccurrences.push({
 				key,
@@ -458,7 +532,7 @@ export function normalizeObsidianMetadata(
 				source,
 				line,
 				propertyType,
-				rawValue: scalar,
+				rawValue: s.scalar,
 				typedValues: [tv],
 			});
 			occurrencePositions.push(rawPosition);
@@ -474,14 +548,6 @@ export function normalizeObsidianMetadata(
 
 	const { propertyKeys, properties } = buildPropertiesViews(propertyOccurrences);
 
-	// Note: Obsidian's native WikiLink display-value suggestions (`[[Note|Alias]]`) only inspect
-	// YAML frontmatter `aliases`. Inline `alias`/`aliases` properties are indexed read-only into
-	// `aliases` and `aliasLocations` here; copying inline aliases into frontmatter will be
-	// provided as an explicit user-invoked command rather than an automatic background mutation.
-	const aliasSet = new Set<string>();
-	const aliasLocations: NormalizedAliasLocation[] = [];
-	const tagSet = new Set<string>();
-	const tagLocations: NormalizedTagLocation[] = [];
 	const propertyLocations: NormalizedPropertyLocation[] = [];
 
 	for (let i = 0; i < propertyOccurrences.length; i++) {
@@ -490,37 +556,6 @@ export function normalizeObsidianMetadata(
 			occ.source === 'frontmatter'
 				? originResolver.noteOrigin
 				: originResolver.resolve(occurrencePositions[i]);
-
-		if (occ.key === 'aliases' || occ.key === 'alias') {
-			for (const tv of occ.typedValues) {
-				if (tv.kind === 'text') {
-					aliasSet.add(tv.value);
-					aliasLocations.push({
-						alias: tv.value,
-						source: occ.source,
-						origin: occOrigin,
-					});
-				}
-			}
-			continue;
-		}
-
-		if (occ.key === 'tags' || occ.key === 'tag') {
-			for (const tv of occ.typedValues) {
-				if (tv.kind === 'text') {
-					const stripped = stripTagHash(tv.value);
-					if (stripped) {
-						tagSet.add(stripped);
-						tagLocations.push({
-							tag: stripped,
-							source: occ.source,
-							origin: occOrigin,
-						});
-					}
-				}
-			}
-			continue;
-		}
 
 		const propKey = occ.rawKey.trim();
 		if (
@@ -546,6 +581,7 @@ export function normalizeObsidianMetadata(
 	}
 
 	const aliases = Array.from(aliasSet);
+	const cssclasses = Array.from(cssclassSet);
 
 	for (const t of cache?.tags ?? []) {
 		const stripped = stripTagHash(t.tag);
@@ -564,6 +600,7 @@ export function normalizeObsidianMetadata(
 		text: h.heading,
 		level: (Number.isFinite(h.level) ? Math.min(6, Math.max(1, Math.trunc(h.level))) : 1) as
 			1 | 2 | 3 | 4 | 5 | 6,
+		origin: originResolver.forHeading(h.heading),
 	}));
 
 	const links: NormalizedLink[] = [
@@ -597,9 +634,16 @@ export function normalizeObsidianMetadata(
 		),
 	);
 
-	const blocks = Object.values(cache?.blocks ?? {})
-		.map((b) => b.id.replace(/^\^+/, ''))
-		.filter((id) => id.length > 0);
+	const blocks: NormalizedBlock[] = [];
+	for (const b of Object.values(cache?.blocks ?? {})) {
+		const cleanedId = b.id.replace(/^\^+/, '');
+		if (cleanedId.length > 0) {
+			blocks.push({
+				id: cleanedId,
+				origin: originResolver.forBlock(cleanedId),
+			});
+		}
+	}
 
 	const size = tfile.stat.size === 0 ? 0 : tfile.stat.size;
 
@@ -622,6 +666,7 @@ export function normalizeObsidianMetadata(
 		aliasLocations,
 		tags,
 		tagLocations,
+		cssclasses,
 		headings,
 		links,
 		embeds,

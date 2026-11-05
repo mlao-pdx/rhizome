@@ -23,7 +23,14 @@ import { printableExecutableAstArb } from '../support/search-arbitraries';
 import { printAST } from '../support/search-printer';
 
 const PINNED_REF_MS = Date.parse('2026-10-22T15:30:00.000Z');
-const BUILTIN_PROPERTY_KEYS = new Set(['alias', 'aliases', 'tag', 'tags']);
+const BUILTIN_PROPERTY_KEYS = new Set([
+	'alias',
+	'aliases',
+	'tag',
+	'tags',
+	'cssclass',
+	'cssclasses',
+]);
 const VALID_PROPERTY_TYPES: readonly ObsidianPropertyType[] = [
 	'text',
 	'multitext',
@@ -31,7 +38,6 @@ const VALID_PROPERTY_TYPES: readonly ObsidianPropertyType[] = [
 	'checkbox',
 	'date',
 	'datetime',
-	'tags',
 ];
 
 interface MockNoteSpec {
@@ -349,6 +355,7 @@ describe('Vault Query Runner Property Invariants', () => {
 									'aliasLocations',
 									'tags',
 									'tagLocations',
+									'cssclasses',
 									'headings',
 									'links',
 									'embeds',

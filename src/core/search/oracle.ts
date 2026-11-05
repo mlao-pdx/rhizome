@@ -3,7 +3,11 @@ import { coerceHostScalarForProperty, resolveThisReference } from './host-refere
 import { testRegex } from './literals';
 import { getInternalFileEpochMs } from './metadata-normalizer';
 import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
-import { hierarchicalTagMatch, normalizeTagBody, substringStringMatch } from './scopes';
+import {
+	normalizeScopeComparisonOperands,
+	scopeTargetsMatchComparison,
+	substringStringMatch,
+} from './scopes';
 import { compareDateIntervals, parseTemporalExpr } from './temporal';
 import {
 	isVirtualFileKey,
@@ -174,9 +178,6 @@ function evalColonExprOnEntry(
 		case 'VALUE_LEAF': {
 			if (expr.matcher.kind === 'regex') {
 				if (propType === 'checkbox' || entry.kind === 'checkbox') return false;
-				if (propType === 'tags') {
-					return entry.kind === 'text' && testRegex(entry.value, expr.matcher);
-				}
 				const target = entry.kind === 'text' ? entry.value : entry.raw;
 				return testRegex(target, expr.matcher);
 			}
@@ -199,11 +200,6 @@ function evalColonExprOnEntry(
 							return (
 								(entry.kind === 'date' || entry.kind === 'datetime') &&
 								compareDateIntervals(entry.interval, '=', coerced.rhsInterval)
-							);
-						case 'tags':
-							return (
-								entry.kind === 'text' &&
-								hierarchicalTagMatch(entry.value, coerced.rhsRaw)
 							);
 						case 'text':
 							return (
@@ -246,8 +242,6 @@ function evalColonExprOnEntry(
 					}
 					return compareDateIntervals(entry.interval, '=', res.interval);
 				}
-				case 'tags':
-					return entry.kind === 'text' && hierarchicalTagMatch(entry.value, rhsRaw);
 				case 'text':
 				case 'multitext':
 					return entry.kind === 'text' && substringStringMatch(entry.value, rhsRaw);
@@ -305,27 +299,6 @@ function evalPropertyEntry(
 				case 'temporal': {
 					if (entry.kind !== 'date' && entry.kind !== 'datetime') return false;
 					return compareDateIntervals(entry.interval, op, coerced.rhsInterval);
-				}
-				case 'tags': {
-					if (entry.kind !== 'text') return false;
-					const a = normalizeTagBody(entry.value);
-					const b = coerced.rhsTag;
-					switch (op) {
-						case '=':
-							return a === b;
-						case '!=':
-							return a !== b;
-						case '<':
-							return a < b;
-						case '>':
-							return a > b;
-						case '<=':
-							return a <= b;
-						case '>=':
-							return a >= b;
-						default:
-							return false;
-					}
 				}
 				case 'text': {
 					if (entry.kind !== 'text') return false;
@@ -398,9 +371,8 @@ function evalPropertyEntry(
 			return compareDateIntervals(entry.interval, op, res.interval);
 		}
 		case 'text': {
-			const a =
-				propType === 'tags' ? normalizeTagBody(entry.value) : entry.value.toLowerCase();
-			const b = propType === 'tags' ? normalizeTagBody(rhsRaw) : rhsRaw.toLowerCase();
+			const a = entry.value.toLowerCase();
+			const b = rhsRaw.toLowerCase();
 			switch (op) {
 				case '=':
 					return a === b;
@@ -448,7 +420,24 @@ function evalAstNode(
 					: resolvedConfig.getScope(ast.scope);
 			if (!def) throw new Error(`Unresolved scope in AST: ${ast.scope}`);
 			const targets = def.extract(doc);
-			return targets.some((target) => evalValueExprOnTarget(target, ast.expr, def, hostDoc));
+			const op = ast.operator ?? ':';
+			if (op === ':') {
+				return targets.some((target) =>
+					evalValueExprOnTarget(target, ast.expr, def, hostDoc),
+				);
+			}
+			if (ast.expr.type !== 'VALUE_LEAF' || ast.expr.matcher.kind === 'regex') return false;
+			const canonical = def.canonicalName;
+			const rawValues =
+				ast.expr.matcher.kind === 'this'
+					? resolveThisReference(hostDoc, ast.expr.matcher.segments).values.map(String)
+					: [ast.expr.matcher.value];
+			return scopeTargetsMatchComparison(
+				canonical,
+				targets,
+				op,
+				normalizeScopeComparisonOperands(canonical, rawValues),
+			);
 		}
 		case 'PROPERTY_FILTER': {
 			const lowerKey = ast.key.trim().toLowerCase();

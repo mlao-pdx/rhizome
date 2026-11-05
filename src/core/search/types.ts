@@ -1,5 +1,5 @@
 export type ObsidianPropertyType =
-	'text' | 'multitext' | 'number' | 'checkbox' | 'date' | 'datetime' | 'tags';
+	'text' | 'multitext' | 'number' | 'checkbox' | 'date' | 'datetime';
 
 export const VALID_PROPERTY_TYPES_LIST: readonly ObsidianPropertyType[] = Object.freeze([
 	'text',
@@ -8,13 +8,27 @@ export const VALID_PROPERTY_TYPES_LIST: readonly ObsidianPropertyType[] = Object
 	'checkbox',
 	'date',
 	'datetime',
-	'tags',
 ]);
 
 const PRIVATE_VALID_PROPERTY_TYPES = new Set<string>(VALID_PROPERTY_TYPES_LIST);
 
 export function isValidPropertyType(val: unknown): val is ObsidianPropertyType {
 	return typeof val === 'string' && PRIVATE_VALID_PROPERTY_TYPES.has(val);
+}
+
+const SYSTEM_SCOPE_PROPERTY_KEYS: ReadonlyMap<string, 'tag' | 'aliases' | 'cssclasses'> = new Map([
+	['tag', 'tag'],
+	['tags', 'tag'],
+	['alias', 'aliases'],
+	['aliases', 'aliases'],
+	['cssclass', 'cssclasses'],
+	['cssclasses', 'cssclasses'],
+]);
+
+export function getSystemScopeForPropertyKey(
+	lowerKey: string,
+): 'tag' | 'aliases' | 'cssclasses' | undefined {
+	return SYSTEM_SCOPE_PROPERTY_KEYS.get(lowerKey.trim().toLowerCase());
 }
 
 export const VIRTUAL_FILE_KEYS_LIST: readonly string[] = Object.freeze([
@@ -97,7 +111,7 @@ export type DateParseResult =
  * Coercing a value for target type `T` MUST ONLY produce:
  * - `{ kind: 'null' }` (when input is `null` or `undefined`)
  * - `{ kind: 'invalid', raw, expectedType: T, reason, hint }` (when input is incompatible with `T`)
- * - `{ kind: 'text' }` (when `T` is `'text' | 'multitext' | 'tags'`)
+ * - `{ kind: 'text' }` (when `T` is `'text' | 'multitext'`)
  * - `{ kind: T }` (when `T` is `'number' | 'checkbox' | 'date' | 'datetime'`)
  */
 export type TypedPropertyValue =
@@ -168,6 +182,12 @@ export interface NormalizedFileInfo {
 export interface NormalizedHeading {
 	text: string;
 	level: 1 | 2 | 3 | 4 | 5 | 6;
+	origin: string;
+}
+
+export interface NormalizedBlock {
+	id: string;
+	origin: string;
 }
 
 export interface NormalizedLink {
@@ -207,10 +227,11 @@ export interface NormalizedDocument {
 	aliasLocations: NormalizedAliasLocation[]; // Full occurrence stream preserving authored casing, duplicates, and order (frontmatter -> inline)
 	tags: string[]; // Authored-case, '#'-stripped, deduplicated, sorted set of tags across all occurrences
 	tagLocations: NormalizedTagLocation[]; // Full occurrence stream preserving authored casing, duplicates, and order (frontmatter -> inline)
+	cssclasses: string[];
 	headings: NormalizedHeading[];
 	links: NormalizedLink[]; // Outgoing links (frontmatterLinks + inline links, excluding embeds)
 	embeds: NormalizedLink[]; // Outgoing embeds
-	blocks: string[]; // Authored-case block IDs with any leading '^' stripped
+	blocks: NormalizedBlock[];
 	propertyOccurrences: PropertyOccurrence[]; // Cache-level occurrence stream
 	propertyKeys: string[]; // Exact first-seen order of trimmed authored property keys
 	properties: Record<string, unknown>; // Null-prototype O(1) lookup map with authored keys and Collision Resolution Rule
@@ -277,10 +298,13 @@ export type ValueExprAST =
 	  }
 	| { readonly type: 'VALUE_LEAF'; readonly matcher: LeafMatcher; readonly span?: SourceSpan };
 
+export type ScopeOperator = ':' | '=' | '!=' | '<' | '>' | '<=' | '>=';
+
 export interface ScopedFilterNode {
 	readonly type: 'SCOPED_FILTER';
 	readonly scope: string; // Trimmed canonicalName from ResolvedEngineConfig
 	readonly rawScope: string; // Authored scope token text, or '#' when lowered from TagShorthand
+	readonly operator?: ScopeOperator;
 	readonly expr: ValueExprAST;
 	readonly span?: SourceSpan;
 }

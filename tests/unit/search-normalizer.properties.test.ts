@@ -362,7 +362,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						return;
 					}
 
-					if (propType === 'text' || propType === 'multitext' || propType === 'tags') {
+					if (propType === 'text' || propType === 'multitext') {
 						expect(tv.kind).toBe('text');
 					} else {
 						expect(tv.kind).toBe(propType);
@@ -381,8 +381,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 				meeting: 'datetime',
 				done: 'checkbox',
 				status: 'text',
-				tags: 'tags',
-				aliases: 'multitext',
+				category: 'multitext',
 			},
 		});
 		if (!configRes.ok) throw new Error('Expected valid config');
@@ -575,38 +574,25 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					}
 					expect(doc.properties['tags']).toBeUndefined();
 					expect(doc.propertyKeys).not.toContain('tags');
-					expect(doc.propertyOccurrences.find((o) => o.key === 'tags')?.rawValue).toEqual(
-						expectedFmTags,
-					);
-					for (const occ of doc.propertyOccurrences) {
-						if (occ.propertyType === 'tags') {
-							const rawList = Array.isArray(occ.rawValue)
-								? occ.rawValue
-								: [occ.rawValue];
-							for (const item of rawList) {
-								if (typeof item === 'string') {
-									expect(item.length).toBeGreaterThan(0);
-									expect(item.startsWith('#')).toBe(false);
-								}
-							}
-						}
-					}
+					expect(doc.propertyOccurrences.find((o) => o.key === 'tags')).toBeUndefined();
 
-					// 2. headings: level is always an integer in 1..6
+					// 2. headings: level is always an integer in 1..6 and origin is a valid WikiLink
 					for (const h of doc.headings) {
 						expect(Number.isInteger(h.level)).toBe(true);
 						expect(h.level).toBeGreaterThanOrEqual(1);
 						expect(h.level).toBeLessThanOrEqual(6);
+						expect(h.origin.startsWith('[[Notes/Doc.md')).toBe(true);
 					}
 
-					// 3. blocks: non-empty, no leading '^', preserves exact casing from BlockCache.id
-					const expectedBlocks = Object.values(blocks)
+					// 3. blocks: non-empty, no leading '^', preserves exact casing from BlockCache.id, and includes origin
+					const expectedBlockIds = Object.values(blocks)
 						.map((b) => b.id.replace(/^\^+/, ''))
 						.filter((id) => id.length > 0);
-					expect(doc.blocks).toEqual(expectedBlocks);
+					expect(doc.blocks.map((b) => b.id)).toEqual(expectedBlockIds);
 					for (const b of doc.blocks) {
-						expect(b.length).toBeGreaterThan(0);
-						expect(b.startsWith('^')).toBe(false);
+						expect(b.id.length).toBeGreaterThan(0);
+						expect(b.id.startsWith('^')).toBe(false);
+						expect(b.origin.startsWith('[[Notes/Doc.md')).toBe(true);
 					}
 
 					// 4. links & embeds: self-link vs target+subpath decomposition
@@ -634,14 +620,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 	it('Virtual vs User Property Type Resolution Invariant: query virtual keys override registry while user properties ignore virtual keys', async () => {
 		const registryArb: fc.Arbitrary<PropertyTypeRegistry> = fc.dictionary(
 			fc.oneof(
-				fc.constantFrom(
-					...VIRTUAL_FILE_KEYS_LIST,
-					'tags',
-					'tag',
-					'aliases',
-					'alias',
-					'score',
-				),
+				fc.constantFrom(...VIRTUAL_FILE_KEYS_LIST, 'score'),
 				fc.string({ minLength: 1, maxLength: 12 }),
 			),
 			propTypeArb,
@@ -649,7 +628,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 		);
 
 		const keyArb = fc.oneof(
-			fc.constantFrom(...VIRTUAL_FILE_KEYS_LIST, 'tags', 'tag', 'aliases', 'alias', 'score'),
+			fc.constantFrom(...VIRTUAL_FILE_KEYS_LIST, 'score'),
 			fc.string({ minLength: 1, maxLength: 12 }),
 		);
 
@@ -676,11 +655,6 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					expect(userType).toBe(expectedUserType);
 				} else {
 					expect(queryType).toBe(userType);
-					if (lowerKey === 'tags' || lowerKey === 'tag') {
-						expect(userType).toBe('tags');
-					} else if (lowerKey === 'aliases' || lowerKey === 'alias') {
-						expect(userType).toBe('multitext');
-					}
 				}
 			}),
 		);

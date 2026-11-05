@@ -93,10 +93,10 @@ PropertyFilter ::= "[" PropertyKey ( ":" ( CompOp ValueLeaf | ValueNotExpr )? )?
 
 ### `scopedOperator`
 
-Scoped filter operator (`tag:`, `file:`, `path:`, `content:`, `headings:`, `links:`, or registered custom scopes).
+Scoped filter operator (`tag:`, `file:`, `path:`, `ext:`, `aliases:`, `cssclasses:`, `headings:`, `links:`, `embeds:`, `blocks:`, or registered custom scopes), supporting default colon matching (`scope: expr`) and comparison operators (`scope: = leaf`, `scope: != leaf`, etc.).
 
 ```ebnf
-ScopedOperator ::= ScopeName ":" ValueNotExpr
+ScopedOperator ::= ScopeName ":" ( CompOp ValueLeaf | ValueNotExpr )
 ```
 
 ![scopedOperator](./assets/scopedOperator.svg)
@@ -171,10 +171,10 @@ TagShorthand ::= TagLiteral
 
 ### `valueLeaf`
 
-Leaf value on the right-hand side of `:`, comparison operators (`=`, `!=`, `<`, `<=`, `>`, `>=`), or inside value-level boolean expressions (`ValueNotExpr`), including negative numbers (`-10.5`) and hyphen-prefixed identifiers (`-draft`).
+Leaf value on the right-hand side of `:`, comparison operators (`=`, `!=`, `<`, `<=`, `>`, `>=`), or inside value-level boolean expressions (`ValueNotExpr`), including `@this.<path>` host references, negative numbers (`-10.5`), and hyphen-prefixed identifiers (`-draft`).
 
 ```ebnf
-ValueLeaf ::= QuotedString | RegexLiteral | DateTimeLiteral | TagLiteral | Identifier
+ValueLeaf ::= QuotedString | RegexLiteral | ThisReference | DateTimeLiteral | TagLiteral | Identifier
 ```
 
 ![valueLeaf](./assets/valueLeaf.svg)

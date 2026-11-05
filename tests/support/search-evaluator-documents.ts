@@ -142,7 +142,7 @@ export function evaluatorConfig(timeZone: string): ResolvedEngineConfig {
 			sprint: 'date',
 			status: 'text',
 			labels: 'multitext',
-			topics: 'tags',
+			topics: 'multitext',
 			done: 'checkbox',
 		},
 		customScopes: [

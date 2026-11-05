@@ -89,7 +89,14 @@ const BUILT_IN_SCOPE_NAMES: ReadonlySet<string> = (() => {
 	return set;
 })();
 
-const BUILT_IN_PROP_KEYS: ReadonlySet<string> = new Set(['tag', 'tags', 'alias', 'aliases']);
+const BUILT_IN_PROP_KEYS: ReadonlySet<string> = new Set([
+	'tag',
+	'tags',
+	'alias',
+	'aliases',
+	'cssclass',
+	'cssclasses',
+]);
 
 const RELATIVE_DATE_ANCHOR_RE =
 	/^@(?:now|today|yesterday|tomorrow|(?:last|this|next)(?:day|week|month|quarter|year))(?:([+-])(\d+)(d?))?$/i;
@@ -227,7 +234,7 @@ function redactRegexTokenImage(image: string): string {
  *   falls back directly to `redactSensitiveText(query)`.
  * - When `parseQuery(query)` succeeds, preserves Rhizome query grammar syntax
  *   (boolean operators, parens/brackets, comparison operators, built-in scope names,
- *   virtual/built-in property keys, relative `@` date anchors, and regex flags/escapes)
+ *   virtual property and reserved system keys, relative `@` date anchors, and regex flags/escapes)
  *   and masks user-supplied identifiers, property keys, tags, strings, and numbers.
  */
 export function redactQuerySyntax(query: string): string {

@@ -12,6 +12,7 @@ import type {
 	PropertyFilterNode,
 	PropertyOperator,
 	ScopeDefinition,
+	ScopeOperator,
 	SearchAST,
 	SearchDiagnostic,
 	SourceSpan,
@@ -407,6 +408,18 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 			const scopeTok = asTokens(scopeNameNode.children.Identifier)[0]!;
 			const rawScope = scopeTok.image;
 			const scope = resolveBuiltInScopeCanonicalName(rawScope);
+			const compOp = asTokens(scoped.children.CompOp)[0];
+			if (compOp) {
+				const rhs = lowerValueLeaf(asNodes(scoped.children.valueLeaf)[0]!);
+				return {
+					type: 'SCOPED_FILTER',
+					scope,
+					rawScope,
+					operator: compOp.image as ScopeOperator,
+					expr: rhs.expr,
+					span: mergeSpans(tokenToSpan(scopeTok), rhs.span),
+				};
+			}
 			const rhs = lowerValueNotExpr(asNodes(scoped.children.valueNotExpr)[0]!);
 			return {
 				type: 'SCOPED_FILTER',

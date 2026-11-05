@@ -210,9 +210,9 @@ const RULE_METADATA = {
 			'Bracketed frontmatter or virtual file property filter (`[key]` key-presence check, `[key:]` empty/no-value check, `[key: value]` colon match, or `[key: >= value]` comparison).',
 	},
 	scopedOperator: {
-		ebnf: 'ScopedOperator ::= ScopeName ":" ValueNotExpr',
+		ebnf: 'ScopedOperator ::= ScopeName ":" ( CompOp ValueLeaf | ValueNotExpr )',
 		description:
-			'Scoped filter operator (`tag:`, `file:`, `path:`, `content:`, `headings:`, `links:`, or registered custom scopes).',
+			'Scoped filter operator (`tag:`, `file:`, `path:`, `ext:`, `aliases:`, `cssclasses:`, `headings:`, `links:`, `embeds:`, `blocks:`, or registered custom scopes), supporting default colon matching (`scope: expr`) and comparison operators (`scope: = leaf`, `scope: != leaf`, etc.).',
 	},
 	valueOrExpr: {
 		ebnf: 'ValueOrExpr ::= ValueAndExpr ( "OR" ValueAndExpr )*',
@@ -245,9 +245,9 @@ const RULE_METADATA = {
 			'Top-level `#tag` shorthand (e.g. `#work/urgent`), lowered identically to `tag:#work/urgent`.',
 	},
 	valueLeaf: {
-		ebnf: 'ValueLeaf ::= QuotedString | RegexLiteral | DateTimeLiteral | TagLiteral | Identifier',
+		ebnf: 'ValueLeaf ::= QuotedString | RegexLiteral | ThisReference | DateTimeLiteral | TagLiteral | Identifier',
 		description:
-			'Leaf value on the right-hand side of `:`, comparison operators (`=`, `!=`, `<`, `<=`, `>`, `>=`), or inside value-level boolean expressions (`ValueNotExpr`), including negative numbers (`-10.5`) and hyphen-prefixed identifiers (`-draft`).',
+			'Leaf value on the right-hand side of `:`, comparison operators (`=`, `!=`, `<`, `<=`, `>`, `>=`), or inside value-level boolean expressions (`ValueNotExpr`), including `@this.<path>` host references, negative numbers (`-10.5`), and hyphen-prefixed identifiers (`-draft`).',
 	},
 };
 

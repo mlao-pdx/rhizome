@@ -88,7 +88,7 @@ export const scopeArb = fc.constantFrom(
 	'block',
 	'task',
 );
-export const colonPropertyArb = fc.constantFrom('status', 'labels', 'topics', 'tags', 'aliases');
+export const colonPropertyArb = fc.constantFrom('status', 'labels', 'topics');
 export const temporalLiteralArb = fc.constantFrom(
 	'2026',
 	'2026-10',
@@ -147,8 +147,6 @@ const textComparisonArb = fc
 			'status',
 			'labels',
 			'topics',
-			'tags',
-			'aliases',
 			'unknown',
 			...VIRTUAL_FILE_KEYS_LIST.filter(
 				(key) => !['file.modified', 'file.created', 'file.size'].includes(key),
@@ -179,8 +177,6 @@ const existsArb = fc
 			'status',
 			'labels',
 			'topics',
-			'tags',
-			'aliases',
 			'done',
 			'unknown',
 			...VIRTUAL_FILE_KEYS_LIST,

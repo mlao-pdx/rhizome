@@ -1,18 +1,21 @@
 import { containsRegexLeaf } from './ast-utils';
 import { coerceHostScalarForProperty, resolveThisReference } from './host-reference';
+import { formatScopeRhsDisplay } from './linter';
 import { validateRegexLiteral } from './literals';
 import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
 import { parseTemporalExpr } from './temporal';
-import type {
-	LeafMatcher,
-	NormalizedDocument,
-	ObsidianPropertyType,
-	PropertyFilterNode,
-	ResolvedEngineConfig,
-	SearchAST,
-	SearchDiagnostic,
-	SourceSpan,
-	ValueExprAST,
+import {
+	getSystemScopeForPropertyKey,
+	type LeafMatcher,
+	type NormalizedDocument,
+	type ObsidianPropertyType,
+	type PropertyFilterNode,
+	type ResolvedEngineConfig,
+	type ScopedFilterNode,
+	type SearchAST,
+	type SearchDiagnostic,
+	type SourceSpan,
+	type ValueExprAST,
 } from './types';
 
 export interface ValidationResult {
@@ -205,7 +208,6 @@ function validateComparisonLeaf(
 		}
 		case 'text':
 		case 'multitext':
-		case 'tags':
 			return true;
 	}
 }
@@ -222,6 +224,7 @@ export function validateQueryAST(
 ): ValidationResult {
 	const diagnostics: SearchDiagnostic[] = [];
 	const invalidRegexPropNodes = new Set<PropertyFilterNode>(initialInvalidPropertyNodes);
+	const invalidRegexScopedNodes = new Set<ScopedFilterNode>();
 	const invalidPropertyNodes = new Set<PropertyFilterNode>(initialInvalidPropertyNodes);
 
 	// Step 2: Validate every RegexLiteral leaf first (short-circuiting Step 4 on invalid regex in PropertyFilterNode)
@@ -229,9 +232,17 @@ export function validateQueryAST(
 		switch (node.type) {
 			case 'MATCH_ALL':
 				return;
-			case 'SCOPED_FILTER':
-				validateRegexLeavesInValueExpr(node.expr, node.span ?? null, diagnostics);
+			case 'SCOPED_FILTER': {
+				const hadInvalid = validateRegexLeavesInValueExpr(
+					node.expr,
+					node.span ?? null,
+					diagnostics,
+				);
+				if (hadInvalid) {
+					invalidRegexScopedNodes.add(node);
+				}
 				return;
+			}
 			case 'PROPERTY_FILTER':
 				if (node.valueExpr) {
 					const hadInvalid = validateRegexLeavesInValueExpr(
@@ -270,7 +281,20 @@ export function validateQueryAST(
 						});
 						return node;
 					}
-					if (hostDoc !== undefined) {
+					const op = node.operator ?? ':';
+					if (
+						op !== ':' &&
+						!invalidRegexScopedNodes.has(node) &&
+						containsRegexLeaf(node.expr)
+					) {
+						diagnostics.push({
+							code: 'ERROR_INVALID_OPERATOR_FOR_TYPE',
+							severity: 'error',
+							issue: `Operator "${op}" cannot be used with ${scopeDef.canonicalName}/regex.`,
+							hint: null,
+							span: node.span ?? null,
+						});
+					} else if (hostDoc !== undefined) {
 						for (const leafNode of collectValueExprLeaves(node.expr)) {
 							if (
 								leafNode.matcher.kind === 'this' &&
@@ -297,6 +321,7 @@ export function validateQueryAST(
 							type: 'SCOPED_FILTER',
 							scope: scopeDef.canonicalName,
 							rawScope: node.rawScope,
+							...(node.operator !== undefined ? { operator: node.operator } : {}),
 							expr: node.expr,
 							...(node.span ? { span: node.span } : {}),
 						};
@@ -343,6 +368,30 @@ export function validateQueryAST(
 		switch (node.type) {
 			case 'PROPERTY_FILTER': {
 				if (invalidRegexPropNodes.has(node)) return;
+				const systemScope = getSystemScopeForPropertyKey(node.key);
+				if (systemScope !== undefined) {
+					invalidPropertyNodes.add(node);
+					let hint: string;
+					if (node.operator === ':' && node.valueExpr) {
+						hint = `Use "${systemScope}:${formatScopeRhsDisplay(node.valueExpr)}" instead.`;
+					} else if (
+						node.operator !== 'EXISTS' &&
+						node.operator !== 'EMPTY' &&
+						node.valueExpr
+					) {
+						hint = `Use "${systemScope}:${node.operator}${formatScopeRhsDisplay(node.valueExpr)}" instead.`;
+					} else {
+						hint = `Use "${systemScope}:..." instead.`;
+					}
+					diagnostics.push({
+						code: 'SYNTAX_ERROR',
+						severity: 'error',
+						issue: `"${node.key}" is a built-in note scope, not a property.`,
+						hint,
+						span: node.span ?? null,
+					});
+					return;
+				}
 				if (node.operator === 'EXISTS' || node.operator === 'EMPTY' || !node.valueExpr)
 					return;
 

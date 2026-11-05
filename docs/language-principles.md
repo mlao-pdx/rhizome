@@ -78,8 +78,11 @@ query language into a clunky SQL/aggregates engine or forcing users to write
 - **Vault-schema awareness via Obsidian's Property Type Registry:**
   - Comparisons (`<`, `<=`, `>`, `>=`, ranges `..`) should honor the vault's
     configured property types (`number`, `date`, `datetime`, `checkbox`,
-    `text`, `multitext`, `tags`) rather than treating frontmatter as raw
-    strings.
+    `text`, `multitext`) rather than treating frontmatter as raw
+    strings, while Obsidian's reserved system metadata (`tags`, `aliases`,
+    `cssclasses`—along with Rhizome's forgiving normalization of legacy
+    singular keys `tag`, `alias`, `cssclass` and scalar values) is promoted
+    directly to first-class scopes and fields.
 
 ### 7. Judge the Query, Not the Vault
 

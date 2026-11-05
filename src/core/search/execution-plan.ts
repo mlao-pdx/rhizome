@@ -2,7 +2,7 @@ import { collectReferencedPropertyKeys } from './ast-utils';
 import { coerceHostScalarForProperty, resolveThisReference } from './host-reference';
 import { validateRegexLiteral } from './literals';
 import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
-import { normalizeTagBody } from './scopes';
+import { normalizeScopeComparisonOperands } from './scopes';
 import { parseTemporalExpr } from './temporal';
 import type {
 	DateInterval,
@@ -12,6 +12,7 @@ import type {
 	PropertyOperator,
 	ResolvedEngineConfig,
 	ScopeDefinition,
+	ScopeOperator,
 	SearchAST,
 	ValueExprAST,
 } from './types';
@@ -41,7 +42,6 @@ export type CompiledPropertyColonNode =
 	| { readonly type: 'COLON_NUMBER'; readonly rhsNum: number }
 	| { readonly type: 'COLON_CHECKBOX'; readonly rhsBool: boolean }
 	| { readonly type: 'COLON_TEMPORAL'; readonly rhsInterval: DateInterval }
-	| { readonly type: 'COLON_TAG'; readonly rhsRaw: string }
 	| { readonly type: 'COLON_TEXT'; readonly value: string; readonly quoted: boolean };
 
 export type CompiledPropertyComparison =
@@ -52,7 +52,6 @@ export type CompiledPropertyComparison =
 			readonly operator: PropertyOperator;
 			readonly rhsInterval: DateInterval;
 	  }
-	| { readonly kind: 'tags'; readonly operator: PropertyOperator; readonly rhsTag: string }
 	| { readonly kind: 'text'; readonly operator: PropertyOperator; readonly rhsLower: string };
 
 export type CompiledSearchNode =
@@ -67,6 +66,12 @@ export type CompiledSearchNode =
 			readonly type: 'SCOPED_FILTER';
 			readonly scopeDef: ScopeDefinition;
 			readonly expr: CompiledValueExprNode;
+	  }
+	| {
+			readonly type: 'SCOPED_COMPARE';
+			readonly scopeDef: ScopeDefinition;
+			readonly operator: Exclude<ScopeOperator, ':'>;
+			readonly normalizedRhsValues: readonly string[];
 	  }
 	| { readonly type: 'PROPERTY_EXISTS'; readonly lowerKey: string }
 	| { readonly type: 'PROPERTY_EMPTY'; readonly lowerKey: string }
@@ -199,9 +204,6 @@ function compilePropertyColonExpr(
 								rhsInterval: coerced.rhsInterval,
 							});
 							break;
-						case 'tags':
-							children.push({ type: 'COLON_TAG', rhsRaw: coerced.rhsRaw });
-							break;
 						case 'text':
 							children.push({
 								type: 'COLON_TEXT',
@@ -253,8 +255,6 @@ function compilePropertyColonExpr(
 					}
 					return { type: 'COLON_TEMPORAL', rhsInterval: res.interval };
 				}
-				case 'tags':
-					return { type: 'COLON_TAG', rhsRaw };
 				case 'text':
 				case 'multitext':
 					return { type: 'COLON_TEXT', value: rhsRaw, quoted };
@@ -300,9 +300,6 @@ function compilePropertyComparisons(
 						rhsInterval: coerced.rhsInterval,
 					});
 					break;
-				case 'tags':
-					comparisons.push({ kind: 'tags', operator, rhsTag: coerced.rhsTag });
-					break;
 				case 'text':
 					comparisons.push({ kind: 'text', operator, rhsLower: coerced.rhsLower });
 					break;
@@ -341,8 +338,6 @@ function compilePropertyComparisons(
 			}
 			return [{ kind: 'temporal', operator, rhsInterval: res.interval }];
 		}
-		case 'tags':
-			return [{ kind: 'tags', operator, rhsTag: normalizeTagBody(rhsRaw) }];
 		case 'text':
 		case 'multitext':
 			return [{ kind: 'text', operator, rhsLower: rhsRaw.toLowerCase() }];
@@ -377,10 +372,29 @@ function compileSearchNode(
 					? resolvedConfig.getScope('tag')
 					: resolvedConfig.getScope(ast.scope);
 			if (!scopeDef) throw new Error(`Unresolved scope in AST: ${ast.scope}`);
+			const op = ast.operator ?? ':';
+			if (op === ':') {
+				return {
+					type: 'SCOPED_FILTER',
+					scopeDef,
+					expr: compileValueExpr(ast.expr, hostDoc),
+				};
+			}
+			if (ast.expr.type !== 'VALUE_LEAF' || ast.expr.matcher.kind === 'regex') {
+				throw new Error(
+					`Invalid comparison expression for scope "${scopeDef.canonicalName}".`,
+				);
+			}
+			const canonical = scopeDef.canonicalName;
+			const rawValues =
+				ast.expr.matcher.kind === 'this'
+					? resolveThisReference(hostDoc, ast.expr.matcher.segments).values.map(String)
+					: [ast.expr.matcher.value];
 			return {
-				type: 'SCOPED_FILTER',
+				type: 'SCOPED_COMPARE',
 				scopeDef,
-				expr: compileValueExpr(ast.expr, hostDoc),
+				operator: op,
+				normalizedRhsValues: normalizeScopeComparisonOperands(canonical, rawValues),
 			};
 		}
 		case 'PROPERTY_FILTER': {

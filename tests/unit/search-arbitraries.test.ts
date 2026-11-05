@@ -5,8 +5,11 @@ import {
 	evaluateVault,
 	MAX_QUERY_LENGTH,
 	MAX_SYNTACTIC_DEPTH,
+	normalizeAST,
 	oracleEvaluateVault,
+	parseQuery,
 	type SearchAST,
+	type ScopeOperator,
 	type ValueExprAST,
 } from '../../src/core/search';
 import {
@@ -37,6 +40,29 @@ describe('printable executable AST generator', () => {
 			expect(query.length).toBeLessThanOrEqual(MAX_QUERY_LENGTH);
 			expect(computeSyntacticDepth(ast)).toBeLessThanOrEqual(MAX_SYNTACTIC_DEPTH);
 			expect(compileQuery(query, config, REFERENCE_TIME_MS).executable).toBe(true);
+		}
+	});
+
+	it('round-trips scope comparison ASTs through the printer and parser', () => {
+		for (const operator of ['=', '!=', '<', '>', '<=', '>='] as const) {
+			const ast: SearchAST = {
+				type: 'SCOPED_FILTER',
+				scope: 'tag',
+				rawScope: 'tag',
+				operator: operator as ScopeOperator,
+				expr: {
+					type: 'VALUE_LEAF',
+					matcher: { kind: 'string', value: 'work', quoted: false },
+				},
+			};
+			const printed = printAST(ast);
+			expect(printed).toBe(`tag:${operator}work`);
+			const parsed = parseQuery(printed);
+			expect(parsed.diagnostics).toEqual([]);
+			expect(normalizeAST(parsed.ast!)).toEqual(normalizeAST(ast));
+			expect(
+				compileQuery(printed, evaluatorConfig('UTC'), REFERENCE_TIME_MS).executable,
+			).toBe(true);
 		}
 	});
 

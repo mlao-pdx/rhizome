@@ -162,7 +162,19 @@ export class SearchParser extends CstParser {
 	public readonly scopedOperator = this.RULE('scopedOperator', () => {
 		this.SUBRULE(this.scopeName);
 		this.CONSUME(Colon);
-		this.SUBRULE(this.valueNotExpr);
+		this.OR([
+			{
+				ALT: () => {
+					this.CONSUME(CompOp);
+					this.SUBRULE(this.valueLeaf);
+				},
+			},
+			{
+				ALT: () => {
+					this.SUBRULE(this.valueNotExpr);
+				},
+			},
+		]);
 	});
 
 	public readonly valueOrExpr = this.RULE('valueOrExpr', () => {
@@ -289,10 +301,18 @@ function recognitionExceptionToDiagnostic(
 
 		const prevIdx = tokens.findIndex((t) => t.startOffset === prevTok.startOffset);
 		if (prevIdx >= 3) {
-			const scopeTok = tokens[prevIdx - 3];
-			const colonTok = tokens[prevIdx - 2];
+			const hasCompOp = prevIdx >= 4 && tokens[prevIdx - 2]?.tokenType === CompOp;
+			const scopeTok = hasCompOp ? tokens[prevIdx - 4] : tokens[prevIdx - 3];
+			const colonTok = hasCompOp ? tokens[prevIdx - 3] : tokens[prevIdx - 2];
+			const compOpTok = hasCompOp ? tokens[prevIdx - 2] : undefined;
 			const valTok = tokens[prevIdx - 1];
-			const beforeScopeTok = prevIdx >= 4 ? tokens[prevIdx - 4] : undefined;
+			const beforeScopeTok = hasCompOp
+				? prevIdx >= 5
+					? tokens[prevIdx - 5]
+					: undefined
+				: prevIdx >= 4
+					? tokens[prevIdx - 4]
+					: undefined;
 			if (
 				scopeTok?.tokenType === Identifier &&
 				colonTok?.tokenType === Colon &&
@@ -302,11 +322,12 @@ function recognitionExceptionToDiagnostic(
 				scopeTok.startLine === prevTok.startLine
 			) {
 				const scopeName = resolveBuiltInScopeCanonicalName(scopeTok.image);
+				const opPrefix = compOpTok ? compOpTok.image : '';
 				return {
 					code: 'SYNTAX_ERROR',
 					severity: 'error',
-					issue: `"${raw}" is not inside "${scopeName}:"; bare search terms are not supported.`,
-					hint: `Use ${scopeName}:"${valTok.image} ${raw}"`,
+					issue: `"${raw}" is not inside "${scopeName}:${opPrefix}"; bare search terms are not supported.`,
+					hint: `Use ${scopeName}:${opPrefix}"${valTok.image} ${raw}"`,
 					span: mergeSpans(
 						tokenToSpan(scopeTok, fallback, input),
 						tokenToSpan(prevTok, fallback, input),

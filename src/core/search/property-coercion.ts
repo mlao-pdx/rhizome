@@ -16,16 +16,18 @@ export const FORBIDDEN_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Normalized property keys excluded from `doc.propertyKeys` and `doc.properties`
- * (while remaining in `doc.propertyOccurrences` for bracketed filters and diagnostics)
- * because they are already exposed as first-class fields (`tags`, `aliases`) or are
- * internal Rhizome metadata (`◊internalrhizome`).
+ * Normalized property keys excluded from `doc.propertyOccurrences`, `doc.propertyKeys`,
+ * `doc.properties`, and `doc.propertyLocations` because they are promoted to first-class
+ * fields and scopes (`tags`, `aliases`, `cssclasses`) or are internal Rhizome metadata
+ * (`◊internalrhizome`).
  */
 export const OMITTED_PROPERTY_VIEW_KEYS: ReadonlySet<string> = new Set([
 	'tag',
 	'tags',
 	'alias',
 	'aliases',
+	'cssclass',
+	'cssclasses',
 	INTERNAL_RHIZOME_PROPERTY_KEY.toLowerCase(),
 ]);
 
@@ -208,8 +210,7 @@ export function coercePropertyValue(
 		}
 
 		case 'text':
-		case 'multitext':
-		case 'tags': {
+		case 'multitext': {
 			if (val instanceof Date) {
 				if (Number.isNaN(val.getTime())) {
 					return invalidValue('Invalid Date', propType, null);
@@ -240,8 +241,6 @@ export function resolveUserPropertyType(
 	lowerKey: string,
 	normalizedRegistry: Readonly<PropertyTypeRegistry>,
 ): ObsidianPropertyType {
-	if (lowerKey === 'tags' || lowerKey === 'tag') return 'tags';
-	if (lowerKey === 'aliases' || lowerKey === 'alias') return 'multitext';
 	if (Object.prototype.hasOwnProperty.call(normalizedRegistry, lowerKey)) {
 		const found = normalizedRegistry[lowerKey];
 		if (found !== undefined) return found;
@@ -333,7 +332,7 @@ export function mergeKeyValue(
 /**
  * Builds the `propertyKeys` and null-prototype `properties` views from `propertyOccurrences`.
  * Preserves trimmed authored key casing (`rawKey.trim()`), excludes `FORBIDDEN_KEYS` and
- * `OMITTED_PROPERTY_VIEW_KEYS` (`tag`, `tags`, `alias`, `aliases`, `◊internalrhizome`),
+ * `OMITTED_PROPERTY_VIEW_KEYS` (`tag`, `tags`, `alias`, `aliases`, `cssclass`, `cssclasses`, `◊internalrhizome`),
  * defensively copies array values, and merges same-key collisions using the Collision Resolution Rule.
  */
 export function buildPropertiesViews(occurrences: readonly PropertyOccurrence[]): {

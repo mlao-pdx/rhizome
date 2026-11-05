@@ -324,7 +324,6 @@ describe('Invariant: Scope-Property Portability, Operator Gate & Suggested Query
 			score: 'number',
 			priority: 'number',
 			status: 'text',
-			tags: 'tags',
 		},
 		customScopes: [
 			{
@@ -338,8 +337,17 @@ describe('Invariant: Scope-Property Portability, Operator Gate & Suggested Query
 	if (!customConfigRes.ok) throw new Error('Expected valid custom scope config');
 	const configWithCustomScopes = customConfigRes.config;
 
+	const nonSystemScopeNames = configWithCustomScopes
+		.getAllScopeNames()
+		.filter(
+			(name) =>
+				!['tag', 'tags', 'alias', 'aliases', 'cssclass', 'cssclasses'].includes(
+					name.toLowerCase(),
+				),
+		);
+
 	const scopeKeyArb = fc
-		.tuple(fc.constantFrom(...configWithCustomScopes.getAllScopeNames()), fc.boolean())
+		.tuple(fc.constantFrom(...nonSystemScopeNames), fc.boolean())
 		.map(([name, upperCase]) => (upperCase ? name.toUpperCase() : name));
 
 	const rhsValueExprArb: fc.Arbitrary<ValueExprAST> = fc.oneof(
@@ -362,7 +370,6 @@ describe('Invariant: Scope-Property Portability, Operator Gate & Suggested Query
 	);
 
 	const disjointPropKeyArb = fc.constantFrom(
-		'tags',
 		'status',
 		'score',
 		'priority',

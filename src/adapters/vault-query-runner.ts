@@ -9,6 +9,7 @@ import {
 	initEngineConfig,
 	INTERNAL_RHIZOME_CODES,
 	type NormalizedAliasLocation,
+	type NormalizedBlock,
 	type NormalizedDocument,
 	type NormalizedFileInfo,
 	type NormalizedHeading,
@@ -94,10 +95,11 @@ export interface VaultQueryMatch {
 	readonly aliasLocations: NormalizedAliasLocation[];
 	readonly tags: string[];
 	readonly tagLocations: NormalizedTagLocation[];
+	readonly cssclasses: string[];
 	readonly headings: NormalizedHeading[];
 	readonly links: NormalizedLink[];
 	readonly embeds: NormalizedLink[];
-	readonly blocks: string[];
+	readonly blocks: NormalizedBlock[];
 	readonly properties: Record<string, unknown>;
 	readonly propertyLocations: NormalizedPropertyLocation[];
 }
@@ -119,6 +121,7 @@ export function toVaultQueryMatch(doc: NormalizedDocument): VaultQueryMatch {
 		aliasLocations: doc.aliasLocations,
 		tags: doc.tags,
 		tagLocations: doc.tagLocations,
+		cssclasses: doc.cssclasses,
 		headings: doc.headings,
 		links: doc.links,
 		embeds: doc.embeds,

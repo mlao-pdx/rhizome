@@ -408,8 +408,6 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 			'[score: (10 OR 20)]',
 			'[score: /^1\\.5/]',
 			'[done: (true OR false)]',
-			'[tags: #work]',
-			'[tags: work]',
 		]) {
 			const res = compileQuery(validQ, config, PINNED_REF_MS);
 			expect(res.executable).toBe(true);
@@ -437,6 +435,75 @@ describe('Step 4: Property validation & short-circuit precedence', () => {
 		expect(revColon.prepared).toBeNull();
 		expect(revColon.diagnostics).toHaveLength(1);
 		expect(revColon.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
+	});
+});
+
+describe('System metadata scopes and scope comparisons', () => {
+	const config = createStandardConfig();
+
+	it('rejects built-in system metadata keys in property filters with scope fix-it hints', () => {
+		const keys: ReadonlyArray<[key: string, scope: 'tag' | 'aliases' | 'cssclasses']> = [
+			['tag', 'tag'],
+			['tags', 'tag'],
+			['alias', 'aliases'],
+			['aliases', 'aliases'],
+			['cssclass', 'cssclasses'],
+			['cssclasses', 'cssclasses'],
+		];
+		for (const [key, scope] of keys) {
+			for (const query of [
+				`[${key}: work]`,
+				`[${key}: = work]`,
+				`[${key}: != work]`,
+				`[${key}]`,
+			]) {
+				const res = compileQuery(query, config, PINNED_REF_MS);
+				expect(res.executable).toBe(false);
+				expect(res.ast).toBeNull();
+				expect(res.diagnostics[0]).toMatchObject({
+					code: 'SYNTAX_ERROR',
+					severity: 'error',
+					issue: `"${key}" is a built-in note scope, not a property.`,
+				});
+				expect(res.diagnostics[0]?.hint).toContain(`Use "${scope}:`);
+				expect(res.diagnostics[0]?.span).not.toBeNull();
+			}
+		}
+	});
+
+	it('accepts comparison operators on every built-in scope and rejects regex comparisons', () => {
+		for (const query of [
+			'tag: = work',
+			'tag: != work',
+			'tag: < work',
+			'tag: > work',
+			'tag: <= work',
+			'tag: >= work',
+			'aliases: = Alias',
+			'cssclasses: = wide',
+			'ext: = md',
+			'path: = Notes/A.md',
+			'headings: = Overview',
+			'blocks: = b1',
+			'file: = A.md',
+			'file: > 0',
+		]) {
+			const res = compileQuery(query, config, PINNED_REF_MS);
+			expect(res.executable, query).toBe(true);
+			expect(
+				res.diagnostics.filter((d) => d.severity === 'error'),
+				query,
+			).toEqual([]);
+		}
+
+		for (const query of ['tag: = /work/', 'ext: > /md/']) {
+			const res = compileQuery(query, config, PINNED_REF_MS);
+			expect(res.executable, query).toBe(false);
+			expect(
+				res.diagnostics.some((d) => d.code === 'ERROR_INVALID_OPERATOR_FOR_TYPE'),
+				query,
+			).toBe(true);
+		}
 	});
 });
 
@@ -589,14 +656,14 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 	});
 
 	it('emits HINT_PROPERTY_MATCHES_SCOPE on colon property filters matching scope canonical names or aliases', () => {
-		const directRes = compileQuery('[tag: Foo]', config, PINNED_REF_MS);
+		const directRes = compileQuery('[path: Foo]', config, PINNED_REF_MS);
 		expect(directRes.executable).toBe(true);
 		expect(directRes.diagnostics).toHaveLength(1);
 		expect(directRes.diagnostics[0]).toMatchObject({
 			code: 'HINT_PROPERTY_MATCHES_SCOPE',
 			severity: 'hint',
-			issue: 'The property "tag" matches the name of scope "tag".',
-			hint: 'Did you mean "tag:Foo" instead?',
+			issue: 'The property "path" matches the name of scope "path".',
+			hint: 'Did you mean "path:Foo" instead?',
 		});
 		expect(directRes.diagnostics[0]?.span).not.toBeNull();
 
@@ -623,13 +690,13 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 		expect(compoundRes.diagnostics[0]?.span).not.toBeNull();
 
 		const nonColonQueries = [
-			'[tag: < 20]',
-			'[tag: = Foo]',
-			'[tag: != Foo]',
-			'[tag]',
-			'[tag:]',
-			'[tag:""]',
-			'[tags: Foo]',
+			'[path: < 20]',
+			'[path: = Foo]',
+			'[path: != Foo]',
+			'[path]',
+			'[path:]',
+			'[path:""]',
+			'[owner: Foo]',
 		];
 		for (const q of nonColonQueries) {
 			const res = compileQuery(q, config, PINNED_REF_MS);
@@ -747,6 +814,7 @@ describe('Step 6: PreparedQuery & AST deep freeze (Conformance Test 16c)', () =>
 			aliasLocations: [],
 			tags: ['space'],
 			tagLocations: [],
+			cssclasses: [],
 			headings: [],
 			links: [],
 			embeds: [],

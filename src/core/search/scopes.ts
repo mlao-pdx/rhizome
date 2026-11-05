@@ -1,4 +1,4 @@
-import type { NormalizedDocument, ScopeDefinition } from './types';
+import type { NormalizedDocument, ScopeDefinition, ScopeOperator } from './types';
 
 export function substringStringMatch(target: string, queryValue: string): boolean {
 	return target.toLowerCase().includes(queryValue.toLowerCase());
@@ -20,7 +20,7 @@ export function hierarchicalTagMatch(target: string, queryValue: string): boolea
 }
 
 /**
- * The 9 built-in per-note metadata scopes (`file`, `path`, `ext`, `tag`, `aliases`,
+ * The 10 built-in per-note metadata scopes (`file`, `path`, `ext`, `tag`, `aliases`, `cssclasses`,
  * `headings`, `links`, `embeds`, `blocks`). Backlinks and `resolvedLinks` are not supported.
  */
 export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
@@ -60,6 +60,13 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
 			matchString: substringStringMatch,
 		},
 		{
+			canonicalName: 'cssclasses',
+			aliases: Object.freeze(['cssclasses', 'cssclass']),
+			extract: (doc: NormalizedDocument) => doc.cssclasses,
+			matchString: (target: string, queryValue: string) =>
+				target.toLowerCase() === queryValue.toLowerCase(),
+		},
+		{
 			canonicalName: 'headings',
 			aliases: Object.freeze(['headings', 'heading', 'header', 'headers']),
 			extract: (doc: NormalizedDocument) => doc.headings.map((h) => h.text),
@@ -88,7 +95,7 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
 		{
 			canonicalName: 'blocks',
 			aliases: Object.freeze(['blocks', 'block']),
-			extract: (doc: NormalizedDocument) => doc.blocks,
+			extract: (doc: NormalizedDocument) => doc.blocks.map((b) => b.id),
 			matchString: (target: string, queryValue: string) => {
 				const q = queryValue.toLowerCase();
 				const normQ = q.startsWith('^') ? q.slice(1) : q;
@@ -97,3 +104,69 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
 		},
 	].map((s) => Object.freeze(s)),
 );
+
+export function normalizeScopeComparisonOperand(canonicalScope: string, raw: string): string {
+	const scope = canonicalScope.trim().toLowerCase();
+	if (scope === 'tag') {
+		return normalizeTagBody(raw);
+	}
+	if (scope === 'ext') {
+		return raw.replace(/^\./, '').toLowerCase();
+	}
+	if (scope === 'blocks') {
+		return raw.replace(/^\^/, '').toLowerCase();
+	}
+	return raw.toLowerCase();
+}
+
+export function normalizeScopeComparisonOperands(
+	canonicalScope: string,
+	rawValues: readonly string[],
+): readonly string[] {
+	const isTag = canonicalScope.trim().toLowerCase() === 'tag';
+	const normalized: string[] = [];
+	for (const raw of rawValues) {
+		const value = normalizeScopeComparisonOperand(canonicalScope, raw);
+		if (!isTag || value.length > 0) {
+			normalized.push(value);
+		}
+	}
+	return normalized;
+}
+
+export function scopeTargetsMatchComparison(
+	canonicalScope: string,
+	targets: readonly string[],
+	operator: Exclude<ScopeOperator, ':'>,
+	normalizedRhsValues: readonly string[],
+): boolean {
+	if (normalizedRhsValues.length === 0 || targets.length === 0) return false;
+	const isTag = canonicalScope.trim().toLowerCase() === 'tag';
+	for (const target of targets) {
+		const a = normalizeScopeComparisonOperand(canonicalScope, target);
+		if (isTag && a.length === 0) continue;
+		for (const b of normalizedRhsValues) {
+			switch (operator) {
+				case '=':
+					if (a === b) return true;
+					break;
+				case '!=':
+					if (a !== b) return true;
+					break;
+				case '<':
+					if (a < b) return true;
+					break;
+				case '>':
+					if (a > b) return true;
+					break;
+				case '<=':
+					if (a <= b) return true;
+					break;
+				case '>=':
+					if (a >= b) return true;
+					break;
+			}
+		}
+	}
+	return false;
+}

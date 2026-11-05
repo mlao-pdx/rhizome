@@ -22,7 +22,6 @@ function makeConfig(overrides?: Partial<EngineConfig>): ResolvedEngineConfig {
 			done: 'checkbox',
 			status: 'text',
 			reviewers: 'multitext',
-			topics: 'tags',
 		},
 		...overrides,
 	});
@@ -31,7 +30,7 @@ function makeConfig(overrides?: Partial<EngineConfig>): ResolvedEngineConfig {
 }
 
 describe('explain-helpers', () => {
-	it('resolves property type and origin across virtual, built-in, configured, and default fallback keys', () => {
+	it('resolves property type and origin across virtual, configured, and default fallback keys', () => {
 		const cfg = makeConfig();
 		expect(resolvePropertyTypeWithOrigin('file.modified', cfg.propertyTypes)).toEqual({
 			type: 'datetime',
@@ -47,16 +46,6 @@ describe('explain-helpers', () => {
 			type: 'text',
 			origin: 'virtual',
 			originLabel: 'virtual (file.*)',
-		});
-		expect(resolvePropertyTypeWithOrigin('tags', cfg.propertyTypes)).toEqual({
-			type: 'tags',
-			origin: 'built-in',
-			originLabel: 'built-in',
-		});
-		expect(resolvePropertyTypeWithOrigin('aliases', cfg.propertyTypes)).toEqual({
-			type: 'multitext',
-			origin: 'built-in',
-			originLabel: 'built-in',
 		});
 		expect(resolvePropertyTypeWithOrigin('priority', cfg.propertyTypes)).toEqual({
 			type: 'number',
@@ -227,7 +216,7 @@ describe('explainQuery', () => {
 			expect(refSection).toMatch(new RegExp(`^\\[\\^${i}\\]: `, 'm'));
 		}
 		expect(refSection).toContain('title [Half-Open) Interval Comparison Matches');
-		expect(refSection).toContain('[2 <= Criteria < 5)');
+		expect(refSection).toContain('[2026-10-21 <= Criteria < 2026-10-24)');
 	});
 
 	it('resolves temporal windows in the configured timezone and links numbered footnotes', () => {
@@ -340,6 +329,32 @@ describe('explainQuery', () => {
 		expect(badConfigMd).toContain('## Logic Breakdown');
 	});
 
+	it('renders built-in system properties as scope hints instead of untyped properties', () => {
+		const cfg = makeConfig();
+		for (const [key, scope] of [
+			['tags', 'tag'],
+			['aliases', 'aliases'],
+			['cssclasses', 'cssclasses'],
+		] as const) {
+			const md = explainQuery(`[${key}: work]`, cfg, REF_TIME_MS);
+			expect(md).toContain('is a built-in note scope, not a property');
+			expect(md).toContain(`(use \`${scope}:\` instead)`);
+			expect(md).not.toContain('Untyped Property');
+		}
+	});
+
+	it('explains scope comparisons with exact and alphabetical wording', () => {
+		const cfg = makeConfig();
+		const md = explainQuery(
+			'tag: = work AND tag: > alpha AND cssclasses: = wide',
+			cfg,
+			REF_TIME_MS,
+		);
+		expect(md).toContain('equals exact tag `#work` (case-insensitive)');
+		expect(md).toContain('comes alphabetically after tag `#alpha` (case-insensitive)');
+		expect(md).toContain('equals `wide` (case-insensitive)');
+	});
+
 	it('safely fences backticks and special characters in inline code and regex links', () => {
 		const cfg = makeConfig();
 		const md = explainQuery(
@@ -374,6 +389,7 @@ describe('explainQuery', () => {
 			aliasLocations: [],
 			tags: ['alpha', 'beta'],
 			tagLocations: [],
+			cssclasses: [],
 			headings: [],
 			links: [],
 			embeds: [],

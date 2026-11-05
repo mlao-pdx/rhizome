@@ -79,11 +79,11 @@ describe('property-coercion helpers', () => {
 		const config = getStandardConfig();
 		const reg = config.propertyTypes;
 
-		// Built-in special user properties
-		expect(resolveUserPropertyType('tags', reg)).toBe('tags');
-		expect(resolveUserPropertyType('tag', reg)).toBe('tags');
-		expect(resolveUserPropertyType('aliases', reg)).toBe('multitext');
-		expect(resolveUserPropertyType('alias', reg)).toBe('multitext');
+		// System metadata keys are promoted to scopes rather than user properties
+		expect(resolveUserPropertyType('tags', reg)).toBe('text');
+		expect(resolveUserPropertyType('tag', reg)).toBe('text');
+		expect(resolveUserPropertyType('aliases', reg)).toBe('text');
+		expect(resolveUserPropertyType('alias', reg)).toBe('text');
 
 		// Registered user properties
 		expect(resolveUserPropertyType('score', reg)).toBe('number');
@@ -105,10 +105,10 @@ describe('property-coercion helpers', () => {
 		expect(resolveQueryPropertyType('file.ctime', reg)).toBe('text');
 		expect(resolveQueryPropertyType('file.ext', reg)).toBe('text');
 		expect(resolveQueryPropertyType('score', reg)).toBe('number');
-		expect(resolveQueryPropertyType('tags', reg)).toBe('tags');
+		expect(resolveQueryPropertyType('tags', reg)).toBe('text');
 	});
 
-	it('coerces values across all 7 ObsidianPropertyType types and shares frozen singletons', () => {
+	it('coerces values across all 6 ObsidianPropertyType types and shares frozen singletons', () => {
 		const null1 = coercePropertyValue(null, 'text', 'UTC');
 		const null2 = coercePropertyValue(undefined, 'number', 'UTC');
 		const null3 = coercePropertyValue('', 'date', 'UTC');
@@ -173,13 +173,15 @@ describe('property-coercion helpers', () => {
 			hint: 'Calendar date "2011-12-30" was skipped by a timezone transition in "Pacific/Apia".',
 		});
 
-		// text / multitext / tags
+		// text / multitext
 		expect(coercePropertyValue(42, 'text', 'UTC')).toEqual({ kind: 'text', value: '42' });
 		expect(coercePropertyValue(true, 'multitext', 'UTC')).toEqual({
 			kind: 'text',
 			value: 'true',
 		});
-		expect(coercePropertyValue(new Date('2026-01-01T00:00:00.000Z'), 'tags', 'UTC')).toEqual({
+		expect(
+			coercePropertyValue(new Date('2026-01-01T00:00:00.000Z'), 'multitext', 'UTC'),
+		).toEqual({
 			kind: 'text',
 			value: '2026-01-01T00:00:00.000Z',
 		});
@@ -433,12 +435,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		expect(doc.properties['alias']).toBeUndefined();
 		expect(doc.propertyKeys).toEqual([]);
 		expect(doc.propertyLocations).toEqual([]);
-		expect(doc.propertyOccurrences.find((o) => o.key === 'tags')?.rawValue).toEqual([
-			'Project',
-			'work/urgent',
-			'work/urgent',
-		]);
-		expect(doc.propertyOccurrences.find((o) => o.key === 'tag')?.rawValue).toBe('extra-tag');
+		expect(doc.propertyOccurrences).toEqual([]);
 		expect(doc.aliases).toEqual(['First Alias', '42', 'Second Alias']);
 		expect(doc.aliasLocations).toEqual([
 			{ alias: 'First Alias', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
@@ -446,9 +443,9 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			{ alias: 'Second Alias', source: 'inline', origin: '[[RootNote.md|RootNote]]' },
 		]);
 		expect(doc.headings).toEqual([
-			{ text: 'H1', level: 1 },
-			{ text: 'H6', level: 6 },
-			{ text: 'H3', level: 3 },
+			{ text: 'H1', level: 1, origin: '[[RootNote.md#H1|RootNote]]' },
+			{ text: 'H6', level: 6, origin: '[[RootNote.md#H6|RootNote]]' },
+			{ text: 'H3', level: 3, origin: '[[RootNote.md#H3|RootNote]]' },
 		]);
 		expect(doc.links).toEqual([
 			{
@@ -472,7 +469,10 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				origin: '[[RootNote.md|RootNote]]',
 			},
 		]);
-		expect(doc.blocks).toEqual(['Block-One', 'block-two']);
+		expect(doc.blocks).toEqual([
+			{ id: 'Block-One', origin: '[[RootNote.md#^Block-One|RootNote]]' },
+			{ id: 'block-two', origin: '[[RootNote.md#^block-two|RootNote]]' },
+		]);
 		expect(doc.propertyKeys).not.toContain('position');
 
 		const docEmptyScalarTag = normalizeObsidianMetadata(
@@ -483,7 +483,27 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		expect(docEmptyScalarTag.propertyKeys).toEqual([]);
 		expect(docEmptyScalarTag.properties['tags']).toBeUndefined();
 		expect(docEmptyScalarTag.properties['◊internalrhizome']).toBeUndefined();
-		expect(docEmptyScalarTag.propertyOccurrences[0]?.typedValues).toEqual([{ kind: 'null' }]);
+		expect(docEmptyScalarTag.propertyOccurrences).toEqual([]);
+	});
+
+	it('promotes frontmatter cssclasses into deduplicated document-level cssclasses', () => {
+		const config = getStandardConfig();
+		const doc = normalizeObsidianMetadata(
+			makeFile(),
+			{
+				frontmatter: {
+					cssclasses: ['wide-page', 'cards wide-page'],
+					cssclass: 'legacy',
+				},
+			},
+			config,
+		);
+
+		expect(doc.cssclasses).toEqual(['wide-page', 'cards', 'legacy']);
+		expect(doc.properties['cssclasses']).toBeUndefined();
+		expect(doc.properties['cssclass']).toBeUndefined();
+		expect(doc.propertyOccurrences).toEqual([]);
+		expect(doc.propertyLocations).toEqual([]);
 	});
 
 	it('validates file stats eagerly and throws on out-of-range or non-integer stats', () => {
@@ -573,7 +593,9 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		cacheHeadings[0]!.heading = 'Mutated Heading';
 
 		expect(doc.tags).toEqual(['initial']);
-		expect(doc.headings).toEqual([{ text: 'Initial Heading', level: 2 }]);
+		expect(doc.headings).toEqual([
+			{ text: 'Initial Heading', level: 2, origin: '[[Notes/A.md#Initial Heading|A]]' },
+		]);
 	});
 
 	it('produces plain POJO data descriptors (no getters) and supports structuredClone without pre-warming', () => {

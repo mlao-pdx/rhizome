@@ -216,12 +216,15 @@ class XxHash64Accumulator {
 			this.updateString(loc.origin);
 		}
 
+		this.updateStringArray(match.cssclasses);
+
 		const headings = match.headings;
 		this.updateTag(0x24, headings.length);
 		for (let i = 0; i < headings.length; i++) {
 			const h = headings[i]!;
 			this.updateString(h.text);
 			this.updateU32(h.level);
+			this.updateString(h.origin);
 		}
 
 		const links = match.links;
@@ -258,7 +261,13 @@ class XxHash64Accumulator {
 			this.updateString(e.origin);
 		}
 
-		this.updateStringArray(match.blocks);
+		const blocks = match.blocks;
+		this.updateTag(0x28, blocks.length);
+		for (let i = 0; i < blocks.length; i++) {
+			const b = blocks[i]!;
+			this.updateString(b.id);
+			this.updateString(b.origin);
+		}
 		this.updateValue(match.properties);
 
 		const propLocs = match.propertyLocations;

@@ -78,7 +78,7 @@ compile time:
 
 - **Wrap all vault-derived strings in `‼️...‼️`** before passing them in `message` or `meta` (note paths, filenames, user property keys/values, query names, query strings, user-supplied timezone strings).
 - **Never wrap structural/internal identifiers** in `‼️...‼️` (diagnostic codes like `SYNTAX_ERROR` or `DOC_INVALID_PROPERTY_VALUE`, counts, booleans, plugin version strings).
-- **Query strings (`meta.query`):** When a query expression is passed under the reserved key `meta.query` (wrapped in `‼️...‼️`), `Description` applies syntax-aware query redaction (`redactQuerySyntax`) for syntactically valid queries (preserving Rhizome grammar operators, built-in scope names, virtual/built-in property keys (`file.*`, `tags`, `aliases`), and relative `@` date anchors while masking user identifiers, custom property keys, literals, and numeric offsets), and falls back to character-class redaction (`redactSensitiveText`) when the query fails parsing with a `SYNTAX_ERROR`.
+- **Query strings (`meta.query`):** When a query expression is passed under the reserved key `meta.query` (wrapped in `‼️...‼️`), `Description` applies syntax-aware query redaction (`redactQuerySyntax`) for syntactically valid queries (preserving Rhizome grammar operators, built-in scope names, virtual property keys (`file.*`), reserved system keys (`tags`, `aliases`, `cssclasses` and their singular forms), and relative `@` date anchors while masking user identifiers, custom property keys, literals, and numeric offsets), and falls back to character-class redaction (`redactSensitiveText`) when the query fails parsing with a `SYNTAX_ERROR`.
 
 ## Non-blocking adapters
 
