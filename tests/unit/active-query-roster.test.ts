@@ -866,4 +866,63 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(plugin.activeQueryRoster.size).toBe(0);
 		renderSpy.mockRestore();
 	});
+
+	it('excludes plugin.query execution time from the logged template.render durationMs', async () => {
+		const harness = createMutableVaultApp([
+			{
+				path: 'notes/alpha.md',
+				cache: { tags: [{ tag: '#task', position: {} as never }] },
+			},
+		]);
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		const renderSpy = vi.spyOn(MarkdownRenderer, 'render').mockImplementation(async () => {});
+		const originalQuery = plugin.query.bind(plugin);
+		vi.spyOn(plugin, 'query').mockImplementation(async (queries, options, onUpdate) => {
+			await vi.advanceTimersByTimeAsync(1500);
+			return originalQuery(queries, options, onUpdate);
+		});
+
+		const logCalls: Array<{
+			level: string;
+			message: string;
+			meta: { source: string; durationMs?: number };
+		}> = [];
+		vi.spyOn(plugin.loggerAdapter, 'log').mockImplementation((level, message, meta) => {
+			logCalls.push({
+				level,
+				message,
+				meta: meta as { source: string; durationMs?: number },
+			});
+		});
+
+		const el = { empty: () => {} } as unknown as HTMLElement;
+		const addedChildren: MarkdownRenderChild[] = [];
+		const ctx = {
+			sourcePath: 'dashboard.md',
+			addChild: (child: MarkdownRenderChild) => {
+				addedChildren.push(child);
+			},
+		} as unknown as MarkdownPostProcessorContext;
+
+		const source = [
+			'{% query tasks %}#task{% endquery %}',
+			'{% for item in query.tasks %}- {{ item.file.basename }}\n{% endfor %}',
+		].join('\n');
+
+		vi.useFakeTimers();
+		try {
+			await processRhizomeCodeBlock(source, el, ctx, plugin);
+		} finally {
+			vi.useRealTimers();
+		}
+
+		const renderLog = logCalls.find((entry) => entry.meta.source === 'template.render');
+		expect(renderLog).toBeDefined();
+		expect(renderLog?.meta.durationMs).toBe(0);
+
+		addedChildren[0]?.unload();
+		renderSpy.mockRestore();
+	});
 });

@@ -198,8 +198,8 @@ export async function processRhizomeCodeBlock(
 		activeCycleController = cycleController;
 		const cycleSignal = cycleController.signal;
 
-		const startedAt = Date.now();
-		const referenceTimeMs = startedAt;
+		const parseStartedAt = Date.now();
+		const referenceTimeMs = parseStartedAt;
 		const onReset = (): void => {
 			if (outerAbortController.signal.aborted) {
 				return;
@@ -218,6 +218,7 @@ export async function processRhizomeCodeBlock(
 			},
 			(vaultRelativePath) => readVaultTemplateNote(plugin, vaultRelativePath),
 		);
+		const parseDurationMs = Math.max(0, Date.now() - parseStartedAt);
 		if (outerAbortController.signal.aborted || cycleSignal.aborted) {
 			return;
 		}
@@ -236,6 +237,7 @@ export async function processRhizomeCodeBlock(
 			) {
 				return;
 			}
+			const renderStartedAt = Date.now();
 			const errorResult = await renderParsedRhizomeTemplate(
 				source,
 				parsed,
@@ -250,7 +252,7 @@ export async function processRhizomeCodeBlock(
 			) {
 				return;
 			}
-			const durationMs = Math.max(0, Date.now() - startedAt);
+			const durationMs = parseDurationMs + Math.max(0, Date.now() - renderStartedAt);
 			logCodeBlockRenderResult(plugin, sourcePath, errorResult, durationMs);
 			await renderIntoContainer(errorResult.markdown, generation, cycleSignal);
 			return;
@@ -306,6 +308,7 @@ export async function processRhizomeCodeBlock(
 			return;
 		}
 
+		const renderStartedAt = Date.now();
 		const initialResult = await renderParsedRhizomeTemplate(
 			source,
 			parsed,
@@ -321,7 +324,7 @@ export async function processRhizomeCodeBlock(
 			return;
 		}
 
-		const durationMs = Math.max(0, Date.now() - startedAt);
+		const durationMs = parseDurationMs + Math.max(0, Date.now() - renderStartedAt);
 		logCodeBlockRenderResult(plugin, sourcePath, initialResult, durationMs);
 		await renderIntoContainer(initialResult.markdown, initialGeneration, cycleSignal);
 	};
