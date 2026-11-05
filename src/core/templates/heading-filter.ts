@@ -220,9 +220,13 @@ function renderGroupBucketAsHeading(
 function renderRecordEntriesAsHeading(
 	obj: Record<string, unknown>,
 	keys: readonly string[],
-	clampedLevel: number,
+	level: number,
 	env: ListRenderEnv,
 ): string[] {
+	if (level > 6) {
+		return renderKeyValueEntriesAtDepth(obj, keys, 1, env).lines;
+	}
+
 	const lines: string[] = [];
 	for (const k of keys) {
 		const rawVal = obj[k];
@@ -231,33 +235,35 @@ function renderRecordEntriesAsHeading(
 		const scalar = formatTableScalar(v);
 
 		if (scalar !== null) {
-			const headerLine = formatHeadingEntry(clampedLevel, `${k}: ${scalar}`);
-			if (headerLine !== null) lines.push(headerLine);
+			const headerLine = formatHeadingEntry(level, k);
+			if (headerLine !== null) {
+				lines.push(headerLine, scalar.replace(/\r\n|\r/g, '\n'));
+			}
 			continue;
 		}
 
 		if (isGroupByBucket(v)) {
-			const headerLine = formatHeadingEntry(clampedLevel, k);
+			const headerLine = formatHeadingEntry(level, k);
 			if (headerLine !== null) lines.push(headerLine);
-			lines.push(...renderGroupBucketAsHeading(v, clampedLevel + 1, env, 0));
+			lines.push(...renderGroupBucketAsHeading(v, level + 1, env, 0));
 			continue;
 		}
 
 		if (isPlainRecord(v)) {
 			const childKeys = getNonVacuousKeys(v);
 			if (childKeys.length === 0) continue;
-			const childRes = renderKeyValueEntriesAtDepth(v, childKeys, 1, env);
-			if (childRes.lines.length === 0) continue;
-			const headerLine = formatHeadingEntry(clampedLevel, k);
+			const childLines = renderRecordEntriesAsHeading(v, childKeys, level + 1, env);
+			if (childLines.length === 0) continue;
+			const headerLine = formatHeadingEntry(level, k);
 			if (headerLine !== null) lines.push(headerLine);
-			lines.push(...childRes.lines);
+			lines.push(...childLines);
 			continue;
 		}
 
 		if (Array.isArray(v)) {
 			const childRes = renderArrayAtDepth(v, 1, env, false);
 			if (childRes.lines.length === 0) continue;
-			const headerLine = formatHeadingEntry(clampedLevel, k);
+			const headerLine = formatHeadingEntry(level, k);
 			if (headerLine !== null) lines.push(headerLine);
 			lines.push(...childRes.lines);
 		}
@@ -341,13 +347,15 @@ export function headingFilter(
 				}
 
 				const firstScalar = formatTableScalar(firstVal);
-				const headline =
-					firstScalar !== null
-						? firstScalar
-						: `${firstKey}: ${formatHorizonAtom(firstVal) ?? '{...}'}`;
-				const hLine = formatHeadingEntry(clampedLevel, headline);
-				if (hLine !== null) lines.push(hLine);
-				lines.push(...renderKeyValueEntriesAtDepth(obj, keys.slice(1), 1, env).lines);
+				if (firstScalar !== null) {
+					const hLine = formatHeadingEntry(clampedLevel, firstScalar);
+					if (hLine !== null) lines.push(hLine);
+					lines.push(
+						...renderRecordEntriesAsHeading(obj, keys.slice(1), clampedLevel + 1, env),
+					);
+				} else {
+					lines.push(...renderRecordEntriesAsHeading(obj, keys, clampedLevel, env));
+				}
 				continue;
 			}
 

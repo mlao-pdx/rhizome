@@ -117,7 +117,7 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 				string,
 				unknown
 			>;
-			expect(headingFilter(polluted, 2)).toBe('\n## Title: Clean\n');
+			expect(headingFilter(polluted, 2)).toBe('\n## Title\nClean\n');
 		});
 
 		it('formats scalars, TemporalDrop values, and normalizes internal newlines onto a single heading line', () => {
@@ -280,18 +280,21 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 				headingFilter(
 					books,
 					3,
-					'1.',
 					'file.basename, properties.author as Author, properties.rating as Rating',
 				),
 			).toBe(
 				[
 					'',
 					'### Dune',
-					'1. Author: Frank Herbert',
-					'2. Rating: 5',
+					'#### Author',
+					'Frank Herbert',
+					'#### Rating',
+					'5',
 					'### Neuromancer',
-					'1. Author: William Gibson',
-					'2. Rating: 4.5',
+					'#### Author',
+					'William Gibson',
+					'#### Rating',
+					'4.5',
 					'',
 				].join('\n'),
 			);
@@ -311,7 +314,66 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 			);
 		});
 
-		it('renders a single plain record with scalar and nested array/object keys and works inside pick sub-pipelines', () => {
+		it('renders nested objects as headings all the way down with leaf scalars as paragraphs, falling back to list only when nesting exceeds H6', () => {
+			const deepPicked = {
+				foo: {
+					bar: {
+						gek: {
+							naampje: 'TEST PICK',
+						},
+					},
+				},
+				extension: 'md',
+				size: 2175,
+			};
+
+			expect(headingFilter(deepPicked, 1)).toBe(
+				[
+					'',
+					'# foo',
+					'## bar',
+					'### gek',
+					'#### naampje',
+					'TEST PICK',
+					'# extension',
+					'md',
+					'# size',
+					'2175',
+					'',
+				].join('\n'),
+			);
+
+			expect(headingFilter([deepPicked], 1)).toBe(
+				[
+					'',
+					'# foo',
+					'## bar',
+					'### gek',
+					'#### naampje',
+					'TEST PICK',
+					'# extension',
+					'md',
+					'# size',
+					'2175',
+					'',
+				].join('\n'),
+			);
+
+			expect(headingFilter(deepPicked, 4)).toBe(
+				[
+					'',
+					'#### foo',
+					'##### bar',
+					'###### gek',
+					'- naampje: TEST PICK',
+					'#### extension',
+					'md',
+					'#### size',
+					'2175',
+					'',
+				].join('\n'),
+			);
+
 			const record = {
 				Author: 'Frank Herbert',
 				Tags: ['scifi', 'classic'],
@@ -320,12 +382,14 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 			expect(headingFilter(record, 2)).toBe(
 				[
 					'',
-					'## Author: Frank Herbert',
+					'## Author',
+					'Frank Herbert',
 					'## Tags',
 					'- scifi',
 					'- classic',
 					'## Meta',
-					'- Year: 1965',
+					'### Year',
+					'1965',
 					'',
 				].join('\n'),
 			);
