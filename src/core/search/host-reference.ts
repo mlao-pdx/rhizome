@@ -76,6 +76,8 @@ function lookupRootSegment(hostDoc: NormalizedDocument, segment: string): unknow
 			return hostDoc.properties;
 		case 'propertylocations':
 			return hostDoc.propertyLocations;
+		case 'backlinks':
+			return hostDoc.backlinks ?? [];
 		default:
 			return undefined;
 	}
@@ -114,8 +116,9 @@ function collectScalars(val: unknown, out: ResolvedHostScalar[]): boolean {
 
 /**
  * Resolves a decoded `@this.<segments>` path against `hostDoc`.
- * Exposes the exact 12-field `VaultQueryMatch` surface (`file`, `aliases`, `aliasLocations`,
- * `tags`, `tagLocations`, `cssclasses`, `headings`, `links`, `embeds`, `blocks`, `properties`, `propertyLocations`)
+ * Exposes the exact 13-field `VaultQueryMatch` surface (`file`, `aliases`, `aliasLocations`,
+ * `tags`, `tagLocations`, `cssclasses`, `headings`, `links`, `embeds`, `blocks`, `properties`, `propertyLocations`,
+ * `backlinks`)
  * with exact-then-case-insensitive key matching and array indexing/mapping.
  */
 export function resolveThisReference(

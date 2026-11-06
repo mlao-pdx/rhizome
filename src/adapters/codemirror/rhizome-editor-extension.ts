@@ -26,6 +26,7 @@ import {
 	type CodeBlockTokenKind,
 } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
+import type { BacklinkIndex } from '../backlink-index';
 import { loadVaultPropertyTypes } from '../vault-query-logging';
 
 /**
@@ -203,7 +204,11 @@ function renderDiagnosticTooltipDom(diags: readonly CodeBlockDiagnosticSpan[]): 
  * Creates the CodeMirror 6 editor extension providing syntax highlighting, diagnostic underlines,
  * and hover tooltips inside fenced `rhizome` codeblocks.
  */
-export function createRhizomeEditorExtension(app: App, logger?: LoggerPort): Extension {
+export function createRhizomeEditorExtension(
+	app: App,
+	logger?: LoggerPort,
+	backlinkIndex?: BacklinkIndex,
+): Extension {
 	let cachedConfig: ResolvedEngineConfig = buildFallbackConfig({});
 	let refreshPending = false;
 	const activeViews = new Set<EditorView>();
@@ -211,6 +216,8 @@ export function createRhizomeEditorExtension(app: App, logger?: LoggerPort): Ext
 	const analysisCache = new Map<string, CodeBlockAnalysis>();
 
 	let lastHostFile: unknown = undefined;
+	let lastHostPath: string | undefined = undefined;
+	let lastHostRevision: number | undefined = undefined;
 	let lastHostCache: unknown = undefined;
 	let lastHostMtime: number | undefined = undefined;
 	let lastHostConfig: ResolvedEngineConfig | undefined = undefined;
@@ -236,9 +243,13 @@ export function createRhizomeEditorExtension(app: App, logger?: LoggerPort): Ext
 		}
 		const cache = app.metadataCache.getFileCache(activeFile);
 		const mtime = activeFile.stat?.mtime ?? 0;
+		const activePath = activeFile.path;
+		const backlinkRevision = backlinkIndex?.revision ?? 0;
 		if (
 			lastResolvedHost !== null &&
 			lastHostFile === activeFile &&
+			lastHostPath === activePath &&
+			lastHostRevision === backlinkRevision &&
 			lastHostCache === cache &&
 			lastHostMtime === mtime &&
 			lastHostConfig === cachedConfig
@@ -246,6 +257,8 @@ export function createRhizomeEditorExtension(app: App, logger?: LoggerPort): Ext
 			return lastResolvedHost;
 		}
 		lastHostFile = activeFile;
+		lastHostPath = activePath;
+		lastHostRevision = backlinkRevision;
 		lastHostCache = cache;
 		lastHostMtime = mtime;
 		lastHostConfig = cachedConfig;
@@ -253,7 +266,7 @@ export function createRhizomeEditorExtension(app: App, logger?: LoggerPort): Ext
 		if (
 			hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)
 		) {
-			lastResolvedHost = { hostDoc: null, cacheSignature: `${activeFile.path}:ignored` };
+			lastResolvedHost = { hostDoc: null, cacheSignature: `${activePath}:ignored` };
 			return lastResolvedHost;
 		}
 		try {
@@ -266,11 +279,12 @@ export function createRhizomeEditorExtension(app: App, logger?: LoggerPort): Ext
 				[],
 				resolveLinkPath,
 			);
-			const sig = `${activeFile.path}:${mtime}:${++hostSigCounter}`;
-			lastResolvedHost = { hostDoc, cacheSignature: sig };
+			const withBacklinks = backlinkIndex?.attach(hostDoc, activeFile) ?? hostDoc;
+			const sig = `${activePath}:${mtime}:${backlinkRevision}:${++hostSigCounter}`;
+			lastResolvedHost = { hostDoc: withBacklinks, cacheSignature: sig };
 			return lastResolvedHost;
 		} catch {
-			lastResolvedHost = { hostDoc: null, cacheSignature: `${activeFile.path}:err` };
+			lastResolvedHost = { hostDoc: null, cacheSignature: `${activePath}:err` };
 			return lastResolvedHost;
 		}
 	};

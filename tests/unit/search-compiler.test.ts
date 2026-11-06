@@ -678,6 +678,20 @@ describe('Step 5: Non-blocking linter diagnostics (Section 4.3)', () => {
 		});
 		expect(aliasRes.diagnostics[0]?.span).not.toBeNull();
 
+		const backlinkAliasRes = compileQuery('[backlink: Foo]', config, PINNED_REF_MS);
+		expect(backlinkAliasRes.executable).toBe(true);
+		expect(backlinkAliasRes.diagnostics).toHaveLength(1);
+		expect(backlinkAliasRes.diagnostics[0]).toMatchObject({
+			code: 'HINT_PROPERTY_MATCHES_SCOPE',
+			severity: 'hint',
+			issue: 'The property "backlink" matches an alias of scope "backlinks".',
+			hint: 'Did you mean "backlinks:Foo" instead?',
+		});
+
+		const backlinksScopeRes = compileQuery('backlinks:Foo', config, PINNED_REF_MS);
+		expect(backlinksScopeRes.executable).toBe(true);
+		expect(backlinksScopeRes.diagnostics).toEqual([]);
+
 		const compoundRes = compileQuery('[heading: (Intro OR Summary)]', config, PINNED_REF_MS);
 		expect(compoundRes.executable).toBe(true);
 		expect(compoundRes.diagnostics).toHaveLength(1);

@@ -219,6 +219,14 @@ export interface NormalizedPropertyLocation {
 	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
 }
 
+/**
+ * A single resolved backlink: a source note that links to the document it is attached to.
+ */
+export interface BacklinkRef {
+	readonly path: string;
+	readonly count: number;
+}
+
 export interface NormalizedDocument {
 	/** Fingerprint of the `ResolvedEngineConfig` (`timeZone` + `propertyTypes`) used to normalize this document */
 	normalizationFingerprint: string;
@@ -237,6 +245,8 @@ export interface NormalizedDocument {
 	properties: Record<string, unknown>; // Null-prototype O(1) lookup map with authored keys and Collision Resolution Rule
 	propertyLocations: NormalizedPropertyLocation[]; // Full occurrence stream of non-omitted properties with origin
 	diagnostics: DocumentDiagnostic[]; // Non-fatal document property diagnostics
+	/** Resolved backlinks attached downstream by the adapter; optional for pure test fixtures. */
+	backlinks?: readonly BacklinkRef[];
 }
 
 // ============================================================================

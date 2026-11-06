@@ -395,7 +395,9 @@ describe('Payload-Shaping & Aggregation Filter Property Invariants', () => {
 						return;
 					}
 
-					const lines = out.split('\n');
+					expect(out.startsWith('\n| ')).toBe(true);
+					expect(out.endsWith(' |\n')).toBe(true);
+					const lines = out.slice(1, -1).split('\n');
 					expect(lines).toHaveLength(rows.length + 2);
 
 					const expectedUnescapedPipes = discoveredCols.size + 1;

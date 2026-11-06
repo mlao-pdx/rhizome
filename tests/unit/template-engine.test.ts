@@ -544,6 +544,10 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 							origin: '[[Alpha]]',
 						},
 					],
+					backlinks: [
+						{ path: 'Notes/Source A.md', count: 2 },
+						{ path: 'Notes/Source B.md', count: 1 },
+					],
 				},
 			],
 			myFirstQuery: [{ file: { basename: 'Task 1' } }, { file: { basename: 'Task 2' } }],
@@ -558,6 +562,8 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'Tags: {{ this.tags | join: "+" }}',
 			'Heading: {{ this.headings[0].text }}',
 			'Block: {{ this.blocks.first }}',
+			'Backlinks: {% for b in this.backlinks %}{{ b.path }}={{ b.count }};{% endfor %}',
+			'Backlinks table: {{ this.backlinks | table }}',
 			'Query items: {% for note in query.myFirstQuery %}{{ note.file.basename }};{% endfor %}',
 			'Hidden host in query: {{ query["◊host"] | default: "HIDDEN" }}',
 			'Env: {{ vault }} | {{ tz }} | {{ language }} | mac={{ platform.isMacOS }} | mobile={{ platform.isMobile }}',
@@ -595,6 +601,10 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		expect(res.markdown).toContain('Tags: project+active');
 		expect(res.markdown).toContain('Heading: Overview');
 		expect(res.markdown).toContain('Block: summary-block');
+		expect(res.markdown).toContain('Backlinks: Notes/Source A.md=2;Notes/Source B.md=1;');
+		expect(res.markdown).toContain(
+			'| path | count |\n| :--- | :--- |\n| Notes/Source A.md | 2 |\n| Notes/Source B.md | 1 |',
+		);
 		expect(res.markdown).toContain('Query items: Task 1;Task 2;');
 		expect(res.markdown).toContain('Hidden host in query: HIDDEN');
 		expect(res.markdown).toContain(

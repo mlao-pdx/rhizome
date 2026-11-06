@@ -8,6 +8,7 @@ import {
 	hashVaultQueryMatch,
 	hashVaultQueryResult,
 } from '../../src/adapters/active-query-roster';
+import type { BacklinkIndex, BacklinkSnapshot } from '../../src/adapters/backlink-index';
 import { processRhizomeCodeBlock } from '../../src/adapters/rhizome-codeblock';
 import { runVaultQuery, type VaultQueryResult } from '../../src/adapters/vault-query-runner';
 import {
@@ -183,6 +184,28 @@ describe('Deterministic payload hashing', () => {
 			hashVaultQueryResult({ q: [matchDone] }),
 		);
 	});
+
+	it('includes backlink path and count in the payload hash', async () => {
+		const { app } = createMutableVaultApp([
+			{
+				path: 'notes/a.md',
+				cache: { tags: [{ tag: '#project', position: {} as never }] },
+			},
+		]);
+		const res = await runVaultQuery(app, { q: '#project' }, { timeZone: 'UTC' });
+		const match = res['q']![0]!;
+
+		const one = { ...match, backlinks: [{ path: 'notes/source.md', count: 1 }] };
+		const two = { ...match, backlinks: [{ path: 'notes/source.md', count: 2 }] };
+		const renamed = {
+			...match,
+			backlinks: [{ path: 'notes/renamed.md', count: 1 }],
+		};
+
+		expect(hashVaultQueryMatch(one)).not.toBe(hashVaultQueryMatch(two));
+		expect(hashVaultQueryMatch(one)).not.toBe(hashVaultQueryMatch(renamed));
+		expect(hashVaultQueryMatch(match)).not.toBe(hashVaultQueryMatch(one));
+	});
 });
 
 describe('ActiveQueryRoster & reactive plugin.query()', () => {
@@ -199,6 +222,27 @@ describe('ActiveQueryRoster & reactive plugin.query()', () => {
 		const res = await plugin.query({ tasks: '#task' }, { timeZone: 'UTC' });
 		expect(res['tasks']).toHaveLength(1);
 		expect(plugin.activeQueryRoster.size).toBe(0);
+	});
+
+	it('captures one backlink snapshot per nudge pass and reuses it for the batch', async () => {
+		const harness = createMutableVaultApp([
+			{
+				path: 'notes/alpha.md',
+				cache: { tags: [{ tag: '#task', position: {} as never }] },
+			},
+		]);
+		const snapshot: BacklinkSnapshot = new Map();
+		const snapshotSpy = vi.fn(() => snapshot);
+		const backlinkIndex = { snapshot: snapshotSpy } as unknown as BacklinkIndex;
+		const roster = new ActiveQueryRoster(harness.app, undefined, backlinkIndex);
+		const initial = await runVaultQuery(harness.app, { tasks: '#task' }, { timeZone: 'UTC' });
+
+		roster.register({ tasks: '#task' }, { timeZone: 'UTC' }, initial, () => {});
+		roster.register({ tasks: '#task', other: '#task' }, { timeZone: 'UTC' }, initial, () => {});
+
+		await roster.nudge(1700000000000);
+		expect(snapshotSpy).toHaveBeenCalledTimes(1);
+		expect(snapshotSpy).toHaveBeenCalledWith();
 	});
 
 	it('invokes onUpdate only when matched note payload changes (add, modify, rename, delete)', async () => {

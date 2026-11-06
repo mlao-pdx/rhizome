@@ -362,6 +362,7 @@ describe('Vault Query Runner Property Invariants', () => {
 									'blocks',
 									'properties',
 									'propertyLocations',
+									'backlinks',
 								]);
 								expect('normalizationFingerprint' in m).toBe(false);
 								expect('propertyOccurrences' in m).toBe(false);

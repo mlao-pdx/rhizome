@@ -25,10 +25,12 @@ describe('Liquid table filter (tableFilter, parseTableAlignments, formatTableCel
 			const out = tableFilter([row1, row2]);
 			expect(out).toBe(
 				[
+					'',
 					'| Book Title | Author | Publication Year |',
 					'| :--- | :--- | :--- |',
 					'| Dune | Frank Herbert |  |',
 					'| The Left Hand of Darkness | Ursula K. Le Guin | 1969 |',
+					'',
 				].join('\n'),
 			);
 		});
@@ -37,9 +39,11 @@ describe('Liquid table filter (tableFilter, parseTableAlignments, formatTableCel
 			const single = { Name: 'Rhizome', Active: true, Version: 1 };
 			expect(tableFilter(single)).toBe(
 				[
+					'',
 					'| Name | Active | Version |',
 					'| :--- | :--- | :--- |',
 					'| Rhizome | true | 1 |',
+					'',
 				].join('\n'),
 			);
 		});
@@ -60,7 +64,7 @@ describe('Liquid table filter (tableFilter, parseTableAlignments, formatTableCel
 				string,
 				unknown
 			>;
-			expect(tableFilter(row)).toBe(['| Title |', '| :--- |', '| Safe |'].join('\n'));
+			expect(tableFilter(row)).toBe(['', '| Title |', '| :--- |', '| Safe |', ''].join('\n'));
 		});
 	});
 
@@ -90,9 +94,11 @@ describe('Liquid table filter (tableFilter, parseTableAlignments, formatTableCel
 			const out = tableFilter(rows, '>Rating, ^Status', '<Title', '>NonExistentColumn');
 			expect(out).toBe(
 				[
+					'',
 					'| Title | Status | Rating | Notes |',
 					'| :--- | :---: | ---: | :--- |',
 					'| Alpha | Open | 5 | Ready |',
+					'',
 				].join('\n'),
 			);
 		});
@@ -200,9 +206,13 @@ describe('Liquid table filter (tableFilter, parseTableAlignments, formatTableCel
 				'Col | 1\nSub': '[[Note|Alias]]\nNext line',
 			};
 			expect(tableFilter(weirdRow, '>Col | 1\nSub')).toBe(
-				['| Col \\| 1<br>Sub |', '| ---: |', '| [[Note\\|Alias]]<br>Next line |'].join(
-					'\n',
-				),
+				[
+					'',
+					'| Col \\| 1<br>Sub |',
+					'| ---: |',
+					'| [[Note\\|Alias]]<br>Next line |',
+					'',
+				].join('\n'),
 			);
 		});
 
@@ -241,10 +251,12 @@ describe('Liquid table filter (tableFilter, parseTableAlignments, formatTableCel
 			const directTable = tableFilter(picked, '>Rating, ^Published');
 			expect(directTable).toBe(
 				[
+					'',
 					'| Title | Author | Rating | Published | Tags | FileMeta |',
 					'| :--- | :--- | ---: | :---: | :--- | :--- |',
 					'| Dune | Frank Herbert | 5 | 1965-08-01 | scifi, classic, and desert | {path: Books/Dune.md, ..., size: 420} |',
 					'| Neuromancer | William Gibson | 4.5 | 1984-07-01 | scifi and cyberpunk | {path: Books/Neuromancer.md, ..., size: 310} |',
+					'',
 				].join('\n'),
 			);
 
@@ -266,10 +278,12 @@ describe('Liquid table filter (tableFilter, parseTableAlignments, formatTableCel
 			expect(rendered.ok).toBe(true);
 			expect(rendered.markdown).toBe(
 				[
+					'',
 					'| Titel | Schlagworte | Wertung |',
 					'| :--- | :--- | ---: |',
 					'| Dune | scifi, classic und desert | 5 |',
 					'| Neuromancer | scifi und cyberpunk | 4.5 |',
+					'',
 				].join('\n'),
 			);
 		});

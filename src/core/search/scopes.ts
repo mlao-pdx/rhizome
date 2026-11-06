@@ -20,8 +20,9 @@ export function hierarchicalTagMatch(target: string, queryValue: string): boolea
 }
 
 /**
- * The 10 built-in per-note metadata scopes (`file`, `path`, `ext`, `tag`, `aliases`, `cssclasses`,
- * `headings`, `links`, `embeds`, `blocks`). Backlinks and `resolvedLinks` are not supported.
+ * The 11 built-in per-note metadata scopes (`file`, `path`, `ext`, `tag`, `aliases`, `cssclasses`,
+ * `headings`, `links`, `embeds`, `blocks`, `backlinks`). Backlinks come from resolved link metadata
+ * attached to the document by the adapter.
  */
 export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
 	[
@@ -101,6 +102,18 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
 				const normQ = q.startsWith('^') ? q.slice(1) : q;
 				return target.toLowerCase() === normQ;
 			},
+		},
+		{
+			canonicalName: 'backlinks',
+			aliases: Object.freeze(['backlinks', 'backlink']),
+			extract: (doc: NormalizedDocument) =>
+				(doc.backlinks ?? []).flatMap((b) => {
+					const slashIdx = b.path.lastIndexOf('/');
+					const name = slashIdx === -1 ? b.path : b.path.slice(slashIdx + 1);
+					const basename = name.toLowerCase().endsWith('.md') ? name.slice(0, -3) : name;
+					return [b.path, basename];
+				}),
+			matchString: substringStringMatch,
 		},
 	].map((s) => Object.freeze(s)),
 );

@@ -2,6 +2,7 @@ import { type App, normalizePath } from 'obsidian';
 import type { NormalizedDocument, PropertyTypeRegistry, ResolvedEngineConfig } from '@core/search';
 import { HOST_QUERY_KEY } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
+import type { BacklinkIndex } from './backlink-index';
 import { markSensitive } from './logger-format';
 import {
 	resolveDefaultTimeZone,
@@ -279,6 +280,14 @@ class XxHash64Accumulator {
 			this.updateString(loc.source);
 			this.updateString(loc.origin);
 		}
+
+		const backlinks = match.backlinks;
+		this.updateTag(0x29, backlinks.length);
+		for (let i = 0; i < backlinks.length; i++) {
+			const backlink = backlinks[i]!;
+			this.updateString(backlink.path);
+			this.updateNumber(backlink.count);
+		}
 	}
 
 	digest(): Digest64 {
@@ -370,14 +379,16 @@ function buildConfigGroupKey(
 export class ActiveQueryRoster {
 	private readonly app: App;
 	private readonly logger: LoggerPort | undefined;
+	private readonly backlinkIndex: BacklinkIndex | undefined;
 	private readonly subscriptions = new Map<number, ActiveSubscription>();
 	private nextId = 1;
 	private activeNudgePromise: Promise<void> | null = null;
 	private rerunPending = false;
 
-	constructor(app: App, logger?: LoggerPort) {
+	constructor(app: App, logger?: LoggerPort, backlinkIndex?: BacklinkIndex) {
 		this.app = app;
 		this.logger = logger;
+		this.backlinkIndex = backlinkIndex;
 	}
 
 	/** Number of currently active reactive query subscriptions. */
@@ -538,6 +549,8 @@ export class ActiveQueryRoster {
 			return;
 		}
 
+		const backlinks = this.backlinkIndex?.snapshot();
+
 		const groups = new Map<
 			string,
 			{
@@ -600,6 +613,7 @@ export class ActiveQueryRoster {
 							engineConfig,
 							resolveLinkPath,
 							this.logger,
+							backlinks,
 						);
 						hostDocsByPath.set(sp, doc ?? null);
 					}
@@ -648,6 +662,7 @@ export class ActiveQueryRoster {
 								referenceTimeMs,
 								queryHostDocs,
 								...(engineConfig ? { resolvedConfig: engineConfig } : {}),
+								...(backlinks !== undefined ? { backlinks } : {}),
 							},
 							this.logger,
 						)

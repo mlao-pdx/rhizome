@@ -359,6 +359,16 @@ export function describeScopeSemantics(scope: string): ScopeSemanticsInfo {
 					return `equals ${formatInlineCode(`^${norm}`)} (case-insensitive)`;
 				},
 			};
+		case 'backlinks':
+			return {
+				friendlyTitle: 'Backlink filter',
+				singularTarget: 'linking source note',
+				targetsDescription:
+					'resolved backlinks (`backlinks[].path` and the source basename without `.md`)',
+				matchRuleDescription: 'case-insensitive substring match',
+				formatPlainStringMatch: (val) =>
+					`contains ${formatInlineCode(val)} (case-insensitive)`,
+			};
 		default: {
 			const scopeCode = formatInlineCode(scope);
 			return {

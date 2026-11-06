@@ -1,4 +1,4 @@
-import { type App, normalizePath } from 'obsidian';
+import { type App, normalizePath, type TFile } from 'obsidian';
 import {
 	compileQuery,
 	explainQuery,
@@ -8,6 +8,7 @@ import {
 	hasInternalRhizomeFlag,
 	initEngineConfig,
 	INTERNAL_RHIZOME_CODES,
+	type BacklinkRef,
 	type NormalizedAliasLocation,
 	type NormalizedBlock,
 	type NormalizedDocument,
@@ -24,6 +25,7 @@ import {
 } from '@core/search';
 import { HOST_QUERY_KEY } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
+import { attachBacklinks, type BacklinkSnapshot } from './backlink-index';
 import { markSensitive } from './logger-format';
 import {
 	loadVaultPropertyTypes,
@@ -79,6 +81,16 @@ export interface VaultQueryOptions {
 	 * when `ActiveQueryRoster` has already resolved the group's configuration.
 	 */
 	readonly resolvedConfig?: ResolvedEngineConfig | undefined;
+	/**
+	 * Optional backlink snapshot used to attach resolved backlinks to every scanned and host
+	 * document in the pass. Omitted in pure/offline runs that do not need backlink data.
+	 */
+	readonly backlinks?: BacklinkSnapshot | undefined;
+	/**
+	 * Optional predicate marking vault files as excluded from backlink projection (for example
+	 * `◊InternalRhizome 001` notes). Defaults to the internal-flag check.
+	 */
+	readonly isIgnoredFile?: ((file: TFile) => boolean) | undefined;
 }
 
 /**
@@ -102,6 +114,7 @@ export interface VaultQueryMatch {
 	readonly blocks: NormalizedBlock[];
 	readonly properties: Record<string, unknown>;
 	readonly propertyLocations: NormalizedPropertyLocation[];
+	readonly backlinks: readonly BacklinkRef[];
 }
 
 /**
@@ -128,6 +141,7 @@ export function toVaultQueryMatch(doc: NormalizedDocument): VaultQueryMatch {
 		blocks: doc.blocks,
 		properties: doc.properties,
 		propertyLocations: doc.propertyLocations,
+		backlinks: doc.backlinks ?? [],
 	};
 }
 
@@ -194,6 +208,13 @@ export function sanitizeQueryEntries(queries: unknown): Array<[string, string]> 
 	return entries;
 }
 
+function defaultIsIgnoredFile(app: App, file: TFile): boolean {
+	return hasInternalRhizomeFlag(
+		app.metadataCache.getFileCache(file)?.frontmatter,
+		INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
+	);
+}
+
 /**
  * Resolves and normalizes a hosting Markdown note in O(1) time via `vault.getFileByPath`
  * (with fallback to `vault.getMarkdownFiles().find`).
@@ -206,6 +227,8 @@ export function resolveHostDocument(
 	config: ResolvedEngineConfig,
 	resolveLinkPath?: ResolveLinkPathFn,
 	logger?: LoggerPort,
+	backlinks?: BacklinkSnapshot,
+	isIgnoredFile?: (file: TFile) => boolean,
 ): NormalizedDocument | null | undefined {
 	if (sourcePath === undefined) {
 		return undefined;
@@ -240,7 +263,17 @@ export function resolveHostDocument(
 		((rawTarget, linkSourcePath) =>
 			app.metadataCache.getFirstLinkpathDest?.(rawTarget, linkSourcePath)?.path ?? null);
 	try {
-		return normalizeObsidianMetadata(file, cache, config, [], effectiveResolveLinkPath);
+		const doc = normalizeObsidianMetadata(file, cache, config, [], effectiveResolveLinkPath);
+		if (backlinks !== undefined) {
+			attachBacklinks(
+				doc,
+				backlinks,
+				file,
+				(fileToCheck) =>
+					isIgnoredFile?.(fileToCheck) ?? defaultIsIgnoredFile(app, fileToCheck),
+			);
+		}
+		return doc;
 	} catch (error) {
 		logger?.log('error', `Failed to normalize host note ${markSensitive(file.path)}`, {
 			source: 'query.run',
@@ -310,6 +343,10 @@ export async function runVaultQuery(
 	const resolveLinkPath: ResolveLinkPathFn = (rawTarget, sourcePath) =>
 		app.metadataCache.getFirstLinkpathDest(rawTarget, sourcePath)?.path ?? null;
 
+	const backlinks = options?.backlinks;
+	const isIgnoredFile =
+		options?.isIgnoredFile ?? ((file: TFile) => defaultIsIgnoredFile(app, file));
+
 	const hostDoc: NormalizedDocument | null | undefined =
 		options?.hostDoc !== undefined
 			? options.hostDoc
@@ -319,6 +356,8 @@ export async function runVaultQuery(
 					resolvedConfig,
 					resolveLinkPath,
 					logger,
+					backlinks,
+					isIgnoredFile,
 				);
 
 	const results: VaultQueryResult = {};
@@ -404,6 +443,9 @@ export async function runVaultQuery(
 			});
 			throw error;
 		}
+		if (backlinks !== undefined) {
+			attachBacklinks(doc, backlinks, file, isIgnoredFile);
+		}
 		propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
 
 		let sharedMatch: VaultQueryMatch | undefined;
@@ -463,6 +505,8 @@ export async function explainVaultQuery(
 				cfgRes.config,
 				undefined,
 				logger,
+				options.backlinks,
+				options.isIgnoredFile,
 			);
 		}
 	}

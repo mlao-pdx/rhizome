@@ -8,6 +8,8 @@ import {
 	parseObsidianTypesJson,
 	runVaultQuery,
 } from '../../src/adapters/vault-query-runner';
+import type { BacklinkSnapshot } from '../../src/adapters/backlink-index';
+import { resolveThisReference, type NormalizedDocument } from '../../src/core/search';
 
 interface MockNoteSpec {
 	path: string;
@@ -255,7 +257,9 @@ describe('runVaultQuery', () => {
 			'blocks',
 			'properties',
 			'propertyLocations',
+			'backlinks',
 		]);
+		expect(match.backlinks).toEqual([]);
 		expect('normalizationFingerprint' in match).toBe(false);
 		expect('propertyOccurrences' in match).toBe(false);
 		expect('propertyKeys' in match).toBe(false);
@@ -813,6 +817,71 @@ describe('runVaultQuery', () => {
 			expect(zeroQueryRes['◊host']).toHaveLength(1);
 			expect(zeroQueryRes['◊host']?.[0]?.file.basename).toBe('Apollo');
 			expect(markdownFilesScanCount).toBe(1);
+		});
+
+		it('attaches snapshot backlinks to matches and host docs and filters by source path or basename', async () => {
+			const target = makeMockFileEntry({ path: 'notes/target.md' });
+			const source = makeMockFileEntry({ path: 'sources/Origin.md' });
+			const otherSource = makeMockFileEntry({ path: 'sources/other-lib.md' });
+			const snapshot = new Map([
+				[
+					target,
+					new Map([
+						[source, 2],
+						[otherSource, 1],
+					]),
+				],
+			]) as unknown as BacklinkSnapshot;
+
+			const app = makeMockApp({
+				notes: [{ path: 'notes/target.md', cache: {} }],
+			});
+			(app.vault as unknown as { getMarkdownFiles: () => unknown[] }).getMarkdownFiles =
+				() => [target];
+			(app.vault as unknown as { getFileByPath: (path: string) => unknown }).getFileByPath = (
+				path: string,
+			) => (path === target.path ? target : null);
+			(app.metadataCache as unknown as { getFileCache: () => unknown }).getFileCache = () =>
+				null;
+
+			const res = await runVaultQuery(
+				app,
+				{
+					byPath: 'backlinks:"sources/origin"',
+					byBase: 'backlinks:ORIGIN',
+					byCount: 'backlinks:2',
+					viaThis: 'backlinks:@this.backlinks.path',
+				},
+				{ timeZone: 'UTC', sourcePath: 'notes/target.md', backlinks: snapshot },
+			);
+
+			expect(res.byPath?.[0]?.file.path).toBe('notes/target.md');
+			expect(res.byBase?.[0]?.file.path).toBe('notes/target.md');
+			expect(res.byCount).toEqual([]);
+			expect(res.viaThis?.[0]?.file.path).toBe('notes/target.md');
+
+			expect(res['◊host']?.[0]?.backlinks).toEqual([
+				{ path: 'sources/Origin.md', count: 2 },
+				{ path: 'sources/other-lib.md', count: 1 },
+			]);
+			expect(res['◊host']?.[0]?.backlinks).toEqual(res.byPath?.[0]?.backlinks);
+
+			const hostDoc = res['◊host']?.[0] as unknown as NormalizedDocument;
+			expect(resolveThisReference(hostDoc, ['backlinks', 'path'])).toEqual({
+				resolved: true,
+				values: ['sources/Origin.md', 'sources/other-lib.md'],
+			});
+			expect(resolveThisReference(hostDoc, ['backlinks', 'count'])).toEqual({
+				resolved: true,
+				values: [2, 1],
+			});
+			expect(resolveThisReference(hostDoc, ['backlinks'])).toEqual({
+				resolved: false,
+				values: [],
+			});
+			expect(
+				resolveThisReference({ ...hostDoc, backlinks: [] }, ['backlinks', 'path']),
+			).toEqual({ resolved: false, values: [] });
 		});
 	});
 });

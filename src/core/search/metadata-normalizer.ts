@@ -324,7 +324,7 @@ function normalizeLinkItem(
 /**
  * Normalizes an Obsidian `TFile`, `CachedMetadata`, and inline properties
  * into a self-contained plain POJO `NormalizedDocument` bound to `resolvedConfig`.
- * Does not ingest `resolvedLinks` or compute backlinks.
+ * Does not ingest `resolvedLinks`; backlinks are attached downstream by the adapter.
  */
 export function normalizeObsidianMetadata(
 	tfile: ObsidianFileInput,

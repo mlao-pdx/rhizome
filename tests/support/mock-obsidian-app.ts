@@ -16,6 +16,11 @@
  * grow — do not pre-build mock surface for unused Obsidian APIs.
  */
 
+// Obsidian plugin code schedules timers through `window`; Node-based tests have no window.
+if (typeof window === 'undefined') {
+	(global as { window?: unknown }).window = global;
+}
+
 export class Plugin {
 	app: unknown;
 	manifest: unknown;
@@ -316,7 +321,14 @@ export class TAbstractFile {
 	path = '';
 }
 
-export class TFile extends TAbstractFile {}
+export class TFile extends TAbstractFile {
+	name = '';
+	basename = '';
+	extension = '';
+	parent: { path: string } | null = null;
+	stat = { ctime: 0, mtime: 0, size: 0 };
+	deleted?: boolean;
+}
 
 /**
  * Minimal stand-in for Obsidian's `FileSystemAdapter`. `RhizomePlugin` is
@@ -357,12 +369,50 @@ function createEventBus() {
 	};
 }
 
+export interface MockAppOptions {
+	/** All vault files (`vault.getFiles()`), including non-Markdown files. */
+	files?: unknown[];
+	/** Markdown files (`vault.getMarkdownFiles()`); defaults to `files` whose path ends in `.md`. */
+	markdownFiles?: unknown[];
+	/** Inverse-link metadata keyed by source path then target path. */
+	resolvedLinks?: Record<string, Record<string, number>>;
+	/** Per-path metadata cache entries returned by `getFileCache`/`getCache`. */
+	fileCache?: Map<string, unknown> | Record<string, unknown>;
+	/** Optional `getFileCache` override, taking precedence over `fileCache`. */
+	getFileCache?: (file: { path?: string }) => unknown;
+}
+
+function lookupFileCache(
+	fileCache: MockAppOptions['fileCache'],
+	path: string | undefined,
+): unknown {
+	if (!path) return null;
+	if (fileCache instanceof Map) {
+		return fileCache.get(path) ?? null;
+	}
+	if (fileCache && Object.prototype.hasOwnProperty.call(fileCache, path)) {
+		return fileCache[path] ?? null;
+	}
+	return null;
+}
+
 /** A minimal `app` value sufficient for `RhizomePlugin`'s current `onload()` and `query()`. */
-export function createMockApp(): unknown {
+export function createMockApp(options: MockAppOptions = {}): unknown {
 	const vaultEvents = createEventBus();
 	const metadataEvents = createEventBus();
+	const files = options.files ?? [];
+	const markdownFiles =
+		options.markdownFiles ??
+		files.filter((file) => {
+			const path = (file as { path?: unknown }).path;
+			return typeof path === 'string' && path.toLowerCase().endsWith('.md');
+		});
 	const metadataCache = {
-		getFileCache: (_file: unknown): unknown => null,
+		resolvedLinks: options.resolvedLinks ?? {},
+		getFileCache: (file: { path?: string }): unknown =>
+			options.getFileCache
+				? options.getFileCache(file)
+				: lookupFileCache(options.fileCache, file?.path),
 		getCache: (path: string): unknown => metadataCache.getFileCache({ path }),
 		getFirstLinkpathDest: () => null,
 		on: metadataEvents.on,
@@ -373,7 +423,10 @@ export function createMockApp(): unknown {
 			configDir: 'mock-config',
 			adapter: new FileSystemAdapter(),
 			getName: () => 'MockVault',
-			getMarkdownFiles: () => [],
+			getFiles: () => files,
+			getMarkdownFiles: () => markdownFiles,
+			getFileByPath: (path: string) =>
+				files.find((file) => (file as { path?: string }).path === path) ?? null,
 			on: vaultEvents.on,
 			trigger: vaultEvents.trigger,
 		},

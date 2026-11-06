@@ -188,7 +188,7 @@ describe('BUILT_IN_SCOPES & substringStringMatch', () => {
 		expect(substringStringMatch('Projects/Active/Sprint-12.md', 'ARCHIVE')).toBe(false);
 	});
 
-	it('resolves all 9 built-in scopes and their aliases case-insensitively', () => {
+	it('resolves all 11 built-in scopes and their aliases case-insensitively', () => {
 		const res = initEngineConfig();
 		expect(res.ok).toBe(true);
 		if (!res.ok) return;
@@ -199,10 +199,12 @@ describe('BUILT_IN_SCOPES & substringStringMatch', () => {
 			['ext', ['ext', 'extension']],
 			['tag', ['tag']],
 			['aliases', ['aliases', 'alias']],
+			['cssclasses', ['cssclasses', 'cssclass']],
 			['headings', ['headings', 'heading', 'header', 'headers']],
 			['links', ['links', 'link', 'outlink', 'outlinks']],
 			['embeds', ['embeds', 'embed']],
 			['blocks', ['blocks', 'block']],
+			['backlinks', ['backlinks', 'backlink']],
 		];
 
 		for (const [canonicalName, aliases] of expectedAliases) {
@@ -214,8 +216,6 @@ describe('BUILT_IN_SCOPES & substringStringMatch', () => {
 			}
 		}
 		expect(res.config.getScope('nonexistent')).toBeUndefined();
-		expect(res.config.getScope('backlink')).toBeUndefined();
-		expect(res.config.getScope('backlinks')).toBeUndefined();
 		expect(res.config.getScope('referencedLinks')).toBeUndefined();
 	});
 
@@ -461,15 +461,24 @@ describe('initEngineConfig', () => {
 					extract: () => [],
 					matchString: substringStringMatch,
 				},
+				{
+					canonicalName: 'customThree',
+					aliases: ['backlinks'],
+					extract: () => [],
+					matchString: substringStringMatch,
+				},
 			],
 		});
 		expect(collisionRes.ok).toBe(false);
-		expect(collisionRes.diagnostics).toHaveLength(2);
+		expect(collisionRes.diagnostics).toHaveLength(3);
 		expect(collisionRes.diagnostics[0]?.issue).toContain(
 			'Scope name "folder" collides with existing scope "path"',
 		);
 		expect(collisionRes.diagnostics[1]?.issue).toContain(
 			'Scope name "shared_alias" collides with existing scope "customOne"',
+		);
+		expect(collisionRes.diagnostics[2]?.issue).toContain(
+			'Scope name "backlinks" collides with existing scope "backlinks"',
 		);
 	});
 

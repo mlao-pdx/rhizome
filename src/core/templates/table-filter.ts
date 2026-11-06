@@ -278,5 +278,5 @@ export function tableFilter(
 		lines.push(`| ${rowCells.join(' | ')} |`);
 	}
 
-	return lines.join('\n');
+	return `\n${lines.join('\n')}\n`;
 }

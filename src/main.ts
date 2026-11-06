@@ -2,6 +2,7 @@ import { type App, type CachedMetadata, Plugin, type TAbstractFile, TFile } from
 import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
 import { isPathInTemplateFolders, type TemplateFolderConfig } from '@core/templates';
 import { ActiveQueryRoster } from './adapters/active-query-roster';
+import { BacklinkIndex } from './adapters/backlink-index';
 import { createRhizomeEditorExtension } from './adapters/codemirror/rhizome-editor-extension';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
 import { PluginDataStore } from './adapters/plugin-data-store';
@@ -51,6 +52,7 @@ export default class RhizomePlugin extends Plugin {
 	loggerAdapter!: ObsidianLoggerAdapter;
 	dataStore!: PluginDataStore;
 	activeQueryRoster!: ActiveQueryRoster;
+	backlinkIndex!: BacklinkIndex;
 
 	override async onload() {
 		this.settings = { ...DEFAULT_SETTINGS };
@@ -77,21 +79,41 @@ export default class RhizomePlugin extends Plugin {
 			version: this.manifest.version,
 		});
 
-		this.activeQueryRoster = new ActiveQueryRoster(this.app, this.loggerAdapter);
+		this.backlinkIndex = new BacklinkIndex(this.app, (file) => this.isIgnoredNote(file));
+		this.activeQueryRoster = new ActiveQueryRoster(
+			this.app,
+			this.loggerAdapter,
+			this.backlinkIndex,
+		);
 		this.register(() => this.activeQueryRoster.clear());
+		this.register(() => this.backlinkIndex.dispose());
 
-		let nudgeTimer: ReturnType<typeof setTimeout> | null = null;
-		let resetTimer: ReturnType<typeof setTimeout> | null = null;
-		const scheduleReactiveQueryNudge = (): void => {
-			if (this.activeQueryRoster.size === 0) {
-				return;
+		let refreshTimer: number | null = null;
+		let resetTimer: number | null = null;
+		let indexDirty = false;
+		let nudgePending = false;
+
+		const runRefresh = (): void => {
+			const dirty = indexDirty;
+			const nudge = nudgePending;
+			indexDirty = false;
+			nudgePending = false;
+
+			let changed = false;
+			if (dirty && this.backlinkIndex.isBuilt) {
+				changed = this.backlinkIndex.rebuild();
 			}
-			if (nudgeTimer !== null) {
-				clearTimeout(nudgeTimer);
-			}
-			nudgeTimer = setTimeout(() => {
-				nudgeTimer = null;
+			if ((nudge || changed) && this.activeQueryRoster.size > 0) {
 				void this.activeQueryRoster.nudge();
+			}
+		};
+		const scheduleRefresh = (): void => {
+			if (refreshTimer !== null) {
+				window.clearTimeout(refreshTimer);
+			}
+			refreshTimer = window.setTimeout(() => {
+				refreshTimer = null;
+				runRefresh();
 			}, REACTIVE_QUERY_DEBOUNCE_MS);
 		};
 		const scheduleTemplateReset = (): void => {
@@ -99,20 +121,20 @@ export default class RhizomePlugin extends Plugin {
 				return;
 			}
 			if (resetTimer !== null) {
-				clearTimeout(resetTimer);
+				window.clearTimeout(resetTimer);
 			}
-			resetTimer = setTimeout(() => {
+			resetTimer = window.setTimeout(() => {
 				resetTimer = null;
 				this.activeQueryRoster.resetAll();
 			}, REACTIVE_QUERY_DEBOUNCE_MS);
 		};
 		this.register(() => {
-			if (nudgeTimer !== null) {
-				clearTimeout(nudgeTimer);
-				nudgeTimer = null;
+			if (refreshTimer !== null) {
+				window.clearTimeout(refreshTimer);
+				refreshTimer = null;
 			}
 			if (resetTimer !== null) {
-				clearTimeout(resetTimer);
+				window.clearTimeout(resetTimer);
 				resetTimer = null;
 			}
 		});
@@ -137,7 +159,9 @@ export default class RhizomePlugin extends Plugin {
 					isMarkdownPath(file?.path) &&
 					!isDoNotIndexFrontmatter(cache ?? this.app.metadataCache.getFileCache(file))
 				) {
-					scheduleReactiveQueryNudge();
+					indexDirty = true;
+					nudgePending = true;
+					scheduleRefresh();
 				}
 			}),
 		);
@@ -150,7 +174,9 @@ export default class RhizomePlugin extends Plugin {
 					isMarkdownPath(file?.path) &&
 					!isDoNotIndexFrontmatter(prevCache ?? this.app.metadataCache.getFileCache(file))
 				) {
-					scheduleReactiveQueryNudge();
+					indexDirty = true;
+					nudgePending = true;
+					scheduleRefresh();
 				}
 			}),
 		);
@@ -166,8 +192,19 @@ export default class RhizomePlugin extends Plugin {
 					(isMarkdownPath(file?.path) || isMarkdownPath(oldPath)) &&
 					!isDoNotIndexFrontmatter(getAbstractFileCache(this.app, file))
 				) {
-					scheduleReactiveQueryNudge();
+					indexDirty = true;
+					nudgePending = true;
+					scheduleRefresh();
 				}
+			}),
+		);
+		this.registerEvent(
+			this.app.metadataCache.on('resolve', (file) => {
+				if (this.isIgnoredNote(file)) {
+					return;
+				}
+				indexDirty = true;
+				scheduleRefresh();
 			}),
 		);
 
@@ -177,7 +214,9 @@ export default class RhizomePlugin extends Plugin {
 		this.registerMarkdownCodeBlockProcessor('rhizome', (source, el, ctx) =>
 			processRhizomeCodeBlock(source, el, ctx, this),
 		);
-		this.registerEditorExtension(createRhizomeEditorExtension(this.app, this.loggerAdapter));
+		this.registerEditorExtension(
+			createRhizomeEditorExtension(this.app, this.loggerAdapter, this.backlinkIndex),
+		);
 
 		this.app.workspace.onLayoutReady(() => {
 			if (this.settings.loggingEnabled) {
@@ -201,6 +240,10 @@ export default class RhizomePlugin extends Plugin {
 		await this.dataStore.saveSettings(this.settings);
 	}
 
+	private isIgnoredNote(file: TFile): boolean {
+		return isDoNotIndexFrontmatter(getAbstractFileCache(this.app, file));
+	}
+
 	getTemplateFolderConfig(): TemplateFolderConfig {
 		return {
 			templatesFolder: this.settings.templatesFolder,
@@ -215,7 +258,16 @@ export default class RhizomePlugin extends Plugin {
 		options?: VaultQueryOptions,
 		onUpdate?: VaultQueryCallback,
 	): Promise<VaultQueryResult> {
-		const result = await runVaultQuery(this.app, queries, options, this.loggerAdapter);
+		const result = await runVaultQuery(
+			this.app,
+			queries,
+			{
+				...options,
+				backlinks: this.backlinkIndex.snapshot(),
+				isIgnoredFile: (file) => this.isIgnoredNote(file),
+			},
+			this.loggerAdapter,
+		);
 		if (onUpdate || typeof options?.onReset === 'function') {
 			this.activeQueryRoster?.register(queries, options, result, onUpdate);
 		}
@@ -223,6 +275,15 @@ export default class RhizomePlugin extends Plugin {
 	}
 
 	async explainQuery(input: string = '', options?: VaultQueryOptions): Promise<string> {
-		return explainVaultQuery(this.app, input, options, this.loggerAdapter);
+		return explainVaultQuery(
+			this.app,
+			input,
+			{
+				...options,
+				backlinks: this.backlinkIndex.snapshot(),
+				isIgnoredFile: (file) => this.isIgnoredNote(file),
+			},
+			this.loggerAdapter,
+		);
 	}
 }

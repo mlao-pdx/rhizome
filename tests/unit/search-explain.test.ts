@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	buildRegex101Url,
+	describeScopeSemantics,
 	explainQuery,
 	formatDateIntervalWindow,
 	formatSourceCaretSnippet,
@@ -104,6 +105,16 @@ describe('explain-helpers', () => {
 			startColumn: 7,
 		});
 		expect(snippet).toBe('1 | #work ‼️[priority = "bad"]‼️');
+	});
+
+	it('describes the backlinks scope semantics', () => {
+		const semantics = describeScopeSemantics('backlinks');
+		expect(semantics.friendlyTitle).toBe('Backlink filter');
+		expect(semantics.targetsDescription).toContain('backlinks[].path');
+		expect(semantics.matchRuleDescription).toBe('case-insensitive substring match');
+		expect(semantics.formatPlainStringMatch('Source')).toBe(
+			'contains `Source` (case-insensitive)',
+		);
 	});
 });
 

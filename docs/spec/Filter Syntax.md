@@ -9,7 +9,7 @@
 
 ### 1.1 Core Architectural Pillars
 
-1. **No Full-Text Body Search, Bare-Text Search, `resolvedLinks`, or Backlinks**: Queries operate strictly against per-note file metadata (`TFile` attributes + normalized per-note `CachedMetadata` + properties). The DSL and normalizer do not ingest `MetadataCache.resolvedLinks` and do not support backlink queries (`backlink:`, `backlinks:`, `referencedLinks:`); only outgoing `links` and `embeds` recorded on the note itself are indexed. Every filter atom must specify an explicit target (`(...)`, `[property...]`, `scope:...`, or `#tag`); unscoped bare words or literals are rejected at compile time with `SYNTAX_ERROR` and an actionable hint.
+1. **No Full-Text Body Search or Bare-Text Search; Resolved-Link Backlinks Only**: Queries operate strictly against per-note file metadata (`TFile` attributes + normalized per-note `CachedMetadata` + properties). The DSL and normalizer do not ingest `MetadataCache.resolvedLinks` directly; the adapter attaches an inverse backlink index to each document downstream, so `backlinks:` / `backlink:` filters match only **resolved** links (unresolved wikilinks cannot produce backlinks). Backlink targets are Markdown notes; sources may be any live vault file (Markdown, canvas, attachment) except notes flagged `◊InternalRhizome: { "001": ... }`. Every filter atom must specify an explicit target (`(...)`, `[property...]`, `scope:...`, or `#tag`); unscoped bare words or literals are rejected at compile time with `SYNTAX_ERROR` and an actionable hint.
 2. **Authorized Queries & Native ECMAScript `RegExp`**: This engine is intended for queries the vault owner has authorized for execution. It uses native ECMAScript regular expressions (`new RegExp(pattern, flags)` with stateless flags `i`, `m`, `s`, `u`) and deliberately provides no execution deadline or protection against pathological backtracking. Metadata strings are not length-bounded. Integrations must not treat imported or shared query text as trusted solely because it resides in a local vault.
 3. **Centralized, Runtime-Immutable Configuration & Normalization Fingerprinting (`initEngineConfig`)**:
    - Timezone validation, property-type registry normalization, and custom scope deduplication happen once in `initEngineConfig(rawConfig)`, returning a deeply frozen `ResolvedEngineConfig` closure.
@@ -212,6 +212,11 @@ export interface NormalizedPropertyLocation {
   origin: string;
 }
 
+export interface BacklinkRef {
+  path: string;  // Vault-relative path of the resolved linking source note/file
+  count: number; // Number of resolved links from that source to this note
+}
+
 export interface NormalizedDocument {
   /** Fingerprint of the ResolvedEngineConfig (timeZone + propertyTypes) used to normalize this document */
   normalizationFingerprint: string;
@@ -230,6 +235,7 @@ export interface NormalizedDocument {
   properties: Record<string, unknown>;       // Null-prototype O(1) lookup map with authored keys and Collision Resolution Rule
   propertyLocations: NormalizedPropertyLocation[]; // Full occurrence stream of non-omitted properties with origin
   diagnostics: DocumentDiagnostic[];         // Non-fatal document property diagnostics
+  backlinks?: readonly BacklinkRef[];        // Resolved backlinks attached by the adapter; empty when none
 }
 
 // ============================================================================
@@ -436,9 +442,10 @@ export interface VaultEvaluationReport {
 | `links`                  | `links`, `link`, `outlink`, `outlinks`     | `doc.links.flatMap(l => l.resolvedPath ? [l.link, l.rawTarget, l.resolvedPath, l.displayText] : [l.link, l.rawTarget, l.displayText])` | Case-insensitive substring.                                                                     | `.toLowerCase()`                                           |
 | `embeds`                 | `embeds`, `embed`                          | `doc.embeds.flatMap(e => e.resolvedPath ? [e.link, e.rawTarget, e.resolvedPath] : [e.link, e.rawTarget])`                              | Case-insensitive substring.                                                                     | `.toLowerCase()`                                           |
 | `blocks`                 | `blocks`, `block`                          | `doc.blocks.map(b => b.id)`                                                                                                            | Strips optional leading `^` from `queryValue`; case-insensitive **exact** equality (`t === q`). | Strips optional leading `^`, `.toLowerCase()`              |
+| `backlinks`              | `backlinks`, `backlink`                    | `(doc.backlinks ?? []).flatMap(b => [b.path, basename(b.path) without '.md'])`                                                         | Case-insensitive substring over source paths and basenames. Counts are **not** matched.         | `.toLowerCase()`                                           |
 
-- **No `resolvedLinks` or Backlink Scopes**: The DSL does not support `resolvedLinks` or backlink scopes (`backlink:`, `backlinks:`, `referencedLinks:`). Normalization and scoped filtering operate strictly on per-note metadata (`links` and `embeds` inspect only outgoing references from the note's own `CachedMetadata`).
-- **Scope Comparisons Are Lexicographical, Not Count/Existence**: On any scope, comparison operators (`=`, `!=`, `<`, `>`, `<=`, `>=`) compare each extracted target string against the normalized right-hand side string using exact equality (`=`, `!=`) or UTF-16 code-unit lexicographical ordering (`<`, `>`, `<=`, `>=`). In particular, `tag: > 0` or `alias: > 0` compares each tag or alias string lexicographically against the text `"0"` (matching values whose normalized text sorts after `"0"`), **not** "has more than 0 tags/aliases". Because system metadata (`tags`, `aliases`, `cssclasses`) is queried via scopes rather than `[...]` property filters, use a regex scope filter such as `tag:/./`, `aliases:/./`, or `cssclasses:/./` to test whether a note has at least one value in that scope (and `!tag:/./`, `!aliases:/./`, or `!cssclasses:/./` to match notes with none).
+- **Backlink Semantics (Resolved Links Only)**: `backlinks:` matches the vault paths and basenames of source notes whose links currently resolve to the target note. The inverse index is derived from `MetadataCache.resolvedLinks`, so an unresolved wikilink contributes no backlink until its target exists; only Markdown notes are targets, while sources may be any live vault file (Markdown, canvas, attachment). Sources flagged `◊InternalRhizome: { "001": ... }` are excluded. Counts reflect the number of resolved links from that source and are exposed in the payload (deterministic count-descending then path-ascending order) but are not compared by `backlinks:`; count-based filtering is out of scope.
+- **Scope Comparisons Are Lexicographical, Not Count/Existence**: On any scope, comparison operators (`=`, `!=`, `<`, `>`, `<=`, `>=`) compare each extracted target string against the normalized right-hand side string using exact equality (`=`, `!=`) or UTF-16 code-unit lexicographical ordering (`<`, `>`, `<=`, `>=`). In particular, `tag: > 0` or `alias: > 0` compares each tag or alias string lexicographically against the text `"0"` (matching values whose normalized text sorts after `"0"`), **not** "has more than 0 tags/aliases"; likewise `backlinks: > 1` compares source paths/basenames lexicographically against `"1"`, not link counts. Because system metadata (`tags`, `aliases`, `cssclasses`) is queried via scopes rather than `[...]` property filters, use a regex scope filter such as `tag:/./`, `aliases:/./`, or `cssclasses:/./` to test whether a note has at least one value in that scope (and `!tag:/./`, `!aliases:/./`, or `!cssclasses:/./` to match notes with none).
 
 ### 2.4 Extended Temporal Model: ISO Literals, Relative `@` Anchors, Day Offsets & Positional Ranges (`[s1, e2)` Iff $s_1 < e_2$)
 
@@ -672,7 +679,7 @@ ValueLeaf         ::= QuotedString
 
 ### 3.4 Normative Literal Decoding & AST Lowering Rules
 
-`ThisReference` lowers to a `this` leaf with its authored `raw` text and decoded path `segments`. `@this.<path>` resolves against the hosting note's normalized payload; array projections such as `@this.tags` and `@this.blocks.id` compare against each resolved scalar. Missing or empty host values evaluate the leaf as false and produce `WARN_MISSING_THIS_VALUE` when host validation is available.
+`ThisReference` lowers to a `this` leaf with its authored `raw` text and decoded path `segments`. `@this.<path>` resolves against the hosting note's normalized payload; array projections such as `@this.tags` and `@this.blocks.id` compare against each resolved scalar. `@this.backlinks` exposes the payload's `BacklinkRef` array, so `@this.backlinks.path` and `@this.backlinks.count` resolve via array-of-object projection; bare `@this.backlinks` is non-scalar (it stops on plain objects) and therefore unresolved. Missing or empty host values (including an empty `backlinks` array) evaluate the leaf as false and produce `WARN_MISSING_THIS_VALUE` when host validation is available.
 
 1. **Empty Query Lowering**: If `Query` contains no `OrExpression` (empty or whitespace-only input), return `ast: { type: 'MATCH_ALL' }`.
 2. **`QuotedString` Escape Decoding (`decodeQuotedString(rawTokenText): string`)**:
@@ -785,6 +792,8 @@ ValueLeaf         ::= QuotedString
 | `HINT_AMBIGUOUS_PRECEDENCE`       | `hint`    | An `OR` `LogicalNode` has a child `AND` `LogicalNode` with `parenthesized !== true`.                                                                                                                                                                                                                                                                                                              | `Evaluated as "(A AND B) OR C".` Hint: `Add parentheses to make precedence explicit.`                                                                                              |
 | `HINT_WIKILINK_BRACKETS_IN_SCOPE` | `hint`    | Every `WikiLinkValue` token lowered into a `VALUE_LEAF`.                                                                                                                                                                                                                                                                                                                                          | `Wikilink brackets "[[...]]" are not needed.` Hint: `Stripped "[[...]]" automatically.`                                                                                            |
 | `HINT_UNCLOSED_REGEX`             | `hint`    | Every unquoted string `LeafMatcher` starting with `'/'` (`value !== '//'`) in a regex-capable leaf position (`ScopedFilterNode` with `operator === ':'` or valid non-`checkbox` `PropertyFilterNode` with `operator === ':'`).                                                                                                                                                                    | `Unquoted "${rawValue}" starts with "/" and is searched as literal text.` Hint: `Add a closing "/" for a regular expression, or wrap in quotes for literal text.`                  |
+
+- **User Property Named `backlinks`**: `[backlinks:x]` remains a valid user-property filter and emits `HINT_PROPERTY_MATCHES_SCOPE` (because `backlinks` is a registered scope name). It is **not** a hard `SYNTAX_ERROR`; only the built-in system keys `tags`, `aliases`, and `cssclasses` are rejected in `[...]`.
 
 ---
 

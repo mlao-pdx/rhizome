@@ -58,7 +58,13 @@ export function renderIntervalComparisonDiagram(referenceTimeMs: number, timeZon
 			.toZonedDateTimeISO('UTC')
 			.toPlainDate();
 	}
-	const day = (offset: number): string => today.add({ days: offset }).toString();
+	const day = (offset: number): string => {
+		try {
+			return today.add({ days: offset }).toString();
+		} catch {
+			return today.toString();
+		}
+	};
 
 	return [
 		'```mermaid',
@@ -190,6 +196,11 @@ export function refScopeFootnote(registry: FootnoteRegistry, canonicalScope: str
 			return registry.ref(
 				'scope-blocks',
 				'**Blocks Scope (`blocks:` / `block:`)**: Matches note block identifiers (`^block-id`), with case-insensitive exact equality by default after stripping any leading `^` from the query value.',
+			);
+		case 'backlinks':
+			return registry.ref(
+				'scope-backlinks',
+				'**Backlinks Scope (`backlinks:` / `backlink:`)**: Searches the source notes that resolve links to this note, matching each source vault path and basename with case-insensitive substring matching by default. Link counts are returned in the payload but are not matched.',
 			);
 		default: {
 			const id = `scope-custom-${slugifyScopeName(canonicalScope)}`;

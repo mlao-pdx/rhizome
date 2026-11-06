@@ -19,6 +19,7 @@ import {
 	createMockManifest,
 	openedModals,
 	Setting,
+	TFile,
 } from '../support/mock-obsidian-app';
 
 function createPlugin(): RhizomePlugin {
@@ -378,4 +379,158 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it('builds the backlink index lazily on the first query and decorates the payload', async () => {
+		const target = makeTFile('notes/target.md');
+		const source = makeTFile('notes/source.md');
+		const app = createMockApp({
+			files: [target, source],
+			markdownFiles: [target],
+			resolvedLinks: { 'notes/source.md': { 'notes/target.md': 2 } },
+		}) as App;
+
+		const plugin = new RhizomePlugin(app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+		expect(plugin.backlinkIndex.isBuilt).toBe(false);
+
+		const result = await plugin.query(
+			{ all: '' },
+			{ timeZone: 'UTC', referenceTimeMs: 1700000000000 },
+		);
+		expect(plugin.backlinkIndex.isBuilt).toBe(true);
+		expect(result['all']?.[0]?.backlinks).toEqual([{ path: 'notes/source.md', count: 2 }]);
+	});
+
+	it('refreshes on metadataCache.resolve for normal files and skips internal notes', async () => {
+		vi.useFakeTimers();
+		try {
+			const target = makeTFile('notes/target.md');
+			const source = makeTFile('notes/source.md');
+			const logNote = makeTFile('◊Rhizome/logs/1700000000000.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/source.md': { 'notes/target.md': 1 },
+			};
+			const fileCache = new Map<string, unknown>([
+				[
+					logNote.path,
+					{
+						frontmatter: {
+							'◊InternalRhizome': { '001': 'Do not index or query.' },
+						},
+					},
+				],
+			]);
+			const app = createMockApp({
+				files: [target, source],
+				markdownFiles: [target],
+				resolvedLinks,
+				fileCache,
+			}) as App & {
+				metadataCache: { trigger: (event: string, ...args: unknown[]) => void };
+			};
+
+			const plugin = new RhizomePlugin(app, createMockManifest() as PluginManifest);
+			await plugin.onload();
+			await plugin.query(
+				{ all: '' },
+				{ timeZone: 'UTC', referenceTimeMs: 1700000000000 },
+				() => {},
+			);
+			expect(plugin.activeQueryRoster.size).toBe(1);
+
+			const nudgeSpy = vi.spyOn(plugin.activeQueryRoster, 'nudge');
+
+			resolvedLinks['notes/source.md'] = { 'notes/target.md': 3 };
+			app.metadataCache.trigger('resolve', source);
+			await vi.advanceTimersByTimeAsync(600);
+			expect(nudgeSpy).toHaveBeenCalledTimes(1);
+
+			nudgeSpy.mockClear();
+			app.metadataCache.trigger('resolve', logNote);
+			await vi.advanceTimersByTimeAsync(600);
+			expect(nudgeSpy).not.toHaveBeenCalled();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('updates backlinks across cross-file create, rename, and delete lifecycle events', async () => {
+		vi.useFakeTimers();
+		try {
+			const target = makeTFile('notes/target.md');
+			const files = [target];
+			const resolvedLinks: Record<string, Record<string, number>> = {};
+			const app = createMockApp({
+				files,
+				markdownFiles: files,
+				resolvedLinks,
+			}) as App & {
+				metadataCache: { trigger: (event: string, ...args: unknown[]) => void };
+				vault: { trigger: (event: string, ...args: unknown[]) => void };
+			};
+
+			const plugin = new RhizomePlugin(app, createMockManifest() as PluginManifest);
+			await plugin.onload();
+			const updates: unknown[] = [];
+			await plugin.query(
+				{ all: '' },
+				{ timeZone: 'UTC', referenceTimeMs: 1700000000000 },
+				(next) => {
+					updates.push(next);
+				},
+			);
+
+			// Create a source note whose previously unresolved link now resolves.
+			const source = makeTFile('notes/source.md');
+			files.push(source);
+			resolvedLinks['notes/source.md'] = { 'notes/target.md': 1 };
+			app.metadataCache.trigger('changed', source);
+			await vi.advanceTimersByTimeAsync(600);
+			expect(updates).toHaveLength(1);
+			expect(
+				(updates[0] as Record<string, Array<{ backlinks: unknown[] }>>)['all']?.[0]
+					?.backlinks,
+			).toEqual([{ path: 'notes/source.md', count: 1 }]);
+
+			// Rename the source note in place; paths materialize at projection time.
+			const oldPath = source.path;
+			source.path = 'notes/renamed.md';
+			resolvedLinks['notes/renamed.md'] = resolvedLinks[oldPath]!;
+			delete resolvedLinks[oldPath];
+			app.vault.trigger('rename', source, oldPath);
+			await vi.advanceTimersByTimeAsync(600);
+			expect(updates).toHaveLength(2);
+			expect(
+				(updates[1] as Record<string, Array<{ backlinks: unknown[] }>>)['all']?.[0]
+					?.backlinks,
+			).toEqual([{ path: 'notes/renamed.md', count: 1 }]);
+
+			// Delete the source note; its backlink disappears after the debounced refresh.
+			files.splice(files.indexOf(source), 1);
+			delete resolvedLinks['notes/renamed.md'];
+			app.metadataCache.trigger('deleted', source);
+			await vi.advanceTimersByTimeAsync(600);
+			expect(updates).toHaveLength(3);
+			expect(
+				(updates[2] as Record<string, Array<{ backlinks: unknown[] }>>)['all']?.[0]
+					?.backlinks,
+			).toEqual([]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });
+
+function makeTFile(path: string): TFile {
+	const slashIdx = path.lastIndexOf('/');
+	const name = slashIdx === -1 ? path : path.slice(slashIdx + 1);
+	const dotIdx = name.lastIndexOf('.');
+	const file = new TFile();
+	file.path = path;
+	file.name = name;
+	file.basename = dotIdx === -1 ? name : name.slice(0, dotIdx);
+	file.extension = dotIdx === -1 ? '' : name.slice(dotIdx + 1);
+	file.parent = { path: slashIdx === -1 ? '' : path.slice(0, slashIdx) };
+	file.stat = { ctime: 1700000000000, mtime: 1700000000000, size: 100 };
+	return file;
+}
