@@ -1,6 +1,6 @@
 /*
- * Scoped CodeMirror 6 syntax highlighting, diagnostic underlines, and hover tooltips
- * for fenced `rhizome` codeblocks.
+ * Scoped CodeMirror 6 syntax highlighting for fenced `rhizome` codeblocks and
+ * message content for `@codemirror/lint` tooltips.
  */
 
 .cm-rhizome-tok-liquid-delimiter {
@@ -58,39 +58,6 @@
 .cm-rhizome-tok-comment {
 	color: var(--code-comment, var(--text-faint));
 	font-style: italic;
-}
-
-.cm-rhizome-diag-error {
-	text-decoration: underline wavy var(--text-error);
-	text-underline-offset: 3px;
-}
-
-.cm-rhizome-diag-warning {
-	text-decoration: underline wavy var(--text-warning);
-	text-underline-offset: 3px;
-}
-
-.cm-rhizome-diag-hint {
-	text-decoration: underline dotted var(--text-accent);
-	text-underline-offset: 3px;
-}
-
-.cm-rhizome-tooltip {
-	background-color: var(--background-primary);
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-m, 6px);
-	box-shadow: var(--shadow-s);
-	color: var(--text-normal);
-	font-family: var(--font-interface);
-	font-size: var(--font-ui-small, 13px);
-	max-width: 440px;
-	padding: 8px 10px;
-}
-
-.cm-rhizome-tooltip-item + .cm-rhizome-tooltip-item {
-	border-top: 1px solid var(--background-modifier-border);
-	margin-top: 6px;
-	padding-top: 6px;
 }
 
 .cm-rhizome-tooltip-header {

@@ -626,7 +626,7 @@ When a note opens, every property is collapsed.
    RangeError: Decorations that replace line breaks may not be specified via plugins
    ```
 
-   Keep replace and block decorations in a `StateField`, provided with `EditorView.decorations.from(field)`. Keep the existing `ViewPlugin` for token marks, diagnostics and tooltips.
+   Keep replace and block decorations in a `StateField`, provided with `EditorView.decorations.from(field)`. Keep the existing token `ViewPlugin` for marks; diagnostics and tooltips come from `@codemirror/lint`.
 
 2. **Compute visibility inside the `StateField` update.** Work it out from `tr.state.selection`, so reveal and selection land in the same transaction. That avoids the two-keystroke effect you get when expansion happens after the selection has already moved.
 

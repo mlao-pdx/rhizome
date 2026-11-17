@@ -1,44 +1,23 @@
-import { type Extension, type Range, StateEffect, type Text } from '@codemirror/state';
+import { type Extension, type Range, StateEffect } from '@codemirror/state';
 import {
 	Decoration,
 	type DecorationSet,
 	type EditorView,
-	hoverTooltip,
 	type PluginValue,
-	type Tooltip,
 	ViewPlugin,
 	type ViewUpdate,
 } from '@codemirror/view';
-import { editorInfoField, type App, type TFile } from 'obsidian';
-import {
-	hasInternalRhizomeFlag,
-	initEngineConfig,
-	INTERNAL_RHIZOME_CODES,
-	type NormalizedDocument,
-	normalizeObsidianMetadata,
-	type PropertyTypeRegistry,
-	type ResolvedEngineConfig,
-} from '@core/search';
-import {
-	analyzeRhizomeCodeBlock,
-	type CodeBlockAnalysis,
-	type CodeBlockDiagnosticSpan,
-	type CodeBlockTokenKind,
-} from '@core/templates';
+import type { App } from 'obsidian';
+import type { CodeBlockTokenKind } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import type { BacklinkIndex } from '../backlink-index';
 import { loadVaultPropertyTypes } from '../vault-query-logging';
+import { buildFallbackConfig, createRhizomeAnalysisCache } from './rhizome-analysis-cache';
+import { findRhizomeCodeBlocks } from './rhizome-code-blocks';
+import { createRhizomeLintExtension } from './rhizome-lint';
 
-/**
- * Location and content slice of a fenced `rhizome` codeblock in a CodeMirror document.
- */
-export interface FencedRhizomeBlock {
-	readonly bodyFrom: number;
-	readonly bodyTo: number;
-	readonly source: string;
-}
-
-const FENCE_OPEN_RE = /^[ \t]*(`{3,}|~{3,})\s*(.*)$/;
+export { findRhizomeCodeBlocks, type FencedRhizomeBlock } from './rhizome-code-blocks';
+export { resolveEditorHostFile } from './rhizome-analysis-cache';
 
 const TOKEN_DECORATIONS: Readonly<Record<CodeBlockTokenKind, Decoration>> = {
 	'liquid-delimiter': Decoration.mark({ class: 'cm-rhizome-tok-liquid-delimiter' }),
@@ -61,266 +40,19 @@ const TOKEN_DECORATIONS: Readonly<Record<CodeBlockTokenKind, Decoration>> = {
 	'query-paren': Decoration.mark({ class: 'cm-rhizome-tok-query-paren' }),
 };
 
-const DIAG_DECORATIONS = {
-	error: Decoration.mark({ class: 'cm-rhizome-diag-error' }),
-	warning: Decoration.mark({ class: 'cm-rhizome-diag-warning' }),
-	hint: Decoration.mark({ class: 'cm-rhizome-diag-hint' }),
-} as const;
-
-function resolveSystemTimeZone(): string {
-	try {
-		const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-		return typeof tz === 'string' && tz.trim() ? tz.trim() : 'UTC';
-	} catch {
-		return 'UTC';
-	}
-}
-
 /**
- * Finds fenced `rhizome` codeblocks within `doc` that intersect `[windowFrom, windowTo]`.
- */
-export function findRhizomeCodeBlocks(
-	doc: Text,
-	windowFrom: number = 0,
-	windowTo: number = doc.length,
-): FencedRhizomeBlock[] {
-	const blocks: FencedRhizomeBlock[] = [];
-	const totalLines = doc.lines;
-	let inFence = false;
-	let fenceChars = '';
-	let isRhizomeFence = false;
-	let bodyFrom = 0;
-
-	for (let lineNo = 1; lineNo <= totalLines; lineNo++) {
-		const line = doc.line(lineNo);
-		if (!inFence && line.from > windowTo) {
-			break;
-		}
-		const match = FENCE_OPEN_RE.exec(line.text);
-		if (!inFence) {
-			if (match) {
-				fenceChars = match[1] ?? '';
-				const info = (match[2] ?? '').trim();
-				inFence = true;
-				isRhizomeFence = /^rhizome(?:\s|$)/i.test(info);
-				bodyFrom = Math.min(doc.length, line.to + 1);
-			}
-		} else if (match) {
-			const candidateFence = match[1] ?? '';
-			const trailing = (match[2] ?? '').trim();
-			if (
-				candidateFence[0] === fenceChars[0] &&
-				candidateFence.length >= fenceChars.length &&
-				trailing.length === 0
-			) {
-				if (isRhizomeFence) {
-					const bodyTo = Math.max(bodyFrom, line.from);
-					if (bodyTo >= windowFrom && bodyFrom <= windowTo) {
-						blocks.push({
-							bodyFrom,
-							bodyTo,
-							source: doc.sliceString(bodyFrom, bodyTo),
-						});
-					}
-				}
-				inFence = false;
-				fenceChars = '';
-				isRhizomeFence = false;
-			}
-		}
-	}
-
-	if (inFence && isRhizomeFence) {
-		const bodyTo = doc.length;
-		if (bodyTo >= windowFrom && bodyFrom <= windowTo) {
-			blocks.push({
-				bodyFrom,
-				bodyTo,
-				source: doc.sliceString(bodyFrom, bodyTo),
-			});
-		}
-	}
-
-	return blocks;
-}
-
-function buildFallbackConfig(propertyTypes: PropertyTypeRegistry): ResolvedEngineConfig {
-	const primary = initEngineConfig({
-		timeZone: resolveSystemTimeZone(),
-		propertyTypes,
-	});
-	if (primary.ok) {
-		return primary.config;
-	}
-	const fallback = initEngineConfig({ timeZone: 'UTC', propertyTypes: {} });
-	if (!fallback.ok) {
-		throw new Error('Failed to initialize fallback UTC engine config');
-	}
-	return fallback.config;
-}
-
-function renderDiagnosticTooltipDom(diags: readonly CodeBlockDiagnosticSpan[]): HTMLElement {
-	const container = document.createElement('div');
-	container.className = 'cm-rhizome-tooltip';
-
-	for (const diag of diags) {
-		const item = document.createElement('div');
-		item.className = `cm-rhizome-tooltip-item cm-rhizome-tooltip-${diag.severity}`;
-
-		const header = document.createElement('div');
-		header.className = 'cm-rhizome-tooltip-header';
-
-		const badge = document.createElement('span');
-		badge.className = `cm-rhizome-tooltip-badge cm-rhizome-tooltip-badge-${diag.severity}`;
-		badge.textContent = diag.severity.toUpperCase();
-		header.appendChild(badge);
-
-		const codeEl = document.createElement('code');
-		codeEl.className = 'cm-rhizome-tooltip-code';
-		codeEl.textContent = diag.code;
-		header.appendChild(codeEl);
-
-		item.appendChild(header);
-
-		const issueEl = document.createElement('div');
-		issueEl.className = 'cm-rhizome-tooltip-issue';
-		issueEl.textContent = diag.issue;
-		item.appendChild(issueEl);
-
-		if (diag.hint) {
-			const hintEl = document.createElement('div');
-			hintEl.className = 'cm-rhizome-tooltip-hint';
-			hintEl.textContent = `Fix: ${diag.hint}`;
-			item.appendChild(hintEl);
-		}
-
-		container.appendChild(item);
-	}
-
-	return container;
-}
-
-interface HostResolutionCacheEntry {
-	readonly cache: unknown;
-	readonly mtime: number;
-	readonly revision: number;
-	readonly config: ResolvedEngineConfig;
-	readonly resolved: {
-		readonly hostDoc: NormalizedDocument | null;
-		readonly cacheSignature: string;
-	};
-}
-
-/**
- * Resolves the vault file backing a specific editor view. Reads the view's own `editorInfoField`
- * instead of the workspace's globally active file so split panes, canvas cards, and other
- * embedded editors resolve their own host note.
- */
-export function resolveEditorHostFile(view: EditorView): TFile | null {
-	return view.state.field(editorInfoField, false)?.file ?? null;
-}
-
-/**
- * Creates the CodeMirror 6 editor extension providing syntax highlighting, diagnostic underlines,
- * and hover tooltips inside fenced `rhizome` codeblocks.
+ * Creates the CodeMirror 6 editor extension providing syntax highlighting inside fenced `rhizome`
+ * codeblocks and lint-backed diagnostic underlines and tooltips.
  */
 export function createRhizomeEditorExtension(
 	app: App,
 	logger?: LoggerPort,
 	backlinkIndex?: BacklinkIndex,
 ): Extension {
-	let cachedConfig: ResolvedEngineConfig = buildFallbackConfig({});
 	let refreshPending = false;
 	const activeViews = new Set<EditorView>();
 	const configRefreshEffect = StateEffect.define<void>();
-	const analysisCache = new Map<string, CodeBlockAnalysis>();
-
-	const hostResolutionCache = new Map<string, HostResolutionCacheEntry>();
-	let hostSigCounter = 0;
-
-	const resolveHostDoc = (
-		view: EditorView,
-	): {
-		hostDoc: NormalizedDocument | null;
-		cacheSignature: string;
-	} => {
-		const hostFile = resolveEditorHostFile(view);
-		if (!hostFile) {
-			return { hostDoc: null, cacheSignature: 'null' };
-		}
-		const cache = app.metadataCache.getFileCache(hostFile);
-		const mtime = hostFile.stat?.mtime ?? 0;
-		const revision = backlinkIndex?.revision ?? 0;
-		const cached = hostResolutionCache.get(hostFile.path);
-		if (
-			cached !== undefined &&
-			cached.cache === cache &&
-			cached.mtime === mtime &&
-			cached.revision === revision &&
-			cached.config === cachedConfig
-		) {
-			return cached.resolved;
-		}
-
-		let resolved: HostResolutionCacheEntry['resolved'];
-		if (
-			hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)
-		) {
-			resolved = { hostDoc: null, cacheSignature: `${hostFile.path}:ignored` };
-		} else {
-			try {
-				const resolveLinkPath = (rawTarget: string, sourcePath: string) =>
-					app.metadataCache.getFirstLinkpathDest?.(rawTarget, sourcePath)?.path ?? null;
-				const hostDoc = normalizeObsidianMetadata(
-					hostFile,
-					cache,
-					cachedConfig,
-					[],
-					resolveLinkPath,
-				);
-				const withBacklinks = backlinkIndex?.attach(hostDoc, hostFile) ?? hostDoc;
-				resolved = {
-					hostDoc: withBacklinks,
-					cacheSignature: `${hostFile.path}:${mtime}:${revision}:${++hostSigCounter}`,
-				};
-			} catch {
-				resolved = { hostDoc: null, cacheSignature: `${hostFile.path}:err` };
-			}
-		}
-
-		hostResolutionCache.set(hostFile.path, {
-			cache,
-			mtime,
-			revision,
-			config: cachedConfig,
-			resolved,
-		});
-		if (hostResolutionCache.size > 32) {
-			const oldestPath = hostResolutionCache.keys().next().value;
-			if (oldestPath !== undefined) {
-				hostResolutionCache.delete(oldestPath);
-			}
-		}
-		return resolved;
-	};
-
-	const getCachedAnalysis = (source: string, view: EditorView): CodeBlockAnalysis => {
-		const { hostDoc, cacheSignature } = resolveHostDoc(view);
-		const cacheKey = `${cacheSignature}\0${source}`;
-		const hit = analysisCache.get(cacheKey);
-		if (hit) {
-			return hit;
-		}
-		if (analysisCache.size >= 32) {
-			const oldestKey = analysisCache.keys().next().value;
-			if (oldestKey !== undefined) {
-				analysisCache.delete(oldestKey);
-			}
-		}
-		const computed = analyzeRhizomeCodeBlock(source, cachedConfig, Date.now(), hostDoc);
-		analysisCache.set(cacheKey, computed);
-		return computed;
-	};
+	const analysisCache = createRhizomeAnalysisCache(app, backlinkIndex);
 
 	const refreshPropertyTypes = (): void => {
 		if (refreshPending) {
@@ -329,8 +61,7 @@ export function createRhizomeEditorExtension(
 		refreshPending = true;
 		void loadVaultPropertyTypes(app, logger)
 			.then((registry) => {
-				cachedConfig = buildFallbackConfig(registry);
-				analysisCache.clear();
+				analysisCache.setConfig(buildFallbackConfig(registry));
 				for (const view of activeViews) {
 					view.dispatch({ effects: configRefreshEffect.of(undefined) });
 				}
@@ -379,24 +110,13 @@ export function createRhizomeEditorExtension(
 				const ranges: Array<Range<Decoration>> = [];
 
 				for (const block of blocks) {
-					const analysis = getCachedAnalysis(block.source, view);
+					const analysis = analysisCache.getCachedAnalysis(block.source, view);
 
 					for (const tok of analysis.tokens) {
 						const from = block.bodyFrom + tok.startOffset;
 						const to = block.bodyFrom + tok.endOffset;
 						if (to > from && to <= view.state.doc.length) {
 							ranges.push(TOKEN_DECORATIONS[tok.kind].range(from, to));
-						}
-					}
-
-					for (const diag of analysis.diagnostics) {
-						const from = block.bodyFrom + diag.startOffset;
-						const to = Math.min(
-							view.state.doc.length,
-							Math.max(from + 1, block.bodyFrom + diag.endOffset),
-						);
-						if (to > from) {
-							ranges.push(DIAG_DECORATIONS[diag.severity].range(from, to));
 						}
 					}
 				}
@@ -409,38 +129,11 @@ export function createRhizomeEditorExtension(
 		},
 	);
 
-	const diagnosticHover = hoverTooltip((view: EditorView, pos: number): Tooltip | null => {
-		const blocks = findRhizomeCodeBlocks(view.state.doc, pos, pos);
-		const block = blocks.find((b) => pos >= b.bodyFrom && pos <= b.bodyTo);
-		if (!block) {
-			return null;
-		}
-
-		const relPos = pos - block.bodyFrom;
-		const analysis = getCachedAnalysis(block.source, view);
-		const matching = analysis.diagnostics.filter(
-			(d) => relPos >= d.startOffset && relPos <= Math.max(d.startOffset + 1, d.endOffset),
-		);
-		if (matching.length === 0) {
-			return null;
-		}
-
-		const first = matching[0]!;
-		const from = block.bodyFrom + first.startOffset;
-		const to = Math.min(
-			view.state.doc.length,
-			Math.max(from + 1, block.bodyFrom + first.endOffset),
-		);
-
-		return {
-			pos: from,
-			end: to,
-			above: true,
-			create() {
-				return { dom: renderDiagnosticTooltipDom(matching) };
-			},
-		};
-	});
-
-	return [highlighterPlugin, diagnosticHover];
+	return [
+		highlighterPlugin,
+		createRhizomeLintExtension(
+			(source, view) => analysisCache.getCachedAnalysis(source, view),
+			configRefreshEffect,
+		),
+	];
 }
