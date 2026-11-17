@@ -6,6 +6,7 @@ import {
 	createQueryTagEnvironment,
 	maskQueryBlockBodies,
 	offsetRangeToSourceSpan,
+	type QueryTagBinding,
 	type QueryTagEnvironment,
 	registerQueryTag,
 } from './query-tag';
@@ -146,18 +147,18 @@ export function formatTemplateDiagnosticsMarkdown(
 }
 
 /**
- * Creates a configured, vault-scoped `Liquid` instance with `{% query %}` registered and
- * partials/layouts locked down to the configured vault folders.
+ * Builds a configured, vault-scoped `Liquid` instance whose `{% query %}` and `{% heading %}`
+ * tags resolve their per-parse environment through `getBinding`.
  */
-export function createRhizomeLiquidInstance(
-	env: QueryTagEnvironment,
-	originalSource?: string,
+function buildRhizomeLiquidInstance(
+	getBinding: () => QueryTagBinding,
+	fileSources: Map<string, string>,
 	folders?: TemplateFolderConfig,
 	readTemplateFile?: (vaultRelativePath: string) => Promise<string | null>,
 ): Liquid {
 	installTemporalTokenizerExtensions();
 	const resolvedFolders = resolveTemplateFolders(folders);
-	const fs = createVaultLiquidFs(resolvedFolders, readTemplateFile, env.fileSources);
+	const fs = createVaultLiquidFs(resolvedFolders, readTemplateFile, fileSources);
 	const liquid = new Liquid({
 		fs,
 		root: [resolvedFolders.templatesFolder],
@@ -170,11 +171,29 @@ export function createRhizomeLiquidInstance(
 		ownPropertyOnly: true,
 		operators: createRhizomeLiquidOperators(),
 	});
-	registerQueryTag(liquid, env, originalSource);
-	registerHeadingTag(liquid, env, originalSource);
+	registerQueryTag(liquid, getBinding);
+	registerHeadingTag(liquid, getBinding);
 	registerTemporalLiquidExtensions(liquid);
 	registerPayloadLiquidFilters(liquid);
 	return liquid;
+}
+
+/**
+ * Creates a configured, vault-scoped `Liquid` instance with `{% query %}` registered and
+ * partials/layouts locked down to the configured vault folders.
+ */
+export function createRhizomeLiquidInstance(
+	env: QueryTagEnvironment,
+	originalSource?: string,
+	folders?: TemplateFolderConfig,
+	readTemplateFile?: (vaultRelativePath: string) => Promise<string | null>,
+): Liquid {
+	return buildRhizomeLiquidInstance(
+		() => ({ env, originalSource }),
+		env.fileSources,
+		folders,
+		readTemplateFile,
+	);
 }
 
 /**
@@ -189,17 +208,15 @@ export interface ParsedRhizomeTemplate {
 }
 
 /**
- * Runs synchronous root Pass 1 (static Liquid parse and `{% query %}` block extraction
- * on the root codeblock source only) without executing any vault queries or loading
- * external partial/layout files. Used by the synchronous CodeMirror 6 editor analyzer.
+ * Parses the masked root source, validates static partial/layout filenames, and records any
+ * Liquid parse error in `env.diagnostics`. Shared by the synchronous Pass 1 entry points so
+ * analyzer and render diagnostics cannot drift.
  */
-export function parseRhizomeTemplatePass1(
+function parseAndValidateRoot(
+	liquid: Liquid,
 	source: string,
-	folders?: TemplateFolderConfig,
-	readTemplateFile?: (vaultRelativePath: string) => Promise<string | null>,
-): ParsedRhizomeTemplate {
-	const env = createQueryTagEnvironment();
-	const liquid = createRhizomeLiquidInstance(env, source, folders, readTemplateFile);
+	env: QueryTagEnvironment,
+): Template[] | null {
 	let templates: Template[] | null = null;
 
 	try {
@@ -216,6 +233,57 @@ export function parseRhizomeTemplatePass1(
 			),
 		);
 	}
+
+	return templates;
+}
+
+/**
+ * Runs synchronous root Pass 1 (static Liquid parse and `{% query %}` block extraction
+ * on the root codeblock source only) without executing any vault queries or loading
+ * external partial/layout files. Used by the synchronous CodeMirror 6 editor analyzer.
+ */
+export function parseRhizomeTemplatePass1(
+	source: string,
+	folders?: TemplateFolderConfig,
+	readTemplateFile?: (vaultRelativePath: string) => Promise<string | null>,
+): ParsedRhizomeTemplate {
+	const env = createQueryTagEnvironment();
+	const liquid = createRhizomeLiquidInstance(env, source, folders, readTemplateFile);
+	const templates = parseAndValidateRoot(liquid, source, env);
+
+	return { liquid, env, templates };
+}
+
+interface AnalysisLiquidCache {
+	readonly liquid: Liquid;
+}
+
+let analysisLiquidCache: AnalysisLiquidCache | null = null;
+let analysisBinding: QueryTagBinding | null = null;
+
+/**
+ * Runs the synchronous root Pass 1 used by the CodeMirror 6 editor analyzer, reusing one
+ * configured `Liquid` instance across calls so keystroke-driven analysis does not rebuild the
+ * filesystem, operators, tokenizer extensions, tags, and filters on every cache miss.
+ */
+export function parseRhizomeTemplatePass1ForAnalysis(source: string): ParsedRhizomeTemplate {
+	const env = createQueryTagEnvironment();
+	analysisBinding = { env, originalSource: source };
+
+	if (analysisLiquidCache === null) {
+		const fileSources = new Map<string, string>();
+		analysisLiquidCache = {
+			liquid: buildRhizomeLiquidInstance(() => {
+				if (analysisBinding === null) {
+					throw new Error('Analysis Liquid binding was not initialized.');
+				}
+				return analysisBinding;
+			}, fileSources),
+		};
+	}
+
+	const liquid = analysisLiquidCache.liquid;
+	const templates = parseAndValidateRoot(liquid, source, env);
 
 	return { liquid, env, templates };
 }

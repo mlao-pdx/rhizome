@@ -25,8 +25,13 @@ import {
 	ThisReference,
 	WikiLinkValue,
 } from '@core/search';
-import { offsetRangeToSourceSpan, parseQueryTagArgs, scanQueryBlockSpans } from './query-tag';
-import { parseRhizomeTemplatePass1 } from './template-engine';
+import {
+	offsetRangeToSourceSpan,
+	parseQueryTagArgs,
+	scanQueryBlockSpans,
+	unclosedQueryDiagnostic,
+} from './query-tag';
+import { parseRhizomeTemplatePass1ForAnalysis } from './template-engine';
 import type { ExtractedQueryBlock, TemplateDiagnosticCode } from './types';
 
 /**
@@ -133,17 +138,10 @@ const LIQUID_KEYWORDS: ReadonlySet<string> = new Set([
 
 const LIQUID_INLINE_COMMENT_GLOBAL_RE = new RegExp(LIQUID_INLINE_COMMENT_PATTERN.source, 'g');
 const LIQUID_BLOCK_COMMENT_GLOBAL_RE = new RegExp(LIQUID_BLOCK_COMMENT_PATTERN.source, 'g');
-const LIQUID_INLINE_COMMENT_ANCHORED_RE = new RegExp(`^${LIQUID_INLINE_COMMENT_PATTERN.source}$`);
-const LIQUID_BLOCK_COMMENT_ANCHORED_RE = new RegExp(`^${LIQUID_BLOCK_COMMENT_PATTERN.source}$`);
-const OUTER_LIQUID_BLOCK_OR_TAG_RE = new RegExp(
-	[
-		LIQUID_BLOCK_COMMENT_PATTERN.source,
-		LIQUID_INLINE_COMMENT_PATTERN.source,
-		/\{%[\s\S]*?%\}/.source,
-		/\{\{[\s\S]*?\}\}/.source,
-	].join('|'),
-	'g',
+const LIQUID_INLINE_COMMENT_AT_START_RE = new RegExp(
+	`^(?:${LIQUID_INLINE_COMMENT_PATTERN.source})`,
 );
+const LIQUID_BLOCK_COMMENT_AT_START_RE = new RegExp(`^(?:${LIQUID_BLOCK_COMMENT_PATTERN.source})`);
 
 function scanHeaderAndFooterTokens(
 	source: string,
@@ -156,17 +154,25 @@ function scanHeaderAndFooterTokens(
 	}
 }
 
+/**
+ * Emits token spans for a single Liquid tag or output expression.
+ *
+ * @param hasRightDelimiter - Force whether `end` includes a closing delimiter. Pass `false` for
+ * partial spans whose text may end with a quoted `%}`/`}}`; omit to auto-detect.
+ */
 function scanSingleLiquidTag(
 	source: string,
 	start: number,
 	end: number,
 	out: CodeBlockTokenSpan[],
+	hasRightDelimiter?: boolean,
 ): void {
 	const raw = source.slice(start, end);
 	if (raw.startsWith('{%') || raw.startsWith('{{')) {
 		const leftLen = raw[2] === '-' ? 3 : 2;
 		out.push({ startOffset: start, endOffset: start + leftLen, kind: 'liquid-delimiter' });
-		const hasRightDelim = raw.endsWith('%}') || raw.endsWith('}}');
+		const detectedRightDelim = raw.endsWith('%}') || raw.endsWith('}}');
+		const hasRightDelim = (hasRightDelimiter ?? detectedRightDelim) && detectedRightDelim;
 		const rightLen = hasRightDelim ? (raw[raw.length - 3] === '-' ? 3 : 2) : 0;
 		const innerStart = start + leftLen;
 		const innerEnd = end - rightLen;
@@ -212,6 +218,50 @@ function scanLiquidTagInner(inner: string, baseOffset: number, out: CodeBlockTok
 	}
 }
 
+interface TagDelimiterScan {
+	readonly closeIdx: number;
+	readonly nextOpenIdx: number;
+}
+
+/**
+ * Scans from `from` for the closing delimiter of a Liquid tag/output. Outputs respect quoted
+ * strings (matching LiquidJS `readOutputToken`), while tags close at the first `%}` regardless
+ * of quotes (matching `readTagToken`, which does not set `respectQuoted`). Returns the first
+ * nested opening delimiter so an unclosed tag is not lazily extended into a later tag's closer.
+ */
+function scanTagDelimiters(region: string, from: number, isTag: boolean): TagDelimiterScan {
+	const respectQuoted = !isTag;
+	let quote: '"' | "'" | null = null;
+	for (let i = from; i < region.length; i++) {
+		const ch = region[i]!;
+		if (respectQuoted && quote !== null) {
+			if (ch === '\\') {
+				i++;
+				continue;
+			}
+			if (ch === quote) {
+				quote = null;
+			}
+			continue;
+		}
+		if (respectQuoted && (ch === '"' || ch === "'")) {
+			quote = ch;
+			continue;
+		}
+		if (isTag) {
+			if (ch === '%' && region[i + 1] === '}') {
+				return { closeIdx: i, nextOpenIdx: -1 };
+			}
+		} else if (ch === '}' && region[i + 1] === '}') {
+			return { closeIdx: i, nextOpenIdx: -1 };
+		}
+		if (ch === '{' && (region[i + 1] === '%' || region[i + 1] === '{')) {
+			return { closeIdx: -1, nextOpenIdx: i };
+		}
+	}
+	return { closeIdx: -1, nextOpenIdx: -1 };
+}
+
 function scanOuterLiquidRegion(
 	source: string,
 	regionStart: number,
@@ -221,20 +271,76 @@ function scanOuterLiquidRegion(
 	if (regionEnd <= regionStart) {
 		return;
 	}
-	const slice = source.slice(regionStart, regionEnd);
-	OUTER_LIQUID_BLOCK_OR_TAG_RE.lastIndex = 0;
-	let match: RegExpExecArray | null;
-	while ((match = OUTER_LIQUID_BLOCK_OR_TAG_RE.exec(slice)) !== null) {
-		const absStart = regionStart + match.index;
-		const absEnd = absStart + match[0].length;
-		const text = match[0];
-		if (
-			LIQUID_BLOCK_COMMENT_ANCHORED_RE.test(text) ||
-			LIQUID_INLINE_COMMENT_ANCHORED_RE.test(text)
-		) {
-			out.push({ startOffset: absStart, endOffset: absEnd, kind: 'comment' });
+	const region = source.slice(regionStart, regionEnd);
+	let cursor = 0;
+	let nextTagIdx = region.indexOf('{%', cursor);
+	let nextOutputIdx = region.indexOf('{{', cursor);
+
+	while (cursor < region.length) {
+		if (nextTagIdx !== -1 && nextTagIdx < cursor) {
+			nextTagIdx = region.indexOf('{%', cursor);
+		}
+		if (nextOutputIdx !== -1 && nextOutputIdx < cursor) {
+			nextOutputIdx = region.indexOf('{{', cursor);
+		}
+
+		let openIdx = -1;
+		let isTag = false;
+		if (nextTagIdx !== -1 && (nextOutputIdx === -1 || nextTagIdx <= nextOutputIdx)) {
+			openIdx = nextTagIdx;
+			isTag = true;
+		} else if (nextOutputIdx !== -1) {
+			openIdx = nextOutputIdx;
+			isTag = false;
+		}
+		if (openIdx === -1) {
+			break;
+		}
+
+		if (isTag) {
+			const rest = region.slice(openIdx);
+			const inlineComment = LIQUID_INLINE_COMMENT_AT_START_RE.exec(rest);
+			if (inlineComment) {
+				const end = openIdx + inlineComment[0].length;
+				out.push({
+					startOffset: regionStart + openIdx,
+					endOffset: regionStart + end,
+					kind: 'comment',
+				});
+				cursor = end;
+				continue;
+			}
+			const blockComment = LIQUID_BLOCK_COMMENT_AT_START_RE.exec(rest);
+			if (blockComment) {
+				const end = openIdx + blockComment[0].length;
+				out.push({
+					startOffset: regionStart + openIdx,
+					endOffset: regionStart + end,
+					kind: 'comment',
+				});
+				cursor = end;
+				continue;
+			}
+		}
+
+		const { closeIdx, nextOpenIdx } = scanTagDelimiters(region, openIdx + 2, isTag);
+		if (closeIdx !== -1) {
+			const end = closeIdx + 2;
+			scanSingleLiquidTag(source, regionStart + openIdx, regionStart + end, out);
+			cursor = end;
 		} else {
-			scanSingleLiquidTag(source, absStart, absEnd, out);
+			// A half-typed tag: highlight its opening delimiter and inner tokens up to the end of
+			// the region or the next opening delimiter, whichever comes first. Do not lazily
+			// consume a later tag's closing delimiter.
+			const partialEnd = nextOpenIdx !== -1 ? nextOpenIdx : region.length;
+			scanSingleLiquidTag(
+				source,
+				regionStart + openIdx,
+				regionStart + partialEnd,
+				out,
+				false,
+			);
+			cursor = partialEnd;
 		}
 	}
 }
@@ -349,7 +455,7 @@ export function analyzeRhizomeCodeBlock(
 	referenceTimeMs: number,
 	hostDoc?: NormalizedDocument | null,
 ): CodeBlockAnalysis {
-	const { env } = parseRhizomeTemplatePass1(source);
+	const { env } = parseRhizomeTemplatePass1ForAnalysis(source);
 	const queries: ExtractedQueryBlock[] = [...env.queries];
 	const rawTokens: CodeBlockTokenSpan[] = [];
 	const rawDiags: CodeBlockDiagnosticSpan[] = [];
@@ -357,25 +463,32 @@ export function analyzeRhizomeCodeBlock(
 	const recordedHeaderOffsets = new Set<number>(queries.map((q) => q.headerSpan.startOffset));
 
 	for (const scanned of scanQueryBlockSpans(source)) {
-		if (scanned.closeEnd === null || recordedHeaderOffsets.has(scanned.headerStart)) {
+		if (recordedHeaderOffsets.has(scanned.headerStart)) {
 			continue;
 		}
 		const headerSpan = offsetRangeToSourceSpan(source, scanned.headerStart, scanned.headerEnd);
 		const bodySpan = offsetRangeToSourceSpan(source, scanned.bodyStart, scanned.bodyEnd);
-		const fullSpan = offsetRangeToSourceSpan(source, scanned.headerStart, scanned.closeEnd);
+		const blockEnd = scanned.closeEnd ?? scanned.bodyEnd;
+		const fullSpan = offsetRangeToSourceSpan(source, scanned.headerStart, blockEnd);
 		const rawQuery = source.slice(scanned.bodyStart, scanned.bodyEnd);
 
 		const parsedArgs = parseQueryTagArgs(scanned.rawArgs, headerSpan);
 		const name = parsedArgs.ok ? parsedArgs.name : '__invalid__';
 		const explain = parsedArgs.ok ? parsedArgs.explain : false;
 
-		if (!parsedArgs.ok) {
-			const hasExistingAtHeader = env.diagnostics.some(
-				(d) => d.span?.startOffset === scanned.headerStart,
+		const hasExistingAtHeader = env.diagnostics.some(
+			(d) => d.span?.startOffset === scanned.headerStart,
+		);
+		if (scanned.closeEnd === null && !hasExistingAtHeader) {
+			env.diagnostics.push(
+				unclosedQueryDiagnostic(
+					source.slice(scanned.headerStart, scanned.headerEnd),
+					headerSpan,
+					null,
+				),
 			);
-			if (!hasExistingAtHeader) {
-				env.diagnostics.push(parsedArgs.diagnostic);
-			}
+		} else if (!parsedArgs.ok && !hasExistingAtHeader) {
+			env.diagnostics.push(parsedArgs.diagnostic);
 		}
 
 		recordedHeaderOffsets.add(scanned.headerStart);

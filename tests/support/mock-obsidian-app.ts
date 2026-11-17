@@ -317,6 +317,12 @@ export const Platform = {
 
 export class App {}
 
+/**
+ * Runtime sentinel for Obsidian's `editorInfoField` state field. Tests that need to simulate
+ * per-editor host resolution use this identity with a fake `EditorView.state.field()`.
+ */
+export const editorInfoField = { id: 'editorInfoField' };
+
 export class TAbstractFile {
 	path = '';
 }

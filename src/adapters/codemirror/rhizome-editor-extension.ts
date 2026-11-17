@@ -9,7 +9,7 @@ import {
 	ViewPlugin,
 	type ViewUpdate,
 } from '@codemirror/view';
-import type { App } from 'obsidian';
+import { editorInfoField, type App, type TFile } from 'obsidian';
 import {
 	hasInternalRhizomeFlag,
 	initEngineConfig,
@@ -200,6 +200,26 @@ function renderDiagnosticTooltipDom(diags: readonly CodeBlockDiagnosticSpan[]): 
 	return container;
 }
 
+interface HostResolutionCacheEntry {
+	readonly cache: unknown;
+	readonly mtime: number;
+	readonly revision: number;
+	readonly config: ResolvedEngineConfig;
+	readonly resolved: {
+		readonly hostDoc: NormalizedDocument | null;
+		readonly cacheSignature: string;
+	};
+}
+
+/**
+ * Resolves the vault file backing a specific editor view. Reads the view's own `editorInfoField`
+ * instead of the workspace's globally active file so split panes, canvas cards, and other
+ * embedded editors resolve their own host note.
+ */
+export function resolveEditorHostFile(view: EditorView): TFile | null {
+	return view.state.field(editorInfoField, false)?.file ?? null;
+}
+
 /**
  * Creates the CodeMirror 6 editor extension providing syntax highlighting, diagnostic underlines,
  * and hover tooltips inside fenced `rhizome` codeblocks.
@@ -215,82 +235,77 @@ export function createRhizomeEditorExtension(
 	const configRefreshEffect = StateEffect.define<void>();
 	const analysisCache = new Map<string, CodeBlockAnalysis>();
 
-	let lastHostFile: unknown = undefined;
-	let lastHostPath: string | undefined = undefined;
-	let lastHostRevision: number | undefined = undefined;
-	let lastHostCache: unknown = undefined;
-	let lastHostMtime: number | undefined = undefined;
-	let lastHostConfig: ResolvedEngineConfig | undefined = undefined;
-	let lastResolvedHost: {
-		hostDoc: NormalizedDocument | null | undefined;
-		cacheSignature: string;
-	} | null = null;
+	const hostResolutionCache = new Map<string, HostResolutionCacheEntry>();
 	let hostSigCounter = 0;
 
-	const resolveActiveHostDoc = (): {
-		hostDoc: NormalizedDocument | null | undefined;
+	const resolveHostDoc = (
+		view: EditorView,
+	): {
+		hostDoc: NormalizedDocument | null;
 		cacheSignature: string;
 	} => {
-		const workspaceWithActive = app.workspace as {
-			getActiveFile?: () => ReturnType<typeof app.vault.getMarkdownFiles>[number] | null;
-		};
-		if (typeof workspaceWithActive?.getActiveFile !== 'function') {
-			return { hostDoc: undefined, cacheSignature: '' };
-		}
-		const activeFile = workspaceWithActive.getActiveFile();
-		if (!activeFile) {
+		const hostFile = resolveEditorHostFile(view);
+		if (!hostFile) {
 			return { hostDoc: null, cacheSignature: 'null' };
 		}
-		const cache = app.metadataCache.getFileCache(activeFile);
-		const mtime = activeFile.stat?.mtime ?? 0;
-		const activePath = activeFile.path;
-		const backlinkRevision = backlinkIndex?.revision ?? 0;
+		const cache = app.metadataCache.getFileCache(hostFile);
+		const mtime = hostFile.stat?.mtime ?? 0;
+		const revision = backlinkIndex?.revision ?? 0;
+		const cached = hostResolutionCache.get(hostFile.path);
 		if (
-			lastResolvedHost !== null &&
-			lastHostFile === activeFile &&
-			lastHostPath === activePath &&
-			lastHostRevision === backlinkRevision &&
-			lastHostCache === cache &&
-			lastHostMtime === mtime &&
-			lastHostConfig === cachedConfig
+			cached !== undefined &&
+			cached.cache === cache &&
+			cached.mtime === mtime &&
+			cached.revision === revision &&
+			cached.config === cachedConfig
 		) {
-			return lastResolvedHost;
+			return cached.resolved;
 		}
-		lastHostFile = activeFile;
-		lastHostPath = activePath;
-		lastHostRevision = backlinkRevision;
-		lastHostCache = cache;
-		lastHostMtime = mtime;
-		lastHostConfig = cachedConfig;
 
+		let resolved: HostResolutionCacheEntry['resolved'];
 		if (
 			hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)
 		) {
-			lastResolvedHost = { hostDoc: null, cacheSignature: `${activePath}:ignored` };
-			return lastResolvedHost;
+			resolved = { hostDoc: null, cacheSignature: `${hostFile.path}:ignored` };
+		} else {
+			try {
+				const resolveLinkPath = (rawTarget: string, sourcePath: string) =>
+					app.metadataCache.getFirstLinkpathDest?.(rawTarget, sourcePath)?.path ?? null;
+				const hostDoc = normalizeObsidianMetadata(
+					hostFile,
+					cache,
+					cachedConfig,
+					[],
+					resolveLinkPath,
+				);
+				const withBacklinks = backlinkIndex?.attach(hostDoc, hostFile) ?? hostDoc;
+				resolved = {
+					hostDoc: withBacklinks,
+					cacheSignature: `${hostFile.path}:${mtime}:${revision}:${++hostSigCounter}`,
+				};
+			} catch {
+				resolved = { hostDoc: null, cacheSignature: `${hostFile.path}:err` };
+			}
 		}
-		try {
-			const resolveLinkPath = (rawTarget: string, sourcePath: string) =>
-				app.metadataCache.getFirstLinkpathDest?.(rawTarget, sourcePath)?.path ?? null;
-			const hostDoc = normalizeObsidianMetadata(
-				activeFile,
-				cache,
-				cachedConfig,
-				[],
-				resolveLinkPath,
-			);
-			const withBacklinks = backlinkIndex?.attach(hostDoc, activeFile) ?? hostDoc;
-			const sig = `${activePath}:${mtime}:${backlinkRevision}:${++hostSigCounter}`;
-			lastResolvedHost = { hostDoc: withBacklinks, cacheSignature: sig };
-			return lastResolvedHost;
-		} catch {
-			lastResolvedHost = { hostDoc: null, cacheSignature: `${activePath}:err` };
-			return lastResolvedHost;
+
+		hostResolutionCache.set(hostFile.path, {
+			cache,
+			mtime,
+			revision,
+			config: cachedConfig,
+			resolved,
+		});
+		if (hostResolutionCache.size > 32) {
+			const oldestPath = hostResolutionCache.keys().next().value;
+			if (oldestPath !== undefined) {
+				hostResolutionCache.delete(oldestPath);
+			}
 		}
+		return resolved;
 	};
 
-	const getCachedAnalysis = (source: string): CodeBlockAnalysis => {
-		const { hostDoc, cacheSignature } = resolveActiveHostDoc();
+	const getCachedAnalysis = (source: string, view: EditorView): CodeBlockAnalysis => {
+		const { hostDoc, cacheSignature } = resolveHostDoc(view);
 		const cacheKey = `${cacheSignature}\0${source}`;
 		const hit = analysisCache.get(cacheKey);
 		if (hit) {
@@ -364,7 +379,7 @@ export function createRhizomeEditorExtension(
 				const ranges: Array<Range<Decoration>> = [];
 
 				for (const block of blocks) {
-					const analysis = getCachedAnalysis(block.source);
+					const analysis = getCachedAnalysis(block.source, view);
 
 					for (const tok of analysis.tokens) {
 						const from = block.bodyFrom + tok.startOffset;
@@ -402,7 +417,7 @@ export function createRhizomeEditorExtension(
 		}
 
 		const relPos = pos - block.bodyFrom;
-		const analysis = getCachedAnalysis(block.source);
+		const analysis = getCachedAnalysis(block.source, view);
 		const matching = analysis.diagnostics.filter(
 			(d) => relPos >= d.startOffset && relPos <= Math.max(d.startOffset + 1, d.endOffset),
 		);

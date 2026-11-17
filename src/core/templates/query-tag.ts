@@ -405,15 +405,41 @@ export function maskQueryBlockBodies(source: string): string {
 }
 
 /**
- * Registers the `{% query <name> [explain] %} ... {% endquery %}` block tag and disables
- * the deprecated `{% include %}` tag on `liquid`, bound to `env`.
+ * Builds the error diagnostic for a `{% query %}` header whose `{% endquery %}` is missing.
  */
-export function registerQueryTag(
-	liquid: Liquid,
-	env: QueryTagEnvironment,
-	originalSource?: string,
-): void {
+export function unclosedQueryDiagnostic(
+	headerText: string,
+	headerSpan: SourceSpan,
+	file: string | null = null,
+): TemplateDiagnostic {
+	return Object.freeze({
+		code: 'TEMPLATE_SYNTAX_ERROR',
+		severity: 'error',
+		issue: `Unclosed '${headerText}' block; missing '{% endquery %}'.`,
+		hint: "Close the query block with '{% endquery %}'.",
+		span: headerSpan,
+		file,
+	});
+}
+
+/**
+ * Per-parse environment and root source bound to the `{% query %}` and `{% heading %}` tags.
+ * Tags read the binding through a provider so a single `Liquid` instance can be reused across
+ * parses while each tag instance keeps the environment that was active when it was constructed.
+ */
+export interface QueryTagBinding {
+	readonly env: QueryTagEnvironment;
+	readonly originalSource: string | undefined;
+}
+
+/**
+ * Registers the `{% query <name> [explain] %} ... {% endquery %}` block tag and disables
+ * the deprecated `{% include %}` tag on `liquid`. The binding provider is invoked once per
+ * tag construction, allowing `liquid` to be reused across parse cycles.
+ */
+export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBinding): void {
 	class QueryBlockTag extends Tag {
+		private readonly env: QueryTagEnvironment;
 		private readonly queryName: string | null;
 		private readonly queryText: string;
 		private readonly explainFlag: boolean;
@@ -424,6 +450,9 @@ export function registerQueryTag(
 			liquidInstance: Liquid,
 		) {
 			super(tagToken, remainTokens, liquidInstance);
+
+			const { env, originalSource } = getBinding();
+			this.env = env;
 
 			if (env.pass1Complete) {
 				throw new Error(
@@ -471,14 +500,7 @@ export function registerQueryTag(
 				this.queryText = '';
 				this.explainFlag = false;
 				env.diagnostics.push(
-					Object.freeze({
-						code: 'TEMPLATE_SYNTAX_ERROR',
-						severity: 'error',
-						issue: `Unclosed '${tagToken.getText()}' block; missing '{% endquery %}'.`,
-						hint: "Close the query block with '{% endquery %}'.",
-						span: headerSpan,
-						file: externalFile,
-					}),
+					unclosedQueryDiagnostic(tagToken.getText(), headerSpan, externalFile),
 				);
 				return;
 			}
@@ -550,6 +572,7 @@ export function registerQueryTag(
 		}
 
 		public async render(_ctx: Context, emitter: Emitter): Promise<void> {
+			const env = this.env;
 			if (this.queryName === null || !env.explainQuery) {
 				return;
 			}
@@ -574,6 +597,8 @@ export function registerQueryTag(
 			liquidInstance: Liquid,
 		) {
 			super(tagToken, remainTokens, liquidInstance);
+
+			const { env, originalSource } = getBinding();
 
 			const externalFile =
 				typeof tagToken.file === 'string' && tagToken.file.trim().length > 0

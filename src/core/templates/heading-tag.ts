@@ -15,7 +15,7 @@ import {
 	parseHeadingLevelSpec,
 	resolveHeadingLevel,
 } from './heading-filter';
-import { offsetRangeToSourceSpan, type QueryTagEnvironment } from './query-tag';
+import { offsetRangeToSourceSpan, type QueryTagBinding } from './query-tag';
 import { getOrCreateContextHeadingState } from './temporal-drop';
 import type { TemplateDiagnostic } from './types';
 
@@ -80,13 +80,11 @@ export function parseHeadingTagArgs(
 }
 
 /**
- * Registers the `{% heading <1..6 | promote | demote> %} ... {% endheading %}` block tag on `liquid`.
+ * Registers the `{% heading <1..6 | promote | demote> %} ... {% endheading %}` block tag on
+ * `liquid`. The binding provider is invoked once per tag construction, allowing `liquid` to be
+ * reused across parse cycles.
  */
-export function registerHeadingTag(
-	liquid: Liquid,
-	env: QueryTagEnvironment,
-	originalSource?: string,
-): void {
+export function registerHeadingTag(liquid: Liquid, getBinding: () => QueryTagBinding): void {
 	class HeadingBlockTag extends Tag {
 		public readonly templates: Template[] = [];
 		private readonly levelSpec: HeadingLevelSpec | null;
@@ -98,6 +96,8 @@ export function registerHeadingTag(
 			parser: Parser,
 		) {
 			super(tagToken, remainTokens, liquidInstance);
+
+			const { env, originalSource } = getBinding();
 
 			const externalFile =
 				typeof tagToken.file === 'string' && tagToken.file.trim().length > 0
