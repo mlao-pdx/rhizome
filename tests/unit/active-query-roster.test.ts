@@ -104,7 +104,9 @@ function createMutableVaultApp(initialNotes: MutableNote[]) {
 			},
 		},
 		workspace: {
-			onLayoutReady: () => {},
+			onLayoutReady: (cb: () => unknown) => {
+				cb();
+			},
 			getLeavesOfType: () => [],
 			revealLeaf: async () => {},
 		},

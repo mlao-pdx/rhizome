@@ -50,6 +50,8 @@ export class Plugin {
 		_handler: (source: string, el: HTMLElement, ctx: unknown) => unknown,
 	): void {}
 
+	addCommand(_command: unknown): void {}
+
 	registerEditorExtension(_extension: unknown): void {}
 
 	async loadData(): Promise<unknown> {

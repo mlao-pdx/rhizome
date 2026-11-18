@@ -10,13 +10,16 @@ import {
 	type ResolvedEngineConfig,
 } from '@core/search';
 import { analyzeRhizomeCodeBlock, type CodeBlockAnalysis } from '@core/templates';
-import type { BacklinkIndex } from '../backlink-index';
+import { copyWithBacklinks, type BacklinkIndex } from '../backlink-index';
+import type { NormalizedDocumentCache } from '../normalized-document-cache';
 
 interface HostResolutionCacheEntry {
 	readonly cache: unknown;
 	readonly mtime: number;
 	readonly revision: number;
 	readonly config: ResolvedEngineConfig;
+	readonly cacheReady: boolean;
+	readonly cacheRevision: string;
 	readonly resolved: {
 		readonly hostDoc: NormalizedDocument | null;
 		readonly cacheSignature: string;
@@ -81,6 +84,7 @@ export interface RhizomeAnalysisCache {
 export function createRhizomeAnalysisCache(
 	app: App,
 	backlinkIndex?: BacklinkIndex,
+	documentCache?: NormalizedDocumentCache,
 	initialConfig: ResolvedEngineConfig = buildFallbackConfig({}),
 ): RhizomeAnalysisCache {
 	let cachedConfig = initialConfig;
@@ -101,13 +105,17 @@ export function createRhizomeAnalysisCache(
 		const cache = app.metadataCache.getFileCache(hostFile);
 		const mtime = hostFile.stat?.mtime ?? 0;
 		const revision = backlinkIndex?.revision ?? 0;
+		const cacheReady = documentCache?.isReady ?? false;
+		const cacheRevision = documentCache?.getKey(hostFile.path)?.revision ?? '';
 		const cached = hostResolutionCache.get(hostFile.path);
 		if (
 			cached !== undefined &&
 			cached.cache === cache &&
 			cached.mtime === mtime &&
 			cached.revision === revision &&
-			cached.config === cachedConfig
+			cached.config === cachedConfig &&
+			cached.cacheReady === cacheReady &&
+			cached.cacheRevision === cacheRevision
 		) {
 			return cached.resolved;
 		}
@@ -121,14 +129,32 @@ export function createRhizomeAnalysisCache(
 			try {
 				const resolveLinkPath = (rawTarget: string, sourcePath: string) =>
 					app.metadataCache.getFirstLinkpathDest?.(rawTarget, sourcePath)?.path ?? null;
-				const hostDoc = normalizeObsidianMetadata(
-					hostFile,
-					cache,
-					cachedConfig,
-					[],
-					resolveLinkPath,
-				);
-				const withBacklinks = backlinkIndex?.attach(hostDoc, hostFile) ?? hostDoc;
+				const isIgnored = (file: TFile): boolean =>
+					hasInternalRhizomeFlag(
+						app.metadataCache.getFileCache(file)?.frontmatter,
+						INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
+					);
+				const hostDoc =
+					documentCache !== undefined
+						? documentCache.ensureFresh(hostFile, cachedConfig, resolveLinkPath)
+						: normalizeObsidianMetadata(
+								hostFile,
+								cache,
+								cachedConfig,
+								[],
+								resolveLinkPath,
+							);
+				const withBacklinks =
+					hostDoc === null
+						? null
+						: documentCache !== undefined && backlinkIndex !== undefined
+							? copyWithBacklinks(
+									hostDoc,
+									backlinkIndex.snapshot(),
+									hostFile,
+									isIgnored,
+								)
+							: (backlinkIndex?.attach(hostDoc, hostFile) ?? hostDoc);
 				resolved = {
 					hostDoc: withBacklinks,
 					cacheSignature: `${hostFile.path}:${mtime}:${revision}:${++hostSigCounter}`,
@@ -143,6 +169,8 @@ export function createRhizomeAnalysisCache(
 			mtime,
 			revision,
 			config: cachedConfig,
+			cacheReady,
+			cacheRevision,
 			resolved,
 		});
 		if (hostResolutionCache.size > 32) {

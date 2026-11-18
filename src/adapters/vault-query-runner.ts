@@ -1,4 +1,5 @@
 import { type App, normalizePath, type TFile } from 'obsidian';
+import { deepFreeze } from '@core/cache/deep-freeze';
 import {
 	compileQuery,
 	explainQuery,
@@ -25,8 +26,16 @@ import {
 } from '@core/search';
 import { HOST_QUERY_KEY } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
-import { attachBacklinks, type BacklinkSnapshot } from './backlink-index';
+import {
+	attachBacklinks,
+	copyWithBacklinks,
+	projectBacklinks,
+	type BacklinkIndex,
+	type BacklinkSnapshot,
+} from './backlink-index';
+import type { DirtySet } from './dirty-set';
 import { markSensitive } from './logger-format';
+import type { DocumentCacheStats, NormalizedDocumentCache } from './normalized-document-cache';
 import {
 	loadVaultPropertyTypes,
 	logEngineConfigFailure,
@@ -91,6 +100,19 @@ export interface VaultQueryOptions {
 	 * `◊InternalRhizome 001` notes). Defaults to the internal-flag check.
 	 */
 	readonly isIgnoredFile?: ((file: TFile) => boolean) | undefined;
+	/**
+	 * Optional normalized-document cache. When present, the pass reconciles the cache and iterates
+	 * its entries instead of normalizing every note inline.
+	 */
+	readonly cache?: NormalizedDocumentCache | undefined;
+	/**
+	 * Optional backlink index updated with the pass's dirty sources before projection.
+	 */
+	readonly backlinkIndex?: BacklinkIndex | undefined;
+	/**
+	 * Optional dirty-path collector drained once at the top of the pass.
+	 */
+	readonly dirtySet?: DirtySet | undefined;
 }
 
 /**
@@ -126,9 +148,18 @@ export type VaultQueryResult = Record<string, VaultQueryMatch[]>;
 
 /**
  * Projects a `NormalizedDocument` into a user-facing `VaultQueryMatch` POJO.
+ *
+ * @remarks
+ * (design, 2026-11-18) Cached documents never carry backlinks and are frozen, so projection
+ * always builds a fresh frozen object. Backlinks are supplied by the caller from the pass's
+ * snapshot; when omitted, a document's own attached backlinks are used (the direct-normalize
+ * test oracle path).
  */
-export function toVaultQueryMatch(doc: NormalizedDocument): VaultQueryMatch {
-	return {
+export function toVaultQueryMatch(
+	doc: NormalizedDocument,
+	backlinks?: readonly BacklinkRef[],
+): VaultQueryMatch {
+	return deepFreeze({
 		file: doc.file,
 		aliases: doc.aliases,
 		aliasLocations: doc.aliasLocations,
@@ -141,8 +172,8 @@ export function toVaultQueryMatch(doc: NormalizedDocument): VaultQueryMatch {
 		blocks: doc.blocks,
 		properties: doc.properties,
 		propertyLocations: doc.propertyLocations,
-		backlinks: doc.backlinks ?? [],
-	};
+		backlinks: backlinks ?? doc.backlinks ?? [],
+	});
 }
 
 /**
@@ -229,6 +260,7 @@ export function resolveHostDocument(
 	logger?: LoggerPort,
 	backlinks?: BacklinkSnapshot,
 	isIgnoredFile?: (file: TFile) => boolean,
+	cache?: NormalizedDocumentCache,
 ): NormalizedDocument | null | undefined {
 	if (sourcePath === undefined) {
 		return undefined;
@@ -254,24 +286,40 @@ export function resolveHostDocument(
 	if (!file || (file as { deleted?: boolean }).deleted) {
 		return null;
 	}
-	const cache = app.metadataCache.getFileCache(file);
-	if (hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)) {
+	const cacheInput = app.metadataCache.getFileCache(file);
+	if (
+		hasInternalRhizomeFlag(
+			cacheInput?.frontmatter,
+			INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
+		)
+	) {
 		return null;
 	}
 	const effectiveResolveLinkPath: ResolveLinkPathFn =
 		resolveLinkPath ??
 		((rawTarget, linkSourcePath) =>
 			app.metadataCache.getFirstLinkpathDest?.(rawTarget, linkSourcePath)?.path ?? null);
+	const shouldIgnore =
+		isIgnoredFile ?? ((fileToCheck: TFile) => defaultIsIgnoredFile(app, fileToCheck));
+	if (cache !== undefined) {
+		const doc = cache.ensureFresh(file, config, effectiveResolveLinkPath);
+		if (doc === null) {
+			return null;
+		}
+		return backlinks !== undefined
+			? copyWithBacklinks(doc, backlinks, file, shouldIgnore)
+			: doc;
+	}
 	try {
-		const doc = normalizeObsidianMetadata(file, cache, config, [], effectiveResolveLinkPath);
+		const doc = normalizeObsidianMetadata(
+			file,
+			cacheInput,
+			config,
+			[],
+			effectiveResolveLinkPath,
+		);
 		if (backlinks !== undefined) {
-			attachBacklinks(
-				doc,
-				backlinks,
-				file,
-				(fileToCheck) =>
-					isIgnoredFile?.(fileToCheck) ?? defaultIsIgnoredFile(app, fileToCheck),
-			);
+			attachBacklinks(doc, backlinks, file, shouldIgnore);
 		}
 		return doc;
 	} catch (error) {
@@ -305,6 +353,44 @@ export async function resolveGroupEngineConfig(
 		return null;
 	}
 	return configResult.config;
+}
+
+interface PreparedVaultPass {
+	readonly backlinks: BacklinkSnapshot | undefined;
+	readonly stats: DocumentCacheStats | undefined;
+}
+
+function prepareVaultPass(
+	cache: NormalizedDocumentCache | undefined,
+	options: VaultQueryOptions | undefined,
+	config: ResolvedEngineConfig,
+	resolveLinkPath: ResolveLinkPathFn,
+	files: readonly TFile[] | undefined,
+): PreparedVaultPass {
+	const drained = options?.dirtySet?.drain();
+	const reconciled =
+		cache !== undefined && files !== undefined
+			? cache.reconcile(files, config, resolveLinkPath, drained?.paths)
+			: undefined;
+	let backlinks = options?.backlinks;
+	const index = options?.backlinkIndex;
+	if (index !== undefined) {
+		if (drained?.fullRebuild === true) {
+			index.dispose();
+		} else {
+			const sources = new Set<string>(drained?.sources ?? []);
+			for (const path of reconciled?.dirtySources ?? []) {
+				sources.add(path);
+			}
+			const ignored = new Set<string>(drained?.ignored ?? []);
+			for (const path of reconciled?.ignoredChanges ?? []) {
+				ignored.add(path);
+			}
+			index.applyDirtySources(sources, ignored);
+		}
+		backlinks = index.snapshot();
+	}
+	return { backlinks, stats: reconciled?.stats };
 }
 
 /**
@@ -343,9 +429,12 @@ export async function runVaultQuery(
 	const resolveLinkPath: ResolveLinkPathFn = (rawTarget, sourcePath) =>
 		app.metadataCache.getFirstLinkpathDest(rawTarget, sourcePath)?.path ?? null;
 
-	const backlinks = options?.backlinks;
 	const isIgnoredFile =
 		options?.isIgnoredFile ?? ((file: TFile) => defaultIsIgnoredFile(app, file));
+	const cache = options?.cache;
+	const vaultFiles = cache !== undefined ? app.vault.getMarkdownFiles() : undefined;
+	const prepared = prepareVaultPass(cache, options, resolvedConfig, resolveLinkPath, vaultFiles);
+	const backlinks = prepared.backlinks;
 
 	const hostDoc: NormalizedDocument | null | undefined =
 		options?.hostDoc !== undefined
@@ -358,6 +447,7 @@ export async function runVaultQuery(
 					logger,
 					backlinks,
 					isIgnoredFile,
+					cache,
 				);
 
 	const results: VaultQueryResult = {};
@@ -417,42 +507,79 @@ export async function runVaultQuery(
 	const propDiagnosticsAggregator = new QueriedPropertyDiagnosticsAggregator(queriedKeys);
 
 	let notesScanned = 0;
-	let uncachedNotes = 0;
+	let uncachedNotes = prepared.stats?.uncached ?? 0;
 
-	for (const file of app.vault.getMarkdownFiles()) {
-		if ((file as { deleted?: boolean }).deleted) {
-			continue;
-		}
-		const cache = app.metadataCache.getFileCache(file);
-		if (
-			hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)
-		) {
-			continue;
-		}
-		notesScanned++;
-		if (cache === null) {
-			uncachedNotes++;
-		}
-		let doc: NormalizedDocument;
-		try {
-			doc = normalizeObsidianMetadata(file, cache, resolvedConfig, [], resolveLinkPath);
-		} catch (error) {
-			logger?.log('error', `Failed to normalize note ${markSensitive(file.path)}`, {
-				source: 'query.run',
-				error: String(error),
-			});
-			throw error;
-		}
-		if (backlinks !== undefined) {
-			attachBacklinks(doc, backlinks, file, isIgnoredFile);
-		}
-		propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
+	if (cache !== undefined && vaultFiles !== undefined) {
+		for (const file of vaultFiles) {
+			const doc = cache.get(file.path);
+			if (doc === undefined) {
+				continue;
+			}
+			notesScanned++;
+			propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
 
-		let sharedMatch: VaultQueryMatch | undefined;
-		for (const entry of executableQueries) {
-			if (evaluateDoc(doc, entry.prepared)) {
-				sharedMatch ??= toVaultQueryMatch(doc);
-				entry.bucket.push(sharedMatch);
+			let sharedMatch: VaultQueryMatch | undefined;
+			for (const entry of executableQueries) {
+				if (evaluateDoc(doc, entry.prepared)) {
+					sharedMatch ??= toVaultQueryMatch(
+						doc,
+						backlinks !== undefined
+							? projectBacklinks(backlinks, file, isIgnoredFile)
+							: undefined,
+					);
+					entry.bucket.push(sharedMatch);
+				}
+			}
+		}
+	} else {
+		for (const file of app.vault.getMarkdownFiles()) {
+			if ((file as { deleted?: boolean }).deleted) {
+				continue;
+			}
+			const cacheEntry = app.metadataCache.getFileCache(file);
+			if (
+				hasInternalRhizomeFlag(
+					cacheEntry?.frontmatter,
+					INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
+				)
+			) {
+				continue;
+			}
+			notesScanned++;
+			if (cacheEntry === null) {
+				uncachedNotes++;
+			}
+			let doc: NormalizedDocument;
+			try {
+				doc = normalizeObsidianMetadata(
+					file,
+					cacheEntry,
+					resolvedConfig,
+					[],
+					resolveLinkPath,
+				);
+			} catch (error) {
+				logger?.log(
+					'warn',
+					`Skipped note that failed normalization: ${markSensitive(file.path)}`,
+					{
+						source: 'query.run',
+						error: String(error),
+					},
+				);
+				continue;
+			}
+			if (backlinks !== undefined) {
+				attachBacklinks(doc, backlinks, file, isIgnoredFile);
+			}
+			propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
+
+			let sharedMatch: VaultQueryMatch | undefined;
+			for (const entry of executableQueries) {
+				if (evaluateDoc(doc, entry.prepared)) {
+					sharedMatch ??= toVaultQueryMatch(doc);
+					entry.bucket.push(sharedMatch);
+				}
 			}
 		}
 	}
@@ -473,6 +600,14 @@ export async function runVaultQuery(
 		uncachedNotes,
 		docDiagnosticCount: propDiagnosticsAggregator.diagnosticCount,
 		matchCounts,
+		...(prepared.stats
+			? {
+					cacheAdd: prepared.stats.add,
+					cacheUpdate: prepared.stats.update,
+					cacheRemove: prepared.stats.remove,
+					cacheHits: prepared.stats.hits,
+				}
+			: {}),
 	});
 
 	return results;
@@ -507,6 +642,7 @@ export async function explainVaultQuery(
 				logger,
 				options.backlinks,
 				options.isIgnoredFile,
+				options.cache,
 			);
 		}
 	}

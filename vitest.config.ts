@@ -2,6 +2,9 @@ import { defineConfig } from 'vitest/config';
 import path from 'node:path';
 
 export default defineConfig({
+	define: {
+		__DEV__: 'false',
+	},
 	test: {
 		include: ['src/**/*.test.ts', 'tests/**/*.test.ts'],
 		exclude: ['**/*.properties.test.ts', 'node_modules/**'],

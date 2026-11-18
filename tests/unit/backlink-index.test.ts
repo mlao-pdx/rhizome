@@ -250,4 +250,124 @@ describe('BacklinkIndex', () => {
 
 		expect(index.snapshot()).toEqual(snapshotOf([]));
 	});
+
+	describe('applyDirtySources', () => {
+		it('moves a link between targets and matches a full rebuild', () => {
+			const a = makeFile('notes/a.md');
+			const b = makeFile('notes/b.md');
+			const source = makeFile('notes/source.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/source.md': { 'notes/a.md': 1 },
+			};
+			const app = createMockApp({ files: [a, b, source], resolvedLinks });
+			const index = new BacklinkIndex(app as App, noIgnore);
+			expect([...index.snapshot().keys()]).toEqual([a]);
+
+			resolvedLinks['notes/source.md'] = { 'notes/b.md': 2 };
+			expect(index.applyDirtySources(['notes/source.md'])).toBe(true);
+			expect([...index.snapshot().keys()]).toEqual([b]);
+			expect([...index.snapshot().get(b)!]).toEqual([[source, 2]]);
+			expect(index.rebuild()).toBe(false);
+		});
+
+		it('reports no change when a source is reverted or untouched', () => {
+			const target = makeFile('notes/target.md');
+			const source = makeFile('notes/source.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/source.md': { 'notes/target.md': 1 },
+			};
+			const app = createMockApp({ files: [target, source], resolvedLinks });
+			const index = new BacklinkIndex(app as App, noIgnore);
+			index.snapshot();
+
+			expect(index.applyDirtySources(['notes/source.md'])).toBe(false);
+			expect(index.applyDirtySources(['notes/unknown.md'])).toBe(false);
+		});
+
+		it('drops a deleted source and restores it when it comes back', () => {
+			const target = makeFile('notes/target.md');
+			const source = makeFile('notes/source.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/source.md': { 'notes/target.md': 1 },
+			};
+			const app = createMockApp({ files: [target, source], resolvedLinks });
+			const index = new BacklinkIndex(app as App, noIgnore);
+			index.snapshot();
+
+			source.deleted = true;
+			expect(index.applyDirtySources(['notes/source.md'])).toBe(true);
+			expect(index.snapshot().size).toBe(0);
+
+			source.deleted = false;
+			expect(index.applyDirtySources(['notes/source.md'])).toBe(true);
+			expect([...index.snapshot().get(target)!.keys()]).toEqual([source]);
+		});
+
+		it('removes and restores ignored sources and targets', () => {
+			const target = makeFile('notes/target.md');
+			const source = makeFile('notes/source.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/source.md': { 'notes/target.md': 1 },
+			};
+			const ignoredPaths = new Set<string>();
+			const app = createMockApp({ files: [target, source], resolvedLinks });
+			const index = new BacklinkIndex(app as App, (file) => ignoredPaths.has(file.path));
+			index.snapshot();
+
+			ignoredPaths.add('notes/target.md');
+			expect(index.applyDirtySources([], ['notes/target.md'])).toBe(true);
+			expect(index.snapshot().size).toBe(0);
+
+			ignoredPaths.delete('notes/target.md');
+			expect(index.applyDirtySources([], ['notes/target.md'])).toBe(true);
+			expect([...index.snapshot().get(target)!.keys()]).toEqual([source]);
+
+			ignoredPaths.add('notes/source.md');
+			expect(index.applyDirtySources([], ['notes/source.md'])).toBe(true);
+			expect(index.snapshot().size).toBe(0);
+		});
+
+		it('removes a deleted target even when its own link record did not change', () => {
+			const target = makeFile('notes/target.md');
+			const source = makeFile('notes/source.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/source.md': { 'notes/target.md': 1 },
+			};
+			const app = createMockApp({ files: [target, source], resolvedLinks });
+			const index = new BacklinkIndex(app as App, noIgnore);
+			expect(index.snapshot().size).toBe(1);
+
+			target.deleted = true;
+			expect(index.applyDirtySources(['notes/target.md'])).toBe(true);
+			expect(index.snapshot().size).toBe(0);
+			expect(index.rebuild()).toBe(false);
+		});
+
+		it('reflects source and target renames through projection', () => {
+			const target = makeFile('notes/target.md');
+			const source = makeFile('notes/source.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/source.md': { 'notes/target.md': 1 },
+			};
+			const app = createMockApp({ files: [target, source], resolvedLinks });
+			const index = new BacklinkIndex(app as App, noIgnore);
+			index.snapshot();
+
+			source.path = 'notes/source-renamed.md';
+			resolvedLinks['notes/source-renamed.md'] = resolvedLinks['notes/source.md']!;
+			delete resolvedLinks['notes/source.md'];
+			index.applyDirtySources(['notes/source.md', 'notes/source-renamed.md']);
+			expect(projectBacklinks(index.snapshot(), target, noIgnore)).toEqual([
+				{ path: 'notes/source-renamed.md', count: 1 },
+			]);
+
+			target.path = 'notes/target-renamed.md';
+			resolvedLinks['notes/source-renamed.md'] = { 'notes/target-renamed.md': 1 };
+			index.applyDirtySources(['notes/source-renamed.md']);
+			expect(projectBacklinks(index.snapshot(), target, noIgnore)).toEqual([
+				{ path: 'notes/source-renamed.md', count: 1 },
+			]);
+			expect(index.rebuild()).toBe(false);
+		});
+	});
 });

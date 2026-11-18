@@ -368,8 +368,8 @@ describe('Vault Query Runner Property Invariants', () => {
 								expect('propertyOccurrences' in m).toBe(false);
 								expect('propertyKeys' in m).toBe(false);
 								expect('diagnostics' in m).toBe(false);
-								expect(Object.isFrozen(m)).toBe(false);
-								expect(Object.isFrozen(m.file)).toBe(false);
+								expect(Object.isFrozen(m)).toBe(true);
+								expect(Object.isFrozen(m.file)).toBe(true);
 							}
 						} else {
 							expect(Object.prototype.hasOwnProperty.call(runRes, k)).toBe(false);

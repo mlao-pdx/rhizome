@@ -264,8 +264,8 @@ describe('runVaultQuery', () => {
 		expect('propertyOccurrences' in match).toBe(false);
 		expect('propertyKeys' in match).toBe(false);
 		expect('diagnostics' in match).toBe(false);
-		expect(Object.isFrozen(match)).toBe(false);
-		expect(Object.isFrozen(match.file)).toBe(false);
+		expect(Object.isFrozen(match)).toBe(true);
+		expect(Object.isFrozen(match.file)).toBe(true);
 		expect('context' in res).toBe(false);
 		expect('diagnostics' in res).toBe(false);
 		expect('matches' in res).toBe(false);

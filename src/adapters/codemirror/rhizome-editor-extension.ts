@@ -11,6 +11,7 @@ import type { App } from 'obsidian';
 import type { CodeBlockTokenKind } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import type { BacklinkIndex } from '../backlink-index';
+import type { NormalizedDocumentCache } from '../normalized-document-cache';
 import { loadVaultPropertyTypes } from '../vault-query-logging';
 import { buildFallbackConfig, createRhizomeAnalysisCache } from './rhizome-analysis-cache';
 import { findRhizomeCodeBlocks } from './rhizome-code-blocks';
@@ -48,11 +49,12 @@ export function createRhizomeEditorExtension(
 	app: App,
 	logger?: LoggerPort,
 	backlinkIndex?: BacklinkIndex,
+	documentCache?: NormalizedDocumentCache,
 ): Extension {
 	let refreshPending = false;
 	const activeViews = new Set<EditorView>();
 	const configRefreshEffect = StateEffect.define<void>();
-	const analysisCache = createRhizomeAnalysisCache(app, backlinkIndex);
+	const analysisCache = createRhizomeAnalysisCache(app, backlinkIndex, documentCache);
 
 	const refreshPropertyTypes = (): void => {
 		if (refreshPending) {

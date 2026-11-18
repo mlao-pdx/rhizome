@@ -1,9 +1,13 @@
 import { type App, normalizePath } from 'obsidian';
+import type { Digest64 } from '@core/hash/xxhash64';
+import { XxHash64Accumulator } from '@core/hash/xxhash64';
 import type { NormalizedDocument, PropertyTypeRegistry, ResolvedEngineConfig } from '@core/search';
 import { HOST_QUERY_KEY } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import type { BacklinkIndex } from './backlink-index';
+import type { DirtySet } from './dirty-set';
 import { markSensitive } from './logger-format';
+import type { NormalizedDocumentCache } from './normalized-document-cache';
 import {
 	resolveDefaultTimeZone,
 	resolveGroupEngineConfig,
@@ -17,283 +21,109 @@ import {
 	type VaultQueryResult,
 } from './vault-query-runner';
 
-const PRIME32_1 = 0x9e3779b1 | 0;
-const PRIME32_2 = 0x85ebca77 | 0;
-const PRIME32_3 = 0xc2b2ae3d | 0;
-const PRIME32_4 = 0x27d4eb2f | 0;
-const PRIME32_5 = 0x165667b1 | 0;
+function updateMatch(acc: XxHash64Accumulator, match: VaultQueryMatch): void {
+	const file = match.file;
+	acc.updateString(file.path);
+	acc.updateString(file.name);
+	acc.updateString(file.basename);
+	acc.updateString(file.extension);
+	acc.updateString(file.parent);
+	acc.updateString(file.created);
+	acc.updateString(file.modified);
+	acc.updateNumber(file.size);
 
-const SEED_LANE_1 = (PRIME32_5 + PRIME32_1) | 0;
-const SEED_LANE_2 = (PRIME32_5 ^ PRIME32_4) | 0;
+	acc.updateStringArray(match.aliases);
 
-const f64Scratch = new Float64Array(1);
-const i32Scratch = new Int32Array(f64Scratch.buffer);
-
-function rotl32(x: number, r: number): number {
-	return (x << r) | (x >>> (32 - r));
-}
-
-function xxh32Round(acc: number, input: number): number {
-	return Math.imul(rotl32((acc + Math.imul(input, PRIME32_3)) | 0, 17), PRIME32_4);
-}
-
-function xxh32Avalanche(h: number): number {
-	h ^= h >>> 15;
-	h = Math.imul(h, PRIME32_2);
-	h ^= h >>> 13;
-	h = Math.imul(h, PRIME32_3);
-	h ^= h >>> 16;
-	return h >>> 0;
-}
-
-function formatHex64(hi: number, lo: number): string {
-	return (hi >>> 0).toString(16).padStart(8, '0') + (lo >>> 0).toString(16).padStart(8, '0');
-}
-
-interface Digest64 {
-	readonly hi: number;
-	readonly lo: number;
-	readonly hex: string;
-}
-
-/**
- * Zero-allocation 64-bit streaming xxHash accumulator built from two independent
- * 32-bit xxHash lanes using `Math.imul` and IEEE-754 scratch views.
- *
- * @remarks
- * (perf, 2026-10-30) Uses unboxed 32-bit `Math.imul` arithmetic over pairs of UTF-16
- * code units and a shared `Float64Array`/`Int32Array` buffer for numbers, avoiding
- * `BigInt` heap allocations, `String(number)` allocations, and JS-to-WASM UTF-8 copy
- * overhead while providing a 64-bit xxHash avalanche digest.
- */
-class XxHash64Accumulator {
-	private s1 = SEED_LANE_1;
-	private s2 = SEED_LANE_2;
-	private totalBytes = 0;
-
-	updateU32(val: number): void {
-		const w = val | 0;
-		this.s1 = xxh32Round(this.s1, w);
-		this.s2 = xxh32Round(this.s2, (w ^ PRIME32_2) | 0);
-		this.totalBytes = (this.totalBytes + 4) | 0;
+	const aliasLocs = match.aliasLocations;
+	acc.updateTag(0x22, aliasLocs.length);
+	for (let i = 0; i < aliasLocs.length; i++) {
+		const loc = aliasLocs[i]!;
+		acc.updateString(loc.alias);
+		acc.updateString(loc.source);
+		acc.updateString(loc.origin);
 	}
 
-	updateTag(tag: number, length = 0): void {
-		if (length >= 0 && length <= 0x00ffffff) {
-			this.updateU32(((tag & 0xff) << 24) | length);
+	acc.updateStringArray(match.tags);
+
+	const tagLocs = match.tagLocations;
+	acc.updateTag(0x23, tagLocs.length);
+	for (let i = 0; i < tagLocs.length; i++) {
+		const loc = tagLocs[i]!;
+		acc.updateString(loc.tag);
+		acc.updateString(loc.source);
+		acc.updateString(loc.origin);
+	}
+
+	acc.updateStringArray(match.cssclasses);
+
+	const headings = match.headings;
+	acc.updateTag(0x24, headings.length);
+	for (let i = 0; i < headings.length; i++) {
+		const h = headings[i]!;
+		acc.updateString(h.text);
+		acc.updateU32(h.level);
+		acc.updateString(h.origin);
+	}
+
+	const links = match.links;
+	acc.updateTag(0x25, links.length);
+	for (let i = 0; i < links.length; i++) {
+		const l = links[i]!;
+		acc.updateString(l.link);
+		acc.updateString(l.rawTarget);
+		if (l.resolvedPath === null) {
+			acc.updateU32(0x10000000);
 		} else {
-			this.updateU32((tag & 0xff) << 24);
-			this.updateU32(length | 0);
+			acc.updateString(l.resolvedPath);
 		}
+		acc.updateString(l.subpath);
+		acc.updateString(l.displayText);
+		acc.updateString(l.source);
+		acc.updateString(l.origin);
 	}
 
-	updateNumber(n: number): void {
-		if ((n | 0) === n && !Object.is(n, -0)) {
-			this.updateU32(0x14000001);
-			this.updateU32(n | 0);
-			return;
+	const embeds = match.embeds;
+	acc.updateTag(0x26, embeds.length);
+	for (let i = 0; i < embeds.length; i++) {
+		const e = embeds[i]!;
+		acc.updateString(e.link);
+		acc.updateString(e.rawTarget);
+		if (e.resolvedPath === null) {
+			acc.updateU32(0x10000000);
+		} else {
+			acc.updateString(e.resolvedPath);
 		}
-		if (Number.isNaN(n)) {
-			this.updateU32(0x14000002);
-			return;
-		}
-		if (Object.is(n, -0)) {
-			this.updateU32(0x14000003);
-			return;
-		}
-		f64Scratch[0] = n;
-		this.updateU32(0x14000004);
-		this.updateU32(i32Scratch[0]!);
-		this.updateU32(i32Scratch[1]!);
+		acc.updateString(e.subpath);
+		acc.updateString(e.displayText);
+		acc.updateString(e.source);
+		acc.updateString(e.origin);
 	}
 
-	updateString(str: string): void {
-		const len = str.length;
-		this.updateTag(0x15, len);
-		let s1 = this.s1;
-		let s2 = this.s2;
-		let i = 0;
-		const pairLimit = len - 1;
-		while (i < pairLimit) {
-			const w = str.charCodeAt(i) | (str.charCodeAt(i + 1) << 16);
-			s1 = xxh32Round(s1, w);
-			s2 = xxh32Round(s2, (w ^ PRIME32_2) | 0);
-			i += 2;
-		}
-		if (i < len) {
-			const w = str.charCodeAt(i);
-			s1 = xxh32Round(s1, w);
-			s2 = xxh32Round(s2, (w ^ PRIME32_2) | 0);
-		}
-		this.s1 = s1;
-		this.s2 = s2;
-		this.totalBytes = (this.totalBytes + (len << 1)) | 0;
+	const blocks = match.blocks;
+	acc.updateTag(0x28, blocks.length);
+	for (let i = 0; i < blocks.length; i++) {
+		const b = blocks[i]!;
+		acc.updateString(b.id);
+		acc.updateString(b.origin);
+	}
+	acc.updateValue(match.properties);
+
+	const propLocs = match.propertyLocations;
+	acc.updateTag(0x27, propLocs.length);
+	for (let i = 0; i < propLocs.length; i++) {
+		const loc = propLocs[i]!;
+		acc.updateString(loc.property);
+		acc.updateValue(loc.value);
+		acc.updateString(loc.source);
+		acc.updateString(loc.origin);
 	}
 
-	updateStringArray(arr: readonly string[]): void {
-		const len = arr.length;
-		this.updateTag(0x22, len);
-		for (let i = 0; i < len; i++) {
-			this.updateString(arr[i]!);
-		}
-	}
-
-	updateValue(val: unknown): void {
-		if (val === null) {
-			this.updateU32(0x10000000);
-			return;
-		}
-		if (val === undefined) {
-			this.updateU32(0x11000000);
-			return;
-		}
-		if (typeof val === 'boolean') {
-			this.updateU32(val ? 0x12000001 : 0x12000000);
-			return;
-		}
-		if (typeof val === 'number') {
-			this.updateNumber(val);
-			return;
-		}
-		if (typeof val === 'string') {
-			this.updateString(val);
-			return;
-		}
-		if (Array.isArray(val)) {
-			const len = val.length;
-			this.updateTag(0x20, len);
-			for (let i = 0; i < len; i++) {
-				this.updateValue(val[i]);
-			}
-			this.updateU32(0x21000000);
-			return;
-		}
-		if (typeof val === 'object') {
-			const record = val as Record<string, unknown>;
-			const keys = Object.keys(record).sort();
-			const len = keys.length;
-			this.updateTag(0x30, len);
-			for (let i = 0; i < len; i++) {
-				const k = keys[i]!;
-				this.updateString(k);
-				this.updateValue(record[k]);
-			}
-			this.updateU32(0x31000000);
-			return;
-		}
-		this.updateString(typeof val);
-	}
-
-	updateMatch(match: VaultQueryMatch): void {
-		const file = match.file;
-		this.updateString(file.path);
-		this.updateString(file.name);
-		this.updateString(file.basename);
-		this.updateString(file.extension);
-		this.updateString(file.parent);
-		this.updateString(file.created);
-		this.updateString(file.modified);
-		this.updateNumber(file.size);
-
-		this.updateStringArray(match.aliases);
-
-		const aliasLocs = match.aliasLocations;
-		this.updateTag(0x22, aliasLocs.length);
-		for (let i = 0; i < aliasLocs.length; i++) {
-			const loc = aliasLocs[i]!;
-			this.updateString(loc.alias);
-			this.updateString(loc.source);
-			this.updateString(loc.origin);
-		}
-
-		this.updateStringArray(match.tags);
-
-		const tagLocs = match.tagLocations;
-		this.updateTag(0x23, tagLocs.length);
-		for (let i = 0; i < tagLocs.length; i++) {
-			const loc = tagLocs[i]!;
-			this.updateString(loc.tag);
-			this.updateString(loc.source);
-			this.updateString(loc.origin);
-		}
-
-		this.updateStringArray(match.cssclasses);
-
-		const headings = match.headings;
-		this.updateTag(0x24, headings.length);
-		for (let i = 0; i < headings.length; i++) {
-			const h = headings[i]!;
-			this.updateString(h.text);
-			this.updateU32(h.level);
-			this.updateString(h.origin);
-		}
-
-		const links = match.links;
-		this.updateTag(0x25, links.length);
-		for (let i = 0; i < links.length; i++) {
-			const l = links[i]!;
-			this.updateString(l.link);
-			this.updateString(l.rawTarget);
-			if (l.resolvedPath === null) {
-				this.updateU32(0x10000000);
-			} else {
-				this.updateString(l.resolvedPath);
-			}
-			this.updateString(l.subpath);
-			this.updateString(l.displayText);
-			this.updateString(l.source);
-			this.updateString(l.origin);
-		}
-
-		const embeds = match.embeds;
-		this.updateTag(0x26, embeds.length);
-		for (let i = 0; i < embeds.length; i++) {
-			const e = embeds[i]!;
-			this.updateString(e.link);
-			this.updateString(e.rawTarget);
-			if (e.resolvedPath === null) {
-				this.updateU32(0x10000000);
-			} else {
-				this.updateString(e.resolvedPath);
-			}
-			this.updateString(e.subpath);
-			this.updateString(e.displayText);
-			this.updateString(e.source);
-			this.updateString(e.origin);
-		}
-
-		const blocks = match.blocks;
-		this.updateTag(0x28, blocks.length);
-		for (let i = 0; i < blocks.length; i++) {
-			const b = blocks[i]!;
-			this.updateString(b.id);
-			this.updateString(b.origin);
-		}
-		this.updateValue(match.properties);
-
-		const propLocs = match.propertyLocations;
-		this.updateTag(0x27, propLocs.length);
-		for (let i = 0; i < propLocs.length; i++) {
-			const loc = propLocs[i]!;
-			this.updateString(loc.property);
-			this.updateValue(loc.value);
-			this.updateString(loc.source);
-			this.updateString(loc.origin);
-		}
-
-		const backlinks = match.backlinks;
-		this.updateTag(0x29, backlinks.length);
-		for (let i = 0; i < backlinks.length; i++) {
-			const backlink = backlinks[i]!;
-			this.updateString(backlink.path);
-			this.updateNumber(backlink.count);
-		}
-	}
-
-	digest(): Digest64 {
-		const hi = xxh32Avalanche((this.s1 + this.totalBytes) | 0);
-		const lo = xxh32Avalanche((this.s2 + this.totalBytes) | 0);
-		return { hi, lo, hex: formatHex64(hi, lo) };
+	const backlinks = match.backlinks;
+	acc.updateTag(0x29, backlinks.length);
+	for (let i = 0; i < backlinks.length; i++) {
+		const backlink = backlinks[i]!;
+		acc.updateString(backlink.path);
+		acc.updateNumber(backlink.count);
 	}
 }
 
@@ -305,7 +135,7 @@ function getMatchDigest(match: VaultQueryMatch): Digest64 {
 		return cached;
 	}
 	const acc = new XxHash64Accumulator();
-	acc.updateMatch(match);
+	updateMatch(acc, match);
 	const digest = acc.digest();
 	matchDigestCache.set(match, digest);
 	return digest;
@@ -380,15 +210,25 @@ export class ActiveQueryRoster {
 	private readonly app: App;
 	private readonly logger: LoggerPort | undefined;
 	private readonly backlinkIndex: BacklinkIndex | undefined;
+	private readonly documentCache: NormalizedDocumentCache | undefined;
+	private readonly dirtySet: DirtySet | undefined;
 	private readonly subscriptions = new Map<number, ActiveSubscription>();
 	private nextId = 1;
 	private activeNudgePromise: Promise<void> | null = null;
 	private rerunPending = false;
 
-	constructor(app: App, logger?: LoggerPort, backlinkIndex?: BacklinkIndex) {
+	constructor(
+		app: App,
+		logger?: LoggerPort,
+		backlinkIndex?: BacklinkIndex,
+		documentCache?: NormalizedDocumentCache,
+		dirtySet?: DirtySet,
+	) {
 		this.app = app;
 		this.logger = logger;
 		this.backlinkIndex = backlinkIndex;
+		this.documentCache = documentCache;
+		this.dirtySet = dirtySet;
 	}
 
 	/** Number of currently active reactive query subscriptions. */
@@ -549,6 +389,19 @@ export class ActiveQueryRoster {
 			return;
 		}
 
+		const pending = this.dirtySet?.peek();
+		if (
+			pending !== undefined &&
+			this.backlinkIndex !== undefined &&
+			typeof this.backlinkIndex.applyDirtySources === 'function'
+		) {
+			if (pending.fullRebuild) {
+				this.backlinkIndex.dispose();
+			} else {
+				this.backlinkIndex.applyDirtySources(pending.sources, pending.ignored);
+			}
+		}
+
 		const backlinks = this.backlinkIndex?.snapshot();
 
 		const groups = new Map<
@@ -614,6 +467,8 @@ export class ActiveQueryRoster {
 							resolveLinkPath,
 							this.logger,
 							backlinks,
+							undefined,
+							this.documentCache,
 						);
 						hostDocsByPath.set(sp, doc ?? null);
 					}
@@ -663,6 +518,13 @@ export class ActiveQueryRoster {
 								queryHostDocs,
 								...(engineConfig ? { resolvedConfig: engineConfig } : {}),
 								...(backlinks !== undefined ? { backlinks } : {}),
+								...(this.documentCache ? { cache: this.documentCache } : {}),
+								...(this.documentCache && this.dirtySet
+									? { dirtySet: this.dirtySet }
+									: {}),
+								...(this.documentCache && this.backlinkIndex
+									? { backlinkIndex: this.backlinkIndex }
+									: {}),
 							},
 							this.logger,
 						)

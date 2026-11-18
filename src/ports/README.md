@@ -17,9 +17,10 @@ implements that interface against the real Obsidian API or browser IndexedDB.
 
 ## Current ports
 
-| Port         | Wraps                                       | Notes                                  |
-| ------------ | ------------------------------------------- | -------------------------------------- |
-| `LoggerPort` | vault-file writes for developer diagnostics | Opt-in, silent by default — see below. |
+| Port                | Wraps                                       | Notes                                                                                     |
+| ------------------- | ------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `LoggerPort`        | vault-file writes for developer diagnostics | Opt-in, silent by default — see below.                                                    |
+| `DocumentCachePort` | keyed in-memory normalized-document storage | Generic over document/key shapes, so it stays free of `obsidian` and search-domain types. |
 
 ## Current adapters
 

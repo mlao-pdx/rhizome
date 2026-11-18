@@ -4,6 +4,8 @@ import { isPathInTemplateFolders, type TemplateFolderConfig } from '@core/templa
 import { ActiveQueryRoster } from './adapters/active-query-roster';
 import { BacklinkIndex } from './adapters/backlink-index';
 import { createRhizomeEditorExtension } from './adapters/codemirror/rhizome-editor-extension';
+import { DirtySet } from './adapters/dirty-set';
+import { NormalizedDocumentCache } from './adapters/normalized-document-cache';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
 import { PluginDataStore } from './adapters/plugin-data-store';
 import { processRhizomeCodeBlock } from './adapters/rhizome-codeblock';
@@ -53,6 +55,8 @@ export default class RhizomePlugin extends Plugin {
 	dataStore!: PluginDataStore;
 	activeQueryRoster!: ActiveQueryRoster;
 	backlinkIndex!: BacklinkIndex;
+	documentCache!: NormalizedDocumentCache;
+	dirtySet!: DirtySet;
 
 	override async onload() {
 		this.settings = { ...DEFAULT_SETTINGS };
@@ -80,28 +84,41 @@ export default class RhizomePlugin extends Plugin {
 		});
 
 		this.backlinkIndex = new BacklinkIndex(this.app, (file) => this.isIgnoredNote(file));
+		this.documentCache = new NormalizedDocumentCache(this.app, this.loggerAdapter);
+		this.documentCache.setReady(false);
+		this.dirtySet = new DirtySet();
 		this.activeQueryRoster = new ActiveQueryRoster(
 			this.app,
 			this.loggerAdapter,
 			this.backlinkIndex,
+			this.documentCache,
+			this.dirtySet,
 		);
 		this.register(() => this.activeQueryRoster.clear());
 		this.register(() => this.backlinkIndex.dispose());
+		this.register(() => this.documentCache.clear());
+		this.register(() => this.dirtySet.clear());
 
 		let refreshTimer: number | null = null;
 		let resetTimer: number | null = null;
-		let indexDirty = false;
 		let nudgePending = false;
 
 		const runRefresh = (): void => {
-			const dirty = indexDirty;
 			const nudge = nudgePending;
-			indexDirty = false;
 			nudgePending = false;
+			const pending = this.dirtySet.peek();
+			const fullRebuild = this.dirtySet.consumeFullRebuild();
 
 			let changed = false;
-			if (dirty && this.backlinkIndex.isBuilt) {
-				changed = this.backlinkIndex.rebuild();
+			if (this.backlinkIndex.isBuilt) {
+				if (fullRebuild) {
+					this.backlinkIndex.dispose();
+				} else {
+					changed = this.backlinkIndex.applyDirtySources(
+						pending.sources,
+						pending.ignored,
+					);
+				}
 			}
 			if ((nudge || changed) && this.activeQueryRoster.size > 0) {
 				void this.activeQueryRoster.nudge();
@@ -142,27 +159,52 @@ export default class RhizomePlugin extends Plugin {
 		const isTemplateFolderNote = (path: unknown): boolean =>
 			isMarkdownPath(path) && isPathInTemplateFolders(path, this.getTemplateFolderConfig());
 
-		// Notes with ◊InternalRhizome code "001" (DO_NOT_INDEX_OR_QUERY) are
-		// ignored across metadataCache/vault events so internal notes (such as
-		// diagnostic log segments) never trigger reactive query nudges. If a
-		// user adds "001" to an already-indexed note that matched an active
-		// query, suppressing `changed` means that note stays in the subscriber's
-		// result until the query is deregistered and re-registered (or another
-		// note change triggers a nudge) — an accepted trade-off over extra
-		// state-tracking complexity.
+		const markDependents = (paths: readonly string[]): void => {
+			for (const dependent of this.documentCache.dependentSources(paths)) {
+				this.dirtySet.markPath(dependent);
+			}
+		};
+
+		let vaultReady = false;
+		const markVaultReady = (): void => {
+			if (vaultReady) return;
+			vaultReady = true;
+			this.documentCache.setReady(true);
+			this.dirtySet.markFullRebuild();
+			if (this.activeQueryRoster.size > 0) {
+				nudgePending = true;
+				scheduleRefresh();
+			}
+		};
+
+		this.registerEvent(this.app.metadataCache.on('resolved', markVaultReady));
+
+		// Every event only records intent in the dirty set; cache writes happen in one
+		// batch at the top of the next pass. Notes that gain the ignore flag are still
+		// marked so the pass removes them from the cache and from backlinks.
 		this.registerEvent(
 			this.app.metadataCache.on('changed', (file, _data, cache) => {
 				if (isTemplateFolderNote(file?.path)) {
 					scheduleTemplateReset();
 				}
-				if (
-					isMarkdownPath(file?.path) &&
-					!isDoNotIndexFrontmatter(cache ?? this.app.metadataCache.getFileCache(file))
-				) {
-					indexDirty = true;
-					nudgePending = true;
-					scheduleRefresh();
+				if (!isMarkdownPath(file?.path)) {
+					if (typeof file?.path === 'string' && file.path.length > 0) {
+						this.dirtySet.markSource(file.path);
+						scheduleRefresh();
+					}
+					return;
 				}
+				const nextCache = cache ?? this.app.metadataCache.getFileCache(file);
+				if (
+					isDoNotIndexFrontmatter(nextCache) &&
+					this.documentCache.get(file.path) === undefined
+				) {
+					return;
+				}
+				this.dirtySet.markChanged(file.path);
+				markDependents([file.path]);
+				nudgePending = true;
+				scheduleRefresh();
 			}),
 		);
 		this.registerEvent(
@@ -170,43 +212,78 @@ export default class RhizomePlugin extends Plugin {
 				if (isTemplateFolderNote(file?.path)) {
 					scheduleTemplateReset();
 				}
-				if (
-					isMarkdownPath(file?.path) &&
-					!isDoNotIndexFrontmatter(prevCache ?? this.app.metadataCache.getFileCache(file))
-				) {
-					indexDirty = true;
-					nudgePending = true;
-					scheduleRefresh();
+				if (typeof file?.path !== 'string' || file.path.length === 0) {
+					return;
 				}
+				if (!isMarkdownPath(file.path)) {
+					this.dirtySet.markChanged(file.path);
+					scheduleRefresh();
+					return;
+				}
+				const lastCache = prevCache ?? this.app.metadataCache.getFileCache(file);
+				if (
+					isDoNotIndexFrontmatter(lastCache) &&
+					this.documentCache.get(file.path) === undefined
+				) {
+					return;
+				}
+				this.dirtySet.markChanged(file.path);
+				markDependents([file.path]);
+				nudgePending = true;
+				scheduleRefresh();
 			}),
 		);
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
 				if (typeof oldPath === 'string' && typeof file?.path === 'string') {
 					this.activeQueryRoster.handleFileRename(oldPath, file.path);
+					const renamedCache = getAbstractFileCache(this.app, file);
+					const untrackedIgnored =
+						isDoNotIndexFrontmatter(renamedCache) &&
+						this.documentCache.get(oldPath) === undefined &&
+						this.documentCache.get(file.path) === undefined;
+					if (!untrackedIgnored) {
+						this.dirtySet.markRename(oldPath, file.path);
+						markDependents([oldPath, file.path]);
+						if (isMarkdownPath(file.path) || isMarkdownPath(oldPath)) {
+							nudgePending = true;
+						}
+						scheduleRefresh();
+					}
 				}
 				if (isTemplateFolderNote(file?.path) || isTemplateFolderNote(oldPath)) {
 					scheduleTemplateReset();
-				}
-				if (
-					(isMarkdownPath(file?.path) || isMarkdownPath(oldPath)) &&
-					!isDoNotIndexFrontmatter(getAbstractFileCache(this.app, file))
-				) {
-					indexDirty = true;
-					nudgePending = true;
-					scheduleRefresh();
 				}
 			}),
 		);
 		this.registerEvent(
 			this.app.metadataCache.on('resolve', (file) => {
+				if (typeof file?.path !== 'string' || file.path.length === 0) {
+					return;
+				}
 				if (this.isIgnoredNote(file)) {
 					return;
 				}
-				indexDirty = true;
+				this.dirtySet.markChanged(file.path);
+				markDependents([file.path]);
+				nudgePending = true;
 				scheduleRefresh();
 			}),
 		);
+
+		if (__DEV__) {
+			this.addCommand({
+				id: 'dev-dump-normalized-document-cache',
+				name: 'Dump normalized document cache digest',
+				callback: () => {
+					this.loggerAdapter.log('debug', 'Normalized document cache digest', {
+						source: 'query.cache',
+						count: this.documentCache.size,
+						digest: this.documentCache.digest(),
+					});
+				},
+			});
+		}
 
 		// This adds a settings tab so the user can configure various aspects of the plugin
 		this.addSettingTab(new RhizomeSettingTab(this.app, this));
@@ -215,10 +292,16 @@ export default class RhizomePlugin extends Plugin {
 			processRhizomeCodeBlock(source, el, ctx, this),
 		);
 		this.registerEditorExtension(
-			createRhizomeEditorExtension(this.app, this.loggerAdapter, this.backlinkIndex),
+			createRhizomeEditorExtension(
+				this.app,
+				this.loggerAdapter,
+				this.backlinkIndex,
+				this.documentCache,
+			),
 		);
 
 		this.app.workspace.onLayoutReady(() => {
+			markVaultReady();
 			if (this.settings.loggingEnabled) {
 				new DiagnosticsLoggingModal(this.app, this).open();
 			}
@@ -263,7 +346,9 @@ export default class RhizomePlugin extends Plugin {
 			queries,
 			{
 				...options,
-				backlinks: this.backlinkIndex.snapshot(),
+				cache: this.documentCache,
+				backlinkIndex: this.backlinkIndex,
+				dirtySet: this.dirtySet,
 				isIgnoredFile: (file) => this.isIgnoredNote(file),
 			},
 			this.loggerAdapter,
@@ -281,6 +366,7 @@ export default class RhizomePlugin extends Plugin {
 			{
 				...options,
 				backlinks: this.backlinkIndex.snapshot(),
+				cache: this.documentCache,
 				isIgnoredFile: (file) => this.isIgnoredNote(file),
 			},
 			this.loggerAdapter,
