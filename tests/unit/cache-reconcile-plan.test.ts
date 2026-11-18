@@ -86,18 +86,16 @@ describe('planReconcile', () => {
 		});
 	});
 
-	it('honours forced paths even when stat and revision match', () => {
-		const plan = planReconcile([state()], [key()], FP, new Set(['notes/a.md']));
-		expect(plan.update).toEqual(['notes/a.md']);
-	});
-
-	it('ignores forced paths for notes that are not cached or are ignored', () => {
-		const plan = planReconcile(
-			[state({ ignored: true })],
-			[],
-			FP,
-			new Set(['notes/a.md', 'notes/other.md']),
-		);
-		expect(plan).toEqual({ add: [], update: [], remove: [] });
+	it('treats events as hints and never forces an update for a matching key', () => {
+		expect(planReconcile([state()], [key()], FP)).toEqual({
+			add: [],
+			update: [],
+			remove: [],
+		});
+		expect(planReconcile([state({ ignored: true })], [], FP)).toEqual({
+			add: [],
+			update: [],
+			remove: [],
+		});
 	});
 });

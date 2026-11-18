@@ -1,4 +1,9 @@
-import type { NormalizedDocument, ScopeDefinition, ScopeOperator } from './types';
+import type {
+	DocumentEvaluationContext,
+	NormalizedDocument,
+	ScopeDefinition,
+	ScopeOperator,
+} from './types';
 
 export function substringStringMatch(target: string, queryValue: string): boolean {
 	return target.toLowerCase().includes(queryValue.toLowerCase());
@@ -21,8 +26,9 @@ export function hierarchicalTagMatch(target: string, queryValue: string): boolea
 
 /**
  * The 11 built-in per-note metadata scopes (`file`, `path`, `ext`, `tag`, `aliases`, `cssclasses`,
- * `headings`, `links`, `embeds`, `blocks`, `backlinks`). Backlinks come from resolved link metadata
- * attached to the document by the adapter.
+ * `headings`, `links`, `embeds`, `blocks`, `backlinks`). Backlinks are resolved link metadata
+ * supplied per pass through `DocumentEvaluationContext` (or attached to the document in the
+ * direct-normalize oracle path).
  */
 export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
 	[
@@ -106,8 +112,8 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
 		{
 			canonicalName: 'backlinks',
 			aliases: Object.freeze(['backlinks', 'backlink']),
-			extract: (doc: NormalizedDocument) =>
-				(doc.backlinks ?? []).flatMap((b) => {
+			extract: (doc: NormalizedDocument, ctx?: DocumentEvaluationContext) =>
+				(ctx?.backlinks() ?? doc.backlinks ?? []).flatMap((b) => {
 					const slashIdx = b.path.lastIndexOf('/');
 					const name = slashIdx === -1 ? b.path : b.path.slice(slashIdx + 1);
 					const basename = name.toLowerCase().endsWith('.md') ? name.slice(0, -3) : name;

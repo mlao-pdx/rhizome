@@ -17,6 +17,7 @@ import {
 } from '@core/search';
 import type { DocumentCachePort } from '@ports/document-cache-port';
 import type { LoggerPort } from '@ports/logger-port';
+import { markSensitive } from './logger-format';
 
 /**
  * Key that identifies the vault state a cached document was normalized from.
@@ -28,17 +29,22 @@ export interface DocumentCacheStats {
 	readonly add: number;
 	readonly update: number;
 	readonly remove: number;
+	/**
+	 * Entries whose stored key matched the live state and that were neither added nor rewritten.
+	 * Ignored notes are never counted; `uncached` is reported independently.
+	 */
 	readonly hits: number;
+	/** Entries that required a rewrite because their stored key no longer matched (`update`). */
+	readonly stale: number;
+	/** Notes with no `CachedMetadata` (`getFileCache` returned `null`) when they were considered. */
 	readonly uncached: number;
 }
 
 /** Result of reconciling the cache against live vault state. */
 export interface CacheReconcileResult {
 	readonly stats: DocumentCacheStats;
-	/** Paths whose resolved-link entries may have changed since the last pass. */
-	readonly dirtySources: ReadonlySet<string>;
-	/** Paths whose `DO_NOT_INDEX_OR_QUERY` status changed since the last pass. */
-	readonly ignoredChanges: ReadonlySet<string>;
+	/** Whether any cached document was added, updated, or removed during this pass. */
+	readonly changed: boolean;
 }
 
 interface CacheEntry {
@@ -50,36 +56,18 @@ function isIgnoredCache(cache: CachedMetadata | null | undefined): boolean {
 	return hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY);
 }
 
+function hasAnyLinks(cache: CachedMetadata | null | undefined): boolean {
+	return (
+		(cache?.links?.length ?? 0) > 0 ||
+		(cache?.embeds?.length ?? 0) > 0 ||
+		(cache?.frontmatterLinks?.length ?? 0) > 0
+	);
+}
+
 function hashRecord(record: unknown): string {
 	const acc = new XxHash64Accumulator();
 	acc.updateValue(record ?? null);
 	return acc.digest().hex;
-}
-
-function normalizeLinkKey(raw: string): string {
-	return raw.trim().toLowerCase().replace(/^\.\//, '').replace(/\.md$/, '');
-}
-
-function pathKeyVariants(path: string): string[] {
-	const normalized = normalizeLinkKey(path);
-	const slashIdx = normalized.lastIndexOf('/');
-	const basename = slashIdx === -1 ? normalized : normalized.slice(slashIdx + 1);
-	return normalized === basename ? [normalized] : [normalized, basename];
-}
-
-function documentLinkKeys(doc: NormalizedDocument): string[] {
-	const keys = new Set<string>();
-	for (const link of [...doc.links, ...doc.embeds]) {
-		for (const key of pathKeyVariants(link.rawTarget)) {
-			keys.add(key);
-		}
-		if (link.resolvedPath !== null) {
-			for (const key of pathKeyVariants(link.resolvedPath)) {
-				keys.add(key);
-			}
-		}
-	}
-	return [...keys];
 }
 
 /**
@@ -90,9 +78,10 @@ function documentLinkKeys(doc: NormalizedDocument): string[] {
  * config fingerprint they were normalized with. `reconcile` compares every live Markdown file
  * against its stored key, so convergence does not depend on any particular event arriving. The
  * revision token folds in the `CachedMetadata` object identity (closing the same-millisecond
- * `mtime` lag) and the note's `resolvedLinks`/`unresolvedLinks` signature (catching cross-note
- * resolution changes). Documents are deep-frozen at insert and never receive `backlinks`;
- * projection attaches backlinks to a fresh object at the point of use.
+ * `mtime` lag) and, for notes that actually contain links or embeds, the note's
+ * `resolvedLinks`/`unresolvedLinks` signature (catching cross-note resolution changes). Documents
+ * are deep-frozen at insert and never receive `backlinks`; projection attaches backlinks to a
+ * fresh object at the point of use.
  */
 export class NormalizedDocumentCache implements DocumentCachePort<
 	NormalizedDocument,
@@ -102,8 +91,6 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 	private readonly logger: LoggerPort | undefined;
 	private readonly store = new Map<string, CacheEntry>();
 	private readonly metadataRevisions = new WeakMap<object, number>();
-	private readonly linkIndex = new Map<string, Set<string>>();
-	private lastIgnored = new Set<string>();
 	private nextRevision = 1;
 	private ready = true;
 
@@ -156,41 +143,13 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 
 	/** Inserts or replaces a document, freezing its payload. */
 	set(path: string, doc: NormalizedDocument, key: DocumentCacheKey): void {
-		this.unindex(path);
 		const frozen = deepFreeze(doc);
 		this.store.set(path, { doc: frozen, key: Object.freeze({ ...key }) });
-		for (const linkKey of documentLinkKeys(frozen)) {
-			let sources = this.linkIndex.get(linkKey);
-			if (!sources) {
-				sources = new Set();
-				this.linkIndex.set(linkKey, sources);
-			}
-			sources.add(path);
-		}
 	}
 
 	/** Removes an entry. */
 	delete(path: string): void {
-		this.unindex(path);
 		this.store.delete(path);
-	}
-
-	/**
-	 * Returns cached source paths whose raw link targets or previously resolved paths match any
-	 * of the given paths or basenames.
-	 */
-	dependentSources(targetPaths: Iterable<string>): Set<string> {
-		const dependents = new Set<string>();
-		for (const targetPath of targetPaths) {
-			for (const key of pathKeyVariants(targetPath)) {
-				const sources = this.linkIndex.get(key);
-				if (!sources) continue;
-				for (const source of sources) {
-					dependents.add(source);
-				}
-			}
-		}
-		return dependents;
 	}
 
 	/** Removes the entry at `oldPath`; the renamed note is re-normalized under its new path. */
@@ -210,11 +169,38 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 		return this.store.keys();
 	}
 
-	/** Clears every entry and the ignore-tracking baseline. */
+	/** Clears every entry. */
 	clear(): void {
 		this.store.clear();
-		this.linkIndex.clear();
-		this.lastIgnored = new Set();
+	}
+
+	/**
+	 * Checks whether `file`'s stored cache entry is missing or has a stale revision/stat
+	 * without mutating the cache. Used to fast-reject no-op `metadataCache.on('resolve')` events.
+	 */
+	hasLinkResolutionChanged(file: TFile): boolean {
+		if (!this.ready) {
+			return false;
+		}
+		const stored = this.store.get(file.path);
+		if ((file as { deleted?: boolean }).deleted || !file.path.toLowerCase().endsWith('.md')) {
+			return stored !== undefined;
+		}
+		const cache = this.app.metadataCache.getFileCache(file);
+		if (isIgnoredCache(cache)) {
+			// Exception: if a previously indexed note gained DO_NOT_INDEX_OR_QUERY, report changed
+			// so the next reconciliation pass evicts it from the cache.
+			return stored !== undefined;
+		}
+		if (stored === undefined) {
+			return true;
+		}
+		const state = this.stateFor(file, cache, false);
+		return (
+			stored.key.mtime !== state.mtime ||
+			stored.key.size !== state.size ||
+			stored.key.revision !== state.revision
+		);
 	}
 
 	/**
@@ -232,10 +218,11 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 		}
 		const cache = this.app.metadataCache.getFileCache(file);
 		if (isIgnoredCache(cache)) {
+			// Evict any previously cached entry when a note gains DO_NOT_INDEX_OR_QUERY.
 			this.delete(file.path);
 			return null;
 		}
-		const state = this.stateFor(file, cache);
+		const state = this.stateFor(file, cache, false);
 		const stored = this.store.get(file.path);
 		if (
 			stored !== undefined &&
@@ -262,28 +249,25 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 	 * @remarks
 	 * A per-file normalization failure is logged and the entry dropped rather than failing the
 	 * whole pass; the cold-build oracle applies the same policy, so which notes are visible never
-	 * depends on cache state. `dirtySources` is the union of added, updated, and removed paths plus
-	 * ignore-flag changes, which is what the backlink delta needs.
+	 * depends on cache state. Ignored notes (`DO_NOT_INDEX_OR_QUERY`) are never added, and any
+	 * previously cached note that gained the ignore flag is placed in `plan.remove` and evicted.
 	 */
 	reconcile(
 		files: readonly TFile[],
 		config: ResolvedEngineConfig,
 		resolveLinkPath: ResolveLinkPathFn,
-		forcedPaths: ReadonlySet<string> = new Set(),
 	): CacheReconcileResult {
 		const startedAt = Date.now();
 		if (!this.ready) {
 			return {
-				stats: { add: 0, update: 0, remove: 0, hits: 0, uncached: 0 },
-				dirtySources: new Set(),
-				ignoredChanges: new Set(),
+				stats: { add: 0, update: 0, remove: 0, hits: 0, stale: 0, uncached: 0 },
+				changed: false,
 			};
 		}
 		const current: ReconcileFileState[] = [];
 		const statesByPath = new Map<string, ReconcileFileState>();
 		const filesByPath = new Map<string, TFile>();
 		const cachesByPath = new Map<string, CachedMetadata | null>();
-		const currentIgnored = new Set<string>();
 		let uncached = 0;
 
 		for (const file of files) {
@@ -300,9 +284,6 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			filesByPath.set(file.path, file);
 			cachesByPath.set(file.path, cache);
 			const ignored = isIgnoredCache(cache);
-			if (ignored) {
-				currentIgnored.add(file.path);
-			}
 			const state = this.stateFor(file, cache, ignored);
 			statesByPath.set(file.path, state);
 			current.push(state);
@@ -313,32 +294,26 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			storedKeys.push(entry.key);
 		}
 
-		const plan = planReconcile(
-			current,
-			storedKeys,
-			config.normalizationFingerprint,
-			forcedPaths,
-		);
-		const dirtySources = new Set<string>();
-		const ignoredChanges = new Set<string>();
+		const plan = planReconcile(current, storedKeys, config.normalizationFingerprint);
+		const added = new Set(plan.add);
+		const updated = new Set(plan.update);
 		let hits = 0;
-		for (const path of statesByPath.keys()) {
-			const stored = this.store.get(path);
-			if (
-				stored !== undefined &&
-				stored.key.fingerprint === config.normalizationFingerprint
-			) {
+		for (const state of current) {
+			if (state.ignored || added.has(state.path) || updated.has(state.path)) {
+				continue;
+			}
+			if (this.store.has(state.path)) {
 				hits++;
 			}
 		}
 
 		for (const path of plan.remove) {
 			this.delete(path);
-			dirtySources.add(path);
 		}
 
 		let add = 0;
 		let update = 0;
+		let removedOnFailedUpdate = 0;
 		for (const path of plan.add) {
 			const file = filesByPath.get(path);
 			const state = statesByPath.get(path);
@@ -346,7 +321,6 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			const doc = this.normalize(file, cachesByPath.get(path), config, resolveLinkPath);
 			if (doc === null) continue;
 			this.set(path, doc, this.keyFromState(state, config.normalizationFingerprint));
-			dirtySources.add(path);
 			add++;
 		}
 		for (const path of plan.update) {
@@ -356,43 +330,31 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			this.delete(path);
 			const doc = this.normalize(file, cachesByPath.get(path), config, resolveLinkPath);
 			if (doc === null) {
-				dirtySources.add(path);
+				removedOnFailedUpdate++;
 				continue;
 			}
 			this.set(path, doc, this.keyFromState(state, config.normalizationFingerprint));
-			dirtySources.add(path);
 			update++;
 		}
-
-		for (const path of currentIgnored) {
-			if (!this.lastIgnored.has(path)) {
-				ignoredChanges.add(path);
-				dirtySources.add(path);
-			}
-		}
-		for (const path of this.lastIgnored) {
-			if (!currentIgnored.has(path)) {
-				ignoredChanges.add(path);
-				dirtySources.add(path);
-			}
-		}
-		this.lastIgnored = currentIgnored;
 
 		const stats: DocumentCacheStats = {
 			add,
 			update,
 			remove: plan.remove.length,
 			hits,
+			stale: update,
 			uncached,
 		};
+		const changed =
+			add > 0 || update > 0 || plan.remove.length > 0 || removedOnFailedUpdate > 0;
 		this.logger?.log('debug', 'Reconciled normalized document cache', {
 			source: 'query.cache',
 			durationMs: Math.max(0, Date.now() - startedAt),
 			count: add + update + plan.remove.length,
 			...stats,
-			dirtySourceCount: dirtySources.size,
+			changed,
 		});
-		return { stats, dirtySources, ignoredChanges };
+		return { stats, changed };
 	}
 
 	/** Deterministic digest over all cached documents, sorted by path. */
@@ -408,19 +370,6 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 		return acc.digest().hex;
 	}
 
-	private unindex(path: string): void {
-		const existing = this.store.get(path);
-		if (!existing) return;
-		for (const linkKey of documentLinkKeys(existing.doc)) {
-			const sources = this.linkIndex.get(linkKey);
-			if (!sources) continue;
-			sources.delete(path);
-			if (sources.size === 0) {
-				this.linkIndex.delete(linkKey);
-			}
-		}
-	}
-
 	private normalize(
 		file: TFile,
 		cache: CachedMetadata | null | undefined,
@@ -430,10 +379,14 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 		try {
 			return normalizeObsidianMetadata(file, cache ?? null, config, [], resolveLinkPath);
 		} catch (error) {
-			this.logger?.log('warn', `Skipped note that failed normalization: ${file.path}`, {
-				source: 'query.cache',
-				error: String(error),
-			});
+			this.logger?.log(
+				'warn',
+				`Skipped note that failed normalization: ${markSensitive(file.path)}`,
+				{
+					source: 'query.cache',
+					error: String(error),
+				},
+			);
 			return null;
 		}
 	}
@@ -449,7 +402,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			path: file.path,
 			mtime: file.stat?.mtime ?? 0,
 			size: file.stat?.size ?? 0,
-			revision: `${this.metadataRevision(resolvedCache)}:${this.linksSignature(file.path)}`,
+			revision: `${this.metadataRevision(resolvedCache)}:${this.linksSignature(file.path, resolvedCache)}`,
 			ignored: ignored ?? isIgnoredCache(resolvedCache),
 		};
 	}
@@ -476,7 +429,10 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 		return revision;
 	}
 
-	private linksSignature(path: string): string {
+	private linksSignature(path: string, cache: CachedMetadata | null | undefined): string {
+		if (!hasAnyLinks(cache)) {
+			return '0';
+		}
 		const metadataCache = this.app.metadataCache as {
 			resolvedLinks?: Record<string, Record<string, number>>;
 			unresolvedLinks?: Record<string, Record<string, number>>;

@@ -50,4 +50,24 @@ describe('deepFreeze', () => {
 		expect(Object.isFrozen(node)).toBe(true);
 		expect(Object.isFrozen(node.child.list)).toBe(true);
 	});
+
+	it('does not re-read children of a root it already froze', () => {
+		let reads = 0;
+		const child = { value: 1 };
+		const root: Record<string, unknown> = {};
+		Object.defineProperty(root, 'child', {
+			enumerable: true,
+			configurable: true,
+			get() {
+				reads++;
+				return child;
+			},
+		});
+		deepFreeze(root);
+		const readsAfterFirst = reads;
+		expect(readsAfterFirst).toBe(1);
+
+		deepFreeze(root);
+		expect(reads).toBe(readsAfterFirst);
+	});
 });

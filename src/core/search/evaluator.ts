@@ -10,6 +10,7 @@ import { scopeTargetsMatchComparison, substringStringMatch } from './scopes';
 import { compareDateIntervals } from './temporal';
 import type {
 	DocumentDiagnostic,
+	DocumentEvaluationContext,
 	NormalizedDocument,
 	PreparedQuery,
 	ScopeDefinition,
@@ -132,22 +133,26 @@ function evalCompiledComparisonOnEntry(
 	}
 }
 
-function evalCompiledSearchNode(doc: NormalizedDocument, node: CompiledSearchNode): boolean {
+function evalCompiledSearchNode(
+	doc: NormalizedDocument,
+	node: CompiledSearchNode,
+	ctx?: DocumentEvaluationContext,
+): boolean {
 	switch (node.type) {
 		case 'MATCH_ALL':
 			return true;
 		case 'LOGICAL':
 			return node.operator === 'AND'
-				? node.children.every((c) => evalCompiledSearchNode(doc, c))
-				: node.children.some((c) => evalCompiledSearchNode(doc, c));
+				? node.children.every((c) => evalCompiledSearchNode(doc, c, ctx))
+				: node.children.some((c) => evalCompiledSearchNode(doc, c, ctx));
 		case 'NOT':
-			return !evalCompiledSearchNode(doc, node.child);
+			return !evalCompiledSearchNode(doc, node.child, ctx);
 		case 'SCOPED_FILTER': {
-			const targets = node.scopeDef.extract(doc);
+			const targets = node.scopeDef.extract(doc, ctx);
 			return targets.some((t) => evalCompiledValueExpr(t, node.expr, node.scopeDef));
 		}
 		case 'SCOPED_COMPARE': {
-			const targets = node.scopeDef.extract(doc);
+			const targets = node.scopeDef.extract(doc, ctx);
 			return scopeTargetsMatchComparison(
 				node.scopeDef.canonicalName,
 				targets,
@@ -180,12 +185,16 @@ function evalCompiledSearchNode(doc: NormalizedDocument, node: CompiledSearchNod
 	}
 }
 
-export function evaluateDoc(doc: NormalizedDocument, prepared: PreparedQuery): boolean {
+export function evaluateDoc(
+	doc: NormalizedDocument,
+	prepared: PreparedQuery,
+	ctx?: DocumentEvaluationContext,
+): boolean {
 	const plan = getExecutionPlan(prepared);
 	if (doc.normalizationFingerprint !== plan.expectedFingerprint) {
 		throw new Error(`Document "${doc.file.path}" normalizationFingerprint mismatch.`);
 	}
-	return evalCompiledSearchNode(doc, plan.root);
+	return evalCompiledSearchNode(doc, plan.root, ctx);
 }
 
 export function evaluateVault(

@@ -310,12 +310,15 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 
 			const nudgeSpy = vi.spyOn(plugin.activeQueryRoster, 'nudge');
 
-			// Non-markdown events are ignored
+			// Non-markdown events can still change backlink sources (for example a canvas edit),
+			// so they schedule one pass, but no subscriber payload changes.
 			app.metadataCache.trigger('changed', { path: 'assets/image.png' });
 			app.metadataCache.trigger('deleted', { path: 'docs/manual.pdf' });
 			app.vault.trigger('rename', { path: 'assets/new.png' }, 'assets/old.png');
 			await vi.advanceTimersByTimeAsync(600);
-			expect(nudgeSpy).not.toHaveBeenCalled();
+			expect(nudgeSpy).toHaveBeenCalledTimes(1);
+			expect(updates).toHaveLength(0);
+			nudgeSpy.mockClear();
 
 			// Rapid burst of .md events coalesces into a single 500 ms trailing nudge
 			notes = [
@@ -422,7 +425,7 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 			]);
 			const app = createMockApp({
 				files: [target, source],
-				markdownFiles: [target],
+				markdownFiles: [target, source],
 				resolvedLinks,
 				fileCache,
 			}) as App & {
@@ -440,11 +443,18 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 
 			const nudgeSpy = vi.spyOn(plugin.activeQueryRoster, 'nudge');
 
+			// A no-op resolve where resolvedLinks did not change does not schedule a refresh
+			app.metadataCache.trigger('resolve', source);
+			await vi.advanceTimersByTimeAsync(600);
+			expect(nudgeSpy).not.toHaveBeenCalled();
+
+			// Changing resolvedLinks for source triggers a debounced refresh
 			resolvedLinks['notes/source.md'] = { 'notes/target.md': 3 };
 			app.metadataCache.trigger('resolve', source);
 			await vi.advanceTimersByTimeAsync(600);
 			expect(nudgeSpy).toHaveBeenCalledTimes(1);
 
+			// Ignored diagnostic log notes are skipped on resolve
 			nudgeSpy.mockClear();
 			app.metadataCache.trigger('resolve', logNote);
 			await vi.advanceTimersByTimeAsync(600);

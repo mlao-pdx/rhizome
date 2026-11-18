@@ -362,10 +362,25 @@ export interface SearchDiagnostic {
  * - Both `extract` and `matchString` MUST be pure, deterministic, non-mutating, non-throwing,
  *   and capture no mutable external state for the lifetime of a `ResolvedEngineConfig`.
  */
+/**
+ * Per-pass evaluation context supplied by the adapter.
+ *
+ * @remarks
+ * (design, 2026-11-18) Cached documents never carry backlinks, so evaluation reads a document's
+ * backlinks through this context instead of from `doc.backlinks`. The accessor is lazy and
+ * memoized by the adapter, so a pass that never references `backlinks:` never projects anything.
+ */
+export interface DocumentEvaluationContext {
+	readonly backlinks: () => readonly BacklinkRef[];
+}
+
 export interface ScopeDefinition {
 	readonly canonicalName: string;
 	readonly aliases: readonly string[];
-	readonly extract: (doc: NormalizedDocument) => readonly string[];
+	readonly extract: (
+		doc: NormalizedDocument,
+		ctx?: DocumentEvaluationContext,
+	) => readonly string[];
 	readonly matchString: (target: string, queryValue: string, quoted: boolean) => boolean;
 }
 

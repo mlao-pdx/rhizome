@@ -51,6 +51,15 @@ may fail mid-way only if the vault remains in a state the user can recover
 from by hand. The underlying assumption is that the feature's value warrants
 this escape hatch.
 
+### 8. Root cause before solutioning
+
+Diagnose issues all the way to the architectural root cause before designing a
+fix. When a bug or performance issue appears solvable by adding another gate,
+clamp, cache layer, or edge-case patch, pause and trace both upstream (why the
+input or event exists) and downstream (what invariant the consumer actually
+needs) to find the simplest coherent design instead of stacking patches upon
+patches.
+
 ---
 
 These principles map onto the rationale behind Obsidian's plugin review

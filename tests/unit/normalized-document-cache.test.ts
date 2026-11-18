@@ -120,7 +120,7 @@ describe('NormalizedDocumentCache', () => {
 		});
 		const result = cache.reconcile([file], config, resolver);
 		expect(result.stats.remove).toBe(1);
-		expect(result.ignoredChanges.has(file.path)).toBe(true);
+		expect(result.changed).toBe(true);
 		expect(cache.get('notes/a.md')).toBeUndefined();
 	});
 
@@ -164,41 +164,39 @@ describe('NormalizedDocumentCache', () => {
 		);
 	});
 
-	it('finds dependent sources by raw target, basename, and resolved path', () => {
-		const a = makeFile('notes/a.md');
-		const b = makeFile('notes/b.md');
+	it('uses O(1) link signature fast-path when a note has no links or embeds and detects link resolution changes', () => {
+		const plain = makeFile('notes/plain.md');
+		const linked = makeFile('notes/linked.md');
+		const resolvedLinks: Record<string, Record<string, number>> = {
+			'notes/plain.md': { 'Targets/Ghost.md': 1 },
+			'notes/linked.md': { 'Targets/Roadmap.md': 1 },
+		};
 		const caches = new Map<string, CachedMetadata | null>([
+			[plain.path, { frontmatter: { status: 'active' } }],
 			[
-				a.path,
+				linked.path,
 				{
 					frontmatter: {},
-					links: [
-						{
-							link: 'Projects/Roadmap',
-							original: '[[Projects/Roadmap]]',
-							position: {},
-						},
-					],
-				} as unknown as CachedMetadata,
-			],
-			[
-				b.path,
-				{
-					frontmatter: {},
-					embeds: [
-						{ link: 'Assets/pic.png', original: '![[Assets/pic.png]]', position: {} },
-					],
+					links: [{ link: 'Roadmap', original: '[[Roadmap]]', position: {} }],
 				} as unknown as CachedMetadata,
 			],
 		]);
-		const { cache } = setup([a, b], caches);
+		const { cache } = setup([plain, linked], caches, resolvedLinks);
+		const config = makeConfig();
 
-		cache.reconcile([a, b], makeConfig(), resolver);
+		cache.reconcile([plain, linked], config, resolver);
+		expect(cache.getKey(plain.path)!.revision.endsWith(':0')).toBe(true);
+		expect(cache.getKey(linked.path)!.revision.endsWith(':0')).toBe(false);
+		expect(cache.hasLinkResolutionChanged(plain)).toBe(false);
+		expect(cache.hasLinkResolutionChanged(linked)).toBe(false);
 
-		expect([...cache.dependentSources(['Roadmap.md'])]).toEqual([a.path]);
-		expect([...cache.dependentSources(['Targets/Roadmap.md'])]).toEqual([a.path]);
-		expect([...cache.dependentSources(['Assets/pic.png'])]).toEqual([b.path]);
-		expect([...cache.dependentSources(['notes/unrelated.md'])]).toEqual([]);
+		// Changing resolvedLinks for a note without links in its CachedMetadata does not mark it stale
+		resolvedLinks['notes/plain.md'] = { 'Targets/Other.md': 1 };
+		expect(cache.hasLinkResolutionChanged(plain)).toBe(false);
+
+		// Changing resolvedLinks for a note with links marks it stale
+		resolvedLinks['notes/linked.md'] = { 'Elsewhere/Roadmap.md': 1 };
+		expect(cache.hasLinkResolutionChanged(linked)).toBe(true);
 	});
 
 	it('drops the old path on rename and re-adds the new path on reconcile', () => {

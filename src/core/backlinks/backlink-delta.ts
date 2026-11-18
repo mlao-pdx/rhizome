@@ -1,5 +1,3 @@
-import { XxHash64Accumulator } from '../hash/xxhash64';
-
 /** Per-source destination maps, shaped like `MetadataCache.resolvedLinks`. */
 export type ResolvedLinksBySource = Readonly<
 	Record<string, Readonly<Record<string, number>> | undefined>
@@ -13,45 +11,58 @@ function finiteCount(value: unknown): number | undefined {
 }
 
 /**
- * Hashes one target's source mix (`{ path, count }` pairs) into a 32-bit value.
- *
- * @remarks
- * (design, 2026-11-18) Backlink visibility depends only on a target's source mix, not on which
- * source happened to change. Hashing sorted source paths and counts gives a stable per-target
- * fingerprint, which the rolling multiset hash can subtract and re-add in O(1) per affected
- * target instead of rebuilding the whole inverse index.
+ * Normalizes a raw `MetadataCache.resolvedLinks[sourcePath]` entry into a clean
+ * `targetPath → count` dictionary, or `undefined` when the source has no finite link counts.
  */
-export function hashTargetSources(
-	sources: Readonly<Record<string, number>>,
-	ignoredSources?: ReadonlySet<string>,
-): number {
-	const acc = new XxHash64Accumulator();
-	const paths = Object.keys(sources)
-		.filter((path) => !ignoredSources?.has(path))
-		.sort();
-	acc.updateTag(0x60, paths.length);
-	for (const path of paths) {
-		const count = finiteCount(sources[path]);
-		if (count === undefined) continue;
-		acc.updateString(path);
-		acc.updateNumber(count);
+export function normalizeResolvedLinks(raw: unknown): Record<string, number> | undefined {
+	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+		return undefined;
 	}
-	return acc.digest().hi >>> 0;
+	const record = Object.create(null) as Record<string, number>;
+	let any = false;
+	for (const [target, count] of Object.entries(raw as Record<string, unknown>)) {
+		const valid = finiteCount(count);
+		if (valid !== undefined) {
+			record[target] = valid;
+			any = true;
+		}
+	}
+	return any ? record : undefined;
 }
 
 /**
- * Builds the path-keyed inverse index (`target → sources`) used by the delta helpers.
+ * Compares two per-source destination count records for structural equality.
+ * Treats `undefined` and an empty record (`{}`) as equal since both represent zero links.
+ */
+export function recordsEqual(
+	a: Readonly<Record<string, number>> | undefined,
+	b: Readonly<Record<string, number>> | undefined,
+): boolean {
+	if (a === b) return true;
+	const aKeys = a ? Object.keys(a).filter((k) => finiteCount(a[k]) !== undefined) : [];
+	const bKeys = b ? Object.keys(b).filter((k) => finiteCount(b[k]) !== undefined) : [];
+	if (aKeys.length !== bKeys.length) return false;
+	for (const key of aKeys) {
+		if (!b || !Object.prototype.hasOwnProperty.call(b, key)) return false;
+		if (finiteCount(a![key]) !== finiteCount(b[key])) return false;
+	}
+	return true;
+}
+
+/**
+ * Builds the path-keyed inverse index (`target → sources`), skipping ignored sources and targets.
  */
 export function buildTargetSources(
 	links: ResolvedLinksBySource,
-	ignoredSources?: ReadonlySet<string>,
+	ignoredPaths?: ReadonlySet<string>,
 ): TargetSources {
 	const result: TargetSources = new Map();
 	for (const sourcePath of Object.keys(links)) {
-		if (ignoredSources?.has(sourcePath)) continue;
+		if (ignoredPaths?.has(sourcePath)) continue;
 		const destinations = links[sourcePath];
 		if (!destinations || typeof destinations !== 'object') continue;
 		for (const targetPath of Object.keys(destinations)) {
+			if (ignoredPaths?.has(targetPath)) continue;
 			const count = finiteCount(destinations[targetPath]);
 			if (count === undefined) continue;
 			let sources = result.get(targetPath);
@@ -63,63 +74,6 @@ export function buildTargetSources(
 		}
 	}
 	return result;
-}
-
-/** Computes a 32-bit canonical hash for every target in a path-keyed inverse index. */
-export function hashTargetMap(targetSources: TargetSources): Map<string, number> {
-	const hashes = new Map<string, number>();
-	for (const [target, sources] of targetSources) {
-		const record = Object.create(null) as Record<string, number>;
-		for (const [source, count] of sources) {
-			record[source] = count;
-		}
-		hashes.set(target, hashTargetSources(record));
-	}
-	return hashes;
-}
-
-/**
- * Additive multiset hash over per-target hashes (sum modulo 2³²).
- *
- * @remarks
- * (design, 2026-11-18) A backlink delta touches only a handful of targets. Summing target hashes
- * lets the adapter ask "did anything visible change?" in O(1) after subtracting and re-adding the
- * affected entries, and the sum is order-independent so the same target set always yields the
- * same digest.
- */
-export class RollingMultisetHash {
-	private sum = 0;
-
-	/** Adds a target hash to the multiset. */
-	add(hash: number): void {
-		this.sum = (this.sum + (hash >>> 0)) >>> 0;
-	}
-
-	/** Removes a target hash from the multiset. */
-	remove(hash: number): void {
-		this.sum = (this.sum - (hash >>> 0)) >>> 0;
-	}
-
-	/** Current sum modulo 2³². */
-	digest(): number {
-		return this.sum >>> 0;
-	}
-}
-
-function recordsEqual(
-	a: Readonly<Record<string, number>> | undefined,
-	b: Readonly<Record<string, number>> | undefined,
-): boolean {
-	if (a === b) return true;
-	if (!a || !b) return false;
-	const aKeys = Object.keys(a);
-	const bKeys = Object.keys(b);
-	if (aKeys.length !== bKeys.length) return false;
-	for (const key of aKeys) {
-		if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
-		if (finiteCount(a[key]) !== finiteCount(b[key])) return false;
-	}
-	return true;
 }
 
 /**

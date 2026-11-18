@@ -10,6 +10,7 @@ import {
 	type BacklinkSnapshot,
 } from '../../src/adapters/backlink-index';
 import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '../../src/core/search';
+import type { LoggerPort } from '../../src/ports/logger-port';
 import { createMockApp, TFile } from '../support/mock-obsidian-app';
 
 type MockTFile = ObsidianTFile & { deleted?: boolean };
@@ -251,7 +252,68 @@ describe('BacklinkIndex', () => {
 		expect(index.snapshot()).toEqual(snapshotOf([]));
 	});
 
-	describe('applyDirtySources', () => {
+	describe('reconcile & hasSourceChanged', () => {
+		it('returns false on no-op reconcile without bumping revision', () => {
+			const target = makeFile('notes/target.md');
+			const app = createMockApp({ files: [target] });
+			const index = new BacklinkIndex(app as App, noIgnore);
+			index.snapshot();
+
+			expect(index.reconcile()).toBe(false);
+			expect(index.revision).toBe(1);
+		});
+
+		it('detects whether a source’s resolvedLinks entry changed via hasSourceChanged', () => {
+			const target = makeFile('notes/target.md');
+			const source = makeFile('notes/source.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/source.md': { 'notes/target.md': 1 },
+			};
+			const app = createMockApp({ files: [target, source], resolvedLinks });
+			const index = new BacklinkIndex(app as App, noIgnore);
+			expect(index.hasSourceChanged('notes/source.md')).toBe(true);
+
+			index.snapshot();
+			expect(index.hasSourceChanged('notes/source.md')).toBe(false);
+			expect(index.hasSourceChanged('notes/target.md')).toBe(false);
+
+			resolvedLinks['notes/target.md'] = {};
+			expect(index.hasSourceChanged('notes/target.md')).toBe(false);
+
+			resolvedLinks['notes/source.md'] = { 'notes/target.md': 2 };
+			expect(index.hasSourceChanged('notes/source.md')).toBe(true);
+		});
+
+		it('logs affected targets and changes on reconcile', () => {
+			const a = makeFile('notes/a.md');
+			const b = makeFile('notes/b.md');
+			const source = makeFile('notes/source.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/source.md': { 'notes/a.md': 1 },
+			};
+			const app = createMockApp({ files: [a, b, source], resolvedLinks });
+			const log = vi.fn();
+			const logger: LoggerPort = { log };
+			const index = new BacklinkIndex(app as App, noIgnore, logger);
+			index.snapshot();
+			log.mockClear();
+
+			resolvedLinks['notes/source.md'] = { 'notes/b.md': 2 };
+			expect(index.reconcile()).toBe(true);
+			expect(log).toHaveBeenCalledWith(
+				'debug',
+				'Reconciled backlink index',
+				expect.objectContaining({
+					source: 'query.backlinks',
+					sourceCount: 1,
+					count: 2,
+					changed: true,
+				}),
+			);
+			const meta = log.mock.calls[0]?.[2] as { durationMs?: unknown };
+			expect(typeof meta.durationMs).toBe('number');
+		});
+
 		it('moves a link between targets and matches a full rebuild', () => {
 			const a = makeFile('notes/a.md');
 			const b = makeFile('notes/b.md');
@@ -264,24 +326,45 @@ describe('BacklinkIndex', () => {
 			expect([...index.snapshot().keys()]).toEqual([a]);
 
 			resolvedLinks['notes/source.md'] = { 'notes/b.md': 2 };
-			expect(index.applyDirtySources(['notes/source.md'])).toBe(true);
+			expect(index.reconcile()).toBe(true);
 			expect([...index.snapshot().keys()]).toEqual([b]);
 			expect([...index.snapshot().get(b)!]).toEqual([[source, 2]]);
 			expect(index.rebuild()).toBe(false);
 		});
 
-		it('reports no change when a source is reverted or untouched', () => {
-			const target = makeFile('notes/target.md');
+		it('detects a target move when both targets have the same source mix', () => {
+			const a = makeFile('notes/a.md');
+			const b = makeFile('notes/b.md');
 			const source = makeFile('notes/source.md');
 			const resolvedLinks: Record<string, Record<string, number>> = {
-				'notes/source.md': { 'notes/target.md': 1 },
+				'notes/source.md': { 'notes/a.md': 1 },
 			};
-			const app = createMockApp({ files: [target, source], resolvedLinks });
+			const app = createMockApp({ files: [a, b, source], resolvedLinks });
 			const index = new BacklinkIndex(app as App, noIgnore);
 			index.snapshot();
 
-			expect(index.applyDirtySources(['notes/source.md'])).toBe(false);
-			expect(index.applyDirtySources(['notes/unknown.md'])).toBe(false);
+			resolvedLinks['notes/source.md'] = { 'notes/b.md': 1 };
+			expect(index.reconcile()).toBe(true);
+			expect(index.snapshot()).toEqual(new BacklinkIndex(app as App, noIgnore).snapshot());
+			expect([...index.snapshot().keys()]).toEqual([b]);
+		});
+
+		it('reports no change when sources and targets are untouched, even with ignored log files present', () => {
+			const target = makeFile('notes/target.md');
+			const source = makeFile('notes/source.md');
+			const logFile = makeFile('◊Rhizome/logs/1700000000000.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/source.md': { 'notes/target.md': 1 },
+			};
+			const app = createMockApp({ files: [target, source, logFile], resolvedLinks });
+			const index = new BacklinkIndex(
+				app as App,
+				(file) => file.path === '◊Rhizome/logs/1700000000000.md',
+			);
+			index.snapshot();
+
+			expect(index.reconcile()).toBe(false);
+			expect(index.revision).toBe(1);
 		});
 
 		it('drops a deleted source and restores it when it comes back', () => {
@@ -295,11 +378,11 @@ describe('BacklinkIndex', () => {
 			index.snapshot();
 
 			source.deleted = true;
-			expect(index.applyDirtySources(['notes/source.md'])).toBe(true);
+			expect(index.reconcile()).toBe(true);
 			expect(index.snapshot().size).toBe(0);
 
 			source.deleted = false;
-			expect(index.applyDirtySources(['notes/source.md'])).toBe(true);
+			expect(index.reconcile()).toBe(true);
 			expect([...index.snapshot().get(target)!.keys()]).toEqual([source]);
 		});
 
@@ -315,15 +398,15 @@ describe('BacklinkIndex', () => {
 			index.snapshot();
 
 			ignoredPaths.add('notes/target.md');
-			expect(index.applyDirtySources([], ['notes/target.md'])).toBe(true);
+			expect(index.reconcile()).toBe(true);
 			expect(index.snapshot().size).toBe(0);
 
 			ignoredPaths.delete('notes/target.md');
-			expect(index.applyDirtySources([], ['notes/target.md'])).toBe(true);
+			expect(index.reconcile()).toBe(true);
 			expect([...index.snapshot().get(target)!.keys()]).toEqual([source]);
 
 			ignoredPaths.add('notes/source.md');
-			expect(index.applyDirtySources([], ['notes/source.md'])).toBe(true);
+			expect(index.reconcile()).toBe(true);
 			expect(index.snapshot().size).toBe(0);
 		});
 
@@ -338,7 +421,7 @@ describe('BacklinkIndex', () => {
 			expect(index.snapshot().size).toBe(1);
 
 			target.deleted = true;
-			expect(index.applyDirtySources(['notes/target.md'])).toBe(true);
+			expect(index.reconcile()).toBe(true);
 			expect(index.snapshot().size).toBe(0);
 			expect(index.rebuild()).toBe(false);
 		});
@@ -356,14 +439,14 @@ describe('BacklinkIndex', () => {
 			source.path = 'notes/source-renamed.md';
 			resolvedLinks['notes/source-renamed.md'] = resolvedLinks['notes/source.md']!;
 			delete resolvedLinks['notes/source.md'];
-			index.applyDirtySources(['notes/source.md', 'notes/source-renamed.md']);
+			index.reconcile();
 			expect(projectBacklinks(index.snapshot(), target, noIgnore)).toEqual([
 				{ path: 'notes/source-renamed.md', count: 1 },
 			]);
 
 			target.path = 'notes/target-renamed.md';
 			resolvedLinks['notes/source-renamed.md'] = { 'notes/target-renamed.md': 1 };
-			index.applyDirtySources(['notes/source-renamed.md']);
+			index.reconcile();
 			expect(projectBacklinks(index.snapshot(), target, noIgnore)).toEqual([
 				{ path: 'notes/source-renamed.md', count: 1 },
 			]);

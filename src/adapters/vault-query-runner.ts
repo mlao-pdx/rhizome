@@ -10,6 +10,7 @@ import {
 	initEngineConfig,
 	INTERNAL_RHIZOME_CODES,
 	type BacklinkRef,
+	type DocumentEvaluationContext,
 	type NormalizedAliasLocation,
 	type NormalizedBlock,
 	type NormalizedDocument,
@@ -33,7 +34,6 @@ import {
 	type BacklinkIndex,
 	type BacklinkSnapshot,
 } from './backlink-index';
-import type { DirtySet } from './dirty-set';
 import { markSensitive } from './logger-format';
 import type { DocumentCacheStats, NormalizedDocumentCache } from './normalized-document-cache';
 import {
@@ -106,13 +106,14 @@ export interface VaultQueryOptions {
 	 */
 	readonly cache?: NormalizedDocumentCache | undefined;
 	/**
-	 * Optional backlink index updated with the pass's dirty sources before projection.
+	 * Optional backlink index reconciled before projection when `backlinks` is not already supplied.
 	 */
 	readonly backlinkIndex?: BacklinkIndex | undefined;
 	/**
-	 * Optional dirty-path collector drained once at the top of the pass.
+	 * Optional reconciliation stats supplied when a pass coordinator (`ActiveQueryRoster`) has
+	 * already reconciled `cache` for this pass.
 	 */
-	readonly dirtySet?: DirtySet | undefined;
+	readonly reconciledStats?: DocumentCacheStats | undefined;
 }
 
 /**
@@ -151,15 +152,22 @@ export type VaultQueryResult = Record<string, VaultQueryMatch[]>;
  *
  * @remarks
  * (design, 2026-11-18) Cached documents never carry backlinks and are frozen, so projection
- * always builds a fresh frozen object. Backlinks are supplied by the caller from the pass's
+ * always builds a fresh frozen wrapper. Backlinks are supplied by the caller from the pass's
  * snapshot; when omitted, a document's own attached backlinks are used (the direct-normalize
- * test oracle path).
+ * test oracle path). Only the wrapper and the backlinks array need freezing: every other field
+ * is already a deep-frozen cache subtree (the oracle path freezes its document once before
+ * projection).
  */
 export function toVaultQueryMatch(
 	doc: NormalizedDocument,
 	backlinks?: readonly BacklinkRef[],
 ): VaultQueryMatch {
-	return deepFreeze({
+	if (!Object.isFrozen(doc)) {
+		deepFreeze(doc);
+	}
+	const projectedBacklinks = backlinks ?? doc.backlinks ?? [];
+	deepFreeze(projectedBacklinks);
+	return Object.freeze({
 		file: doc.file,
 		aliases: doc.aliases,
 		aliasLocations: doc.aliasLocations,
@@ -172,7 +180,7 @@ export function toVaultQueryMatch(
 		blocks: doc.blocks,
 		properties: doc.properties,
 		propertyLocations: doc.propertyLocations,
-		backlinks: backlinks ?? doc.backlinks ?? [],
+		backlinks: projectedBacklinks,
 	});
 }
 
@@ -239,6 +247,32 @@ export function sanitizeQueryEntries(queries: unknown): Array<[string, string]> 
 	return entries;
 }
 
+/**
+ * Builds a lazy, memoized per-document evaluation context over a pass's backlink snapshot.
+ *
+ * @remarks
+ * (design, 2026-11-18) `backlinks:` is evaluated before projection, so cached documents (which
+ * never carry backlinks) need the projection result during evaluation. The accessor projects at
+ * most once per document and only when a query actually reads it, and the same array is reused
+ * for the projected match payload.
+ */
+function createBacklinkContext(
+	snapshot: BacklinkSnapshot | undefined,
+	file: TFile,
+	isIgnored: (file: TFile) => boolean,
+): DocumentEvaluationContext | undefined {
+	if (snapshot === undefined) {
+		return undefined;
+	}
+	let projected: readonly BacklinkRef[] | undefined;
+	return {
+		backlinks: () => {
+			projected ??= projectBacklinks(snapshot, file, isIgnored);
+			return projected;
+		},
+	};
+}
+
 function defaultIsIgnoredFile(app: App, file: TFile): boolean {
 	return hasInternalRhizomeFlag(
 		app.metadataCache.getFileCache(file)?.frontmatter,
@@ -293,6 +327,8 @@ export function resolveHostDocument(
 			INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
 		)
 	) {
+		// Evict any previously cached entry when a host note gains DO_NOT_INDEX_OR_QUERY.
+		cache?.delete(file.path);
 		return null;
 	}
 	const effectiveResolveLinkPath: ResolveLinkPathFn =
@@ -321,7 +357,7 @@ export function resolveHostDocument(
 		if (backlinks !== undefined) {
 			attachBacklinks(doc, backlinks, file, shouldIgnore);
 		}
-		return doc;
+		return deepFreeze(doc);
 	} catch (error) {
 		logger?.log('error', `Failed to normalize host note ${markSensitive(file.path)}`, {
 			source: 'query.run',
@@ -367,30 +403,21 @@ function prepareVaultPass(
 	resolveLinkPath: ResolveLinkPathFn,
 	files: readonly TFile[] | undefined,
 ): PreparedVaultPass {
-	const drained = options?.dirtySet?.drain();
-	const reconciled =
-		cache !== undefined && files !== undefined
-			? cache.reconcile(files, config, resolveLinkPath, drained?.paths)
-			: undefined;
+	const stats =
+		options?.reconciledStats !== undefined
+			? options.reconciledStats
+			: cache !== undefined && files !== undefined
+				? cache.reconcile(files, config, resolveLinkPath).stats
+				: undefined;
 	let backlinks = options?.backlinks;
 	const index = options?.backlinkIndex;
-	if (index !== undefined) {
-		if (drained?.fullRebuild === true) {
-			index.dispose();
-		} else {
-			const sources = new Set<string>(drained?.sources ?? []);
-			for (const path of reconciled?.dirtySources ?? []) {
-				sources.add(path);
-			}
-			const ignored = new Set<string>(drained?.ignored ?? []);
-			for (const path of reconciled?.ignoredChanges ?? []) {
-				ignored.add(path);
-			}
-			index.applyDirtySources(sources, ignored);
+	if (backlinks === undefined && index !== undefined) {
+		if (typeof index.reconcile === 'function') {
+			index.reconcile();
 		}
 		backlinks = index.snapshot();
 	}
-	return { backlinks, stats: reconciled?.stats };
+	return { backlinks, stats };
 }
 
 /**
@@ -432,8 +459,10 @@ export async function runVaultQuery(
 	const isIgnoredFile =
 		options?.isIgnoredFile ?? ((file: TFile) => defaultIsIgnoredFile(app, file));
 	const cache = options?.cache;
+	const reconcileStartedAt = Date.now();
 	const vaultFiles = cache !== undefined ? app.vault.getMarkdownFiles() : undefined;
 	const prepared = prepareVaultPass(cache, options, resolvedConfig, resolveLinkPath, vaultFiles);
+	const reconcileMs = Math.max(0, Date.now() - reconcileStartedAt);
 	const backlinks = prepared.backlinks;
 
 	const hostDoc: NormalizedDocument | null | undefined =
@@ -487,6 +516,9 @@ export async function runVaultQuery(
 		logger?.log('debug', 'Completed vault query run', {
 			source: 'query.run',
 			durationMs: Math.max(0, Date.now() - startedAt),
+			reconcileMs,
+			evaluateMs: 0,
+			projectMs: 0,
 			count: 0,
 			queryCount: sanitizedEntries.length,
 			executableCount: 0,
@@ -508,6 +540,8 @@ export async function runVaultQuery(
 
 	let notesScanned = 0;
 	let uncachedNotes = prepared.stats?.uncached ?? 0;
+	const scanStartedAt = Date.now();
+	let projectMs = 0;
 
 	if (cache !== undefined && vaultFiles !== undefined) {
 		for (const file of vaultFiles) {
@@ -517,16 +551,16 @@ export async function runVaultQuery(
 			}
 			notesScanned++;
 			propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
+			const ctx = createBacklinkContext(backlinks, file, isIgnoredFile);
 
 			let sharedMatch: VaultQueryMatch | undefined;
 			for (const entry of executableQueries) {
-				if (evaluateDoc(doc, entry.prepared)) {
-					sharedMatch ??= toVaultQueryMatch(
-						doc,
-						backlinks !== undefined
-							? projectBacklinks(backlinks, file, isIgnoredFile)
-							: undefined,
-					);
+				if (evaluateDoc(doc, entry.prepared, ctx)) {
+					if (sharedMatch === undefined) {
+						const projectStartedAt = Date.now();
+						sharedMatch = toVaultQueryMatch(doc, ctx?.backlinks());
+						projectMs += Date.now() - projectStartedAt;
+					}
 					entry.bucket.push(sharedMatch);
 				}
 			}
@@ -569,21 +603,26 @@ export async function runVaultQuery(
 				);
 				continue;
 			}
-			if (backlinks !== undefined) {
-				attachBacklinks(doc, backlinks, file, isIgnoredFile);
-			}
+			deepFreeze(doc);
+			const ctx = createBacklinkContext(backlinks, file, isIgnoredFile);
 			propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
 
 			let sharedMatch: VaultQueryMatch | undefined;
 			for (const entry of executableQueries) {
-				if (evaluateDoc(doc, entry.prepared)) {
-					sharedMatch ??= toVaultQueryMatch(doc);
+				if (evaluateDoc(doc, entry.prepared, ctx)) {
+					if (sharedMatch === undefined) {
+						const projectStartedAt = Date.now();
+						sharedMatch = toVaultQueryMatch(doc, ctx?.backlinks());
+						projectMs += Date.now() - projectStartedAt;
+					}
 					entry.bucket.push(sharedMatch);
 				}
 			}
 		}
 	}
 
+	const scanMs = Math.max(0, Date.now() - scanStartedAt);
+	const evaluateMs = Math.max(0, scanMs - projectMs);
 	propDiagnosticsAggregator.flush(logger);
 
 	const matchCounts: Record<string, number> = {};
@@ -593,6 +632,9 @@ export async function runVaultQuery(
 	logger?.log('debug', 'Completed vault query run', {
 		source: 'query.run',
 		durationMs: Math.max(0, Date.now() - startedAt),
+		reconcileMs,
+		evaluateMs,
+		projectMs,
 		count: notesScanned,
 		queryCount: sanitizedEntries.length,
 		executableCount: executableQueries.length,
@@ -606,6 +648,7 @@ export async function runVaultQuery(
 					cacheUpdate: prepared.stats.update,
 					cacheRemove: prepared.stats.remove,
 					cacheHits: prepared.stats.hits,
+					cacheStale: prepared.stats.stale,
 				}
 			: {}),
 	});

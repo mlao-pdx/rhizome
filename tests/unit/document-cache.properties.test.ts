@@ -13,7 +13,6 @@ import {
 } from '../support/cache-vault';
 import { makeConfig } from '../support/cache-fixtures';
 import { BacklinkIndex } from '../../src/adapters/backlink-index';
-import { DirtySet } from '../../src/adapters/dirty-set';
 import { NormalizedDocumentCache } from '../../src/adapters/normalized-document-cache';
 import { runVaultQuery } from '../../src/adapters/vault-query-runner';
 import { digestNormalizedDocument } from '../../src/core/cache/doc-digest';
@@ -239,46 +238,6 @@ function expectDeepFrozen(value: unknown, seen = new Set<object>()): void {
 	}
 }
 
-function changedSources(before: VaultState, after: VaultState): Set<string> {
-	const oldLinks = new Map(
-		before.notes.map((note) => [
-			note.path,
-			note.links
-				.map((raw) => {
-					const target = before.notes.find(
-						(candidate) => !candidate.deleted && candidate.basename === raw,
-					);
-					return target?.path;
-				})
-				.filter((path): path is string => typeof path === 'string')
-				.sort(),
-		]),
-	);
-	const sources = new Set<string>();
-	for (const note of [...before.notes, ...after.notes]) {
-		const afterNote = after.notes.find((candidate) => candidate.id === note.id);
-		const beforeNote = before.notes.find((candidate) => candidate.id === note.id);
-		const beforeTargets = beforeNote ? oldLinks.get(beforeNote.path) : undefined;
-		const afterTargets = afterNote
-			? afterNote.links
-					.map((raw) => {
-						const target = after.notes.find(
-							(candidate) => !candidate.deleted && candidate.basename === raw,
-						);
-						return target?.path;
-					})
-					.filter((path): path is string => typeof path === 'string')
-					.sort()
-			: undefined;
-		if (JSON.stringify(beforeTargets) !== JSON.stringify(afterTargets)) {
-			if (beforeNote) sources.add(beforeNote.path);
-			if (afterNote) sources.add(afterNote.path);
-			sources.add(note.path);
-		}
-	}
-	return sources;
-}
-
 describe('normalized document cache properties', () => {
 	it('I1 warm cache documents and cold rebuild agree', async () => {
 		await assertProperty(
@@ -301,15 +260,20 @@ describe('normalized document cache properties', () => {
 					active: '[status: active]',
 					path: 'path:"notes"',
 					link: 'link:"n0"',
+					inbound: 'backlinks:"n0"',
+					inboundAny: 'backlinks:"notes"',
 				};
+				const snapshot = new BacklinkIndex(vault.app, () => false).snapshot();
 				const warm = await runVaultQuery(vault.app, queries, {
 					timeZone: 'UTC',
 					referenceTimeMs: 1_700_000_000_000,
 					cache,
+					backlinks: snapshot,
 				});
 				const cold = await runVaultQuery(vault.app, queries, {
 					timeZone: 'UTC',
 					referenceTimeMs: 1_700_000_000_000,
+					backlinks: snapshot,
 				});
 				const paths = (result: typeof warm) =>
 					Object.fromEntries(
@@ -319,6 +283,8 @@ describe('normalized document cache properties', () => {
 						]),
 					);
 				expect(paths(warm)).toEqual(paths(cold));
+				expect(warm['inbound']).toEqual(cold['inbound']);
+				expect(warm['inboundAny']).toEqual(cold['inboundAny']);
 			}),
 		);
 	});
@@ -448,18 +414,9 @@ describe('normalized document cache properties', () => {
 							: { ...note };
 					});
 					const afterState: VaultState = { notes: nextNotes };
-					const sources = changedSources(state, afterState);
-					const ignored = new Set(
-						mutations
-							.filter((mutation) => mutation.ignored)
-							.map((mutation) => `notes/n${mutation.id}.md`),
-					);
-					for (const mutation of mutations) {
-						sources.add(`notes/n${mutation.id}.md`);
-					}
 
 					vault.setState(afterState);
-					before.applyDirtySources(sources, ignored);
+					before.reconcile();
 
 					const freshVault = createCacheVault(afterState);
 					const after = new BacklinkIndex(freshVault.app, (file) =>
@@ -492,7 +449,6 @@ describe('normalized document cache properties', () => {
 					),
 				});
 				const cache = new NormalizedDocumentCache(vault.app);
-				const dirty = new DirtySet();
 				const index = new BacklinkIndex(vault.app, (file) =>
 					hasInternalRhizomeFlag(
 						vault.cacheFor(file.path)?.frontmatter,
@@ -506,7 +462,6 @@ describe('normalized document cache properties', () => {
 						referenceTimeMs: 1_700_000_000_000,
 						cache,
 						backlinkIndex: index,
-						dirtySet: dirty,
 					});
 
 				const baseline = await run();
@@ -517,7 +472,6 @@ describe('normalized document cache properties', () => {
 						note.id === id ? { ...note, ignored: true } : { ...note },
 					),
 				});
-				dirty.markChanged(target.path);
 				const ignored = await run();
 				expect(ignored['target']).toEqual([]);
 				expect(cache.get(target.path)).toBeUndefined();
@@ -527,7 +481,6 @@ describe('normalized document cache properties', () => {
 						note.id === id ? { ...note, ignored: false } : { ...note },
 					),
 				});
-				dirty.markChanged(target.path);
 				const restored = await run();
 				expect(restored['target']?.map((match) => match.file.path)).toContain(target.path);
 			}),
@@ -543,21 +496,15 @@ describe('normalized document cache properties', () => {
 				async (state, mutations) => {
 					const vault = createCacheVault(state);
 					const cache = new NormalizedDocumentCache(vault.app);
-					const dirty = new DirtySet();
 					const queries = { work: '#work', active: '[status: active]' };
 
 					for (const mutation of mutations) {
-						const previous = vault.state.notes.find((note) => note.id === mutation.id);
 						vault.setState(applyMutation(vault.state, mutation));
-						if (previous) dirty.markChanged(previous.path);
-						const current = vault.state.notes.find((note) => note.id === mutation.id);
-						if (current) dirty.markChanged(current.path);
 
 						const warm = await runVaultQuery(vault.app, queries, {
 							timeZone: 'UTC',
 							referenceTimeMs: 1_700_000_000_000,
 							cache,
-							dirtySet: dirty,
 						});
 						const cold = await runVaultQuery(vault.app, queries, {
 							timeZone: 'UTC',
@@ -607,9 +554,7 @@ describe('normalized document cache properties', () => {
 			fc.asyncProperty(stateArb, mutationArb, async (state, mutation) => {
 				const vault = createCacheVault(state);
 				const cache = new NormalizedDocumentCache(vault.app);
-				const dirty = new DirtySet();
 				vault.setState(applyMutation(vault.state, mutation));
-				dirty.markChanged('notes/n0.md');
 				const result = await runVaultQuery(
 					vault.app,
 					{ work: '#work', all: 'path:"notes"' },
@@ -617,13 +562,28 @@ describe('normalized document cache properties', () => {
 						timeZone: 'UTC',
 						referenceTimeMs: 1_700_000_000_000,
 						cache,
-						dirtySet: dirty,
 					},
 				);
 				for (const [, doc] of cache.entries()) {
 					expectDeepFrozen(doc);
 				}
 				for (const matches of Object.values(result)) {
+					for (const match of matches) {
+						expectDeepFrozen(match);
+					}
+				}
+
+				const index = new BacklinkIndex(vault.app, () => false);
+				const cold = await runVaultQuery(
+					vault.app,
+					{ work: '#work', all: 'path:"notes"', inbound: 'backlinks:"notes"' },
+					{
+						timeZone: 'UTC',
+						referenceTimeMs: 1_700_000_000_000,
+						backlinks: index.snapshot(),
+					},
+				);
+				for (const matches of Object.values(cold)) {
 					for (const match of matches) {
 						expectDeepFrozen(match);
 					}
@@ -691,7 +651,6 @@ describe('normalized document cache properties', () => {
 				async (state, renames) => {
 					const vault = createCacheVault(state);
 					const cache = new NormalizedDocumentCache(vault.app);
-					const dirty = new DirtySet();
 					const renamedOldPaths: string[] = [];
 					for (const rename of renames) {
 						const target = vault.state.notes.find(
@@ -707,9 +666,6 @@ describe('normalized document cache properties', () => {
 								suffix: rename.suffix,
 							}),
 						);
-						dirty.markChanged(target.path);
-						const current = vault.state.notes.find((note) => note.id === rename.id);
-						if (current) dirty.markChanged(current.path);
 					}
 					const result = await runVaultQuery(
 						vault.app,
@@ -718,7 +674,6 @@ describe('normalized document cache properties', () => {
 							timeZone: 'UTC',
 							referenceTimeMs: 1_700_000_000_000,
 							cache,
-							dirtySet: dirty,
 						},
 					);
 					const expected = new Set(

@@ -5,7 +5,6 @@ import type { NormalizedDocument, PropertyTypeRegistry, ResolvedEngineConfig } f
 import { HOST_QUERY_KEY } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import type { BacklinkIndex } from './backlink-index';
-import type { DirtySet } from './dirty-set';
 import { markSensitive } from './logger-format';
 import type { NormalizedDocumentCache } from './normalized-document-cache';
 import {
@@ -202,6 +201,17 @@ function buildConfigGroupKey(
 }
 
 /**
+ * Options for `ActiveQueryRoster.nudge`.
+ */
+export interface NudgeOptions {
+	/**
+	 * When `true`, reconciles the document cache and backlink index first and exits without
+	 * re-evaluating queries if neither changed and no rename is pending.
+	 */
+	readonly onlyIfChanged?: boolean | undefined;
+}
+
+/**
  * Tracks active reactive `plugin.query(..., onUpdate)` subscribers, coalesces vault
  * change nudges into single-pass deduplicated `runVaultQuery` runs, and invokes each
  * subscriber's `onUpdate` callback only when its reconstructed payload hash changes.
@@ -211,24 +221,23 @@ export class ActiveQueryRoster {
 	private readonly logger: LoggerPort | undefined;
 	private readonly backlinkIndex: BacklinkIndex | undefined;
 	private readonly documentCache: NormalizedDocumentCache | undefined;
-	private readonly dirtySet: DirtySet | undefined;
 	private readonly subscriptions = new Map<number, ActiveSubscription>();
 	private nextId = 1;
 	private activeNudgePromise: Promise<void> | null = null;
 	private rerunPending = false;
+	private rerunOnlyIfChanged = true;
+	private renamePending = false;
 
 	constructor(
 		app: App,
 		logger?: LoggerPort,
 		backlinkIndex?: BacklinkIndex,
 		documentCache?: NormalizedDocumentCache,
-		dirtySet?: DirtySet,
 	) {
 		this.app = app;
 		this.logger = logger;
 		this.backlinkIndex = backlinkIndex;
 		this.documentCache = documentCache;
-		this.dirtySet = dirtySet;
 	}
 
 	/** Number of currently active reactive query subscriptions. */
@@ -322,9 +331,12 @@ export class ActiveQueryRoster {
 	 * Re-evaluates all active subscriptions in a single-pass deduplicated vault scan
 	 * per configuration group and notifies subscribers whose payload hash changed.
 	 */
-	nudge(referenceTimeMs: number = Date.now()): Promise<void> {
+	nudge(referenceTimeMs: number = Date.now(), options?: NudgeOptions): Promise<void> {
 		if (this.subscriptions.size === 0) {
 			return Promise.resolve();
+		}
+		if (options?.onlyIfChanged !== true) {
+			this.rerunOnlyIfChanged = false;
 		}
 		if (this.activeNudgePromise !== null) {
 			this.rerunPending = true;
@@ -335,7 +347,9 @@ export class ActiveQueryRoster {
 			let currentRefTimeMs = initialRefTimeMs;
 			do {
 				this.rerunPending = false;
-				await this.executeNudgePass(currentRefTimeMs);
+				const onlyIfChanged = this.rerunOnlyIfChanged;
+				this.rerunOnlyIfChanged = true;
+				await this.executeNudgePass(currentRefTimeMs, onlyIfChanged);
 				currentRefTimeMs = Date.now();
 			} while (this.rerunPending && this.subscriptions.size > 0);
 		};
@@ -354,6 +368,8 @@ export class ActiveQueryRoster {
 		}
 		this.subscriptions.clear();
 		this.rerunPending = false;
+		this.rerunOnlyIfChanged = true;
+		this.renamePending = false;
 	}
 
 	/**
@@ -361,9 +377,12 @@ export class ActiveQueryRoster {
 	 * `oldPath` to `newPath`, invoking `onSourcePathRename` so mounted codeblocks stay
 	 * synchronized with the renamed note.
 	 */
-	handleFileRename(oldPath: string, newPath: string): void {
+	handleFileRename(oldPath: string, newPath: string, markPending: boolean = true): void {
 		if (typeof oldPath !== 'string' || typeof newPath !== 'string' || !oldPath || !newPath) {
 			return;
+		}
+		if (markPending) {
+			this.renamePending = true;
 		}
 		const normOld = normalizePath(oldPath);
 		for (const sub of this.subscriptions.values()) {
@@ -375,6 +394,7 @@ export class ActiveQueryRoster {
 				(sub.sourcePath === oldPath || normalizePath(sub.sourcePath) === normOld)
 			) {
 				sub.sourcePath = newPath;
+				this.renamePending = true;
 				try {
 					sub.onSourcePathRename?.(newPath);
 				} catch {
@@ -384,25 +404,12 @@ export class ActiveQueryRoster {
 		}
 	}
 
-	private async executeNudgePass(referenceTimeMs: number): Promise<void> {
+	private async executeNudgePass(referenceTimeMs: number, onlyIfChanged: boolean): Promise<void> {
 		if (this.subscriptions.size === 0) {
 			return;
 		}
-
-		const pending = this.dirtySet?.peek();
-		if (
-			pending !== undefined &&
-			this.backlinkIndex !== undefined &&
-			typeof this.backlinkIndex.applyDirtySources === 'function'
-		) {
-			if (pending.fullRebuild) {
-				this.backlinkIndex.dispose();
-			} else {
-				this.backlinkIndex.applyDirtySources(pending.sources, pending.ignored);
-			}
-		}
-
-		const backlinks = this.backlinkIndex?.snapshot();
+		const hadPendingRename = this.renamePending;
+		this.renamePending = false;
 
 		const groups = new Map<
 			string,
@@ -438,6 +445,16 @@ export class ActiveQueryRoster {
 			group.subs.push(sub);
 		}
 
+		if (groups.size === 0) {
+			return;
+		}
+
+		const backlinksChanged =
+			typeof this.backlinkIndex?.reconcile === 'function'
+				? this.backlinkIndex.reconcile()
+				: false;
+		const backlinks = this.backlinkIndex?.snapshot();
+
 		for (const group of groups.values()) {
 			const uniqueSourcePaths = new Set<string>();
 			for (const sub of group.subs) {
@@ -446,32 +463,54 @@ export class ActiveQueryRoster {
 				}
 			}
 
+			const resolveLinkPath = (rawTarget: string, linkSourcePath: string) =>
+				this.app.metadataCache.getFirstLinkpathDest?.(rawTarget, linkSourcePath)?.path ??
+				null;
+
 			let engineConfig: ResolvedEngineConfig | null = null;
-			const hostDocsByPath = new Map<string, NormalizedDocument | null>();
-			if (uniqueSourcePaths.size > 0) {
+			if (this.documentCache !== undefined || uniqueSourcePaths.size > 0) {
 				engineConfig = await resolveGroupEngineConfig(
 					this.app,
 					group.timeZone,
 					group.propertyTypes,
 					this.logger,
 				);
-				if (engineConfig) {
-					const resolveLinkPath = (rawTarget: string, linkSourcePath: string) =>
-						this.app.metadataCache.getFirstLinkpathDest?.(rawTarget, linkSourcePath)
-							?.path ?? null;
-					for (const sp of uniqueSourcePaths) {
-						const doc = resolveHostDocument(
-							this.app,
-							sp,
+			}
+
+			const docReconciled =
+				this.documentCache !== undefined && engineConfig !== null
+					? this.documentCache.reconcile(
+							this.app.vault.getMarkdownFiles(),
 							engineConfig,
 							resolveLinkPath,
-							this.logger,
-							backlinks,
-							undefined,
-							this.documentCache,
-						);
-						hostDocsByPath.set(sp, doc ?? null);
-					}
+						)
+					: undefined;
+
+			if (
+				onlyIfChanged &&
+				this.documentCache !== undefined &&
+				docReconciled !== undefined &&
+				!docReconciled.changed &&
+				!backlinksChanged &&
+				!hadPendingRename
+			) {
+				continue;
+			}
+
+			const hostDocsByPath = new Map<string, NormalizedDocument | null>();
+			if (uniqueSourcePaths.size > 0 && engineConfig !== null) {
+				for (const sp of uniqueSourcePaths) {
+					const doc = resolveHostDocument(
+						this.app,
+						sp,
+						engineConfig,
+						resolveLinkPath,
+						this.logger,
+						backlinks,
+						undefined,
+						this.documentCache,
+					);
+					hostDocsByPath.set(sp, doc ?? null);
 				}
 			}
 
@@ -519,10 +558,10 @@ export class ActiveQueryRoster {
 								...(engineConfig ? { resolvedConfig: engineConfig } : {}),
 								...(backlinks !== undefined ? { backlinks } : {}),
 								...(this.documentCache ? { cache: this.documentCache } : {}),
-								...(this.documentCache && this.dirtySet
-									? { dirtySet: this.dirtySet }
+								...(docReconciled !== undefined
+									? { reconciledStats: docReconciled.stats }
 									: {}),
-								...(this.documentCache && this.backlinkIndex
+								...(this.backlinkIndex
 									? { backlinkIndex: this.backlinkIndex }
 									: {}),
 							},

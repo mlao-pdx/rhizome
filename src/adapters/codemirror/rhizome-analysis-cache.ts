@@ -124,6 +124,8 @@ export function createRhizomeAnalysisCache(
 		if (
 			hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)
 		) {
+			// Evict any previously cached entry when the host note gains DO_NOT_INDEX_OR_QUERY.
+			documentCache?.delete(hostFile.path);
 			resolved = { hostDoc: null, cacheSignature: `${hostFile.path}:ignored` };
 		} else {
 			try {

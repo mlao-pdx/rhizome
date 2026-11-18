@@ -11,11 +11,14 @@
 See `docs/principles.md` for the full text. In short: be idiomatic to Obsidian; judge but don't
 sentence (inform, don't block, unless validation is the feature); vault is truth; embrace chaos
 outside your narrow schema; opt-in before touching; read forgivingly/write critically; never leave
-the vault worse than a manual edit would. Deviations must be well-reasoned.
+the vault worse than a manual edit would; diagnose root causes to the architectural level before
+solutioning rather than stacking edge-case gates or patches. Deviations must be well-reasoned.
 
 ## Coding conventions
 
 - TypeScript with `"strict": true`.
+- Diagnose issues to the architectural root cause before introducing new flags,
+  gates, or state-tracking layers.
 - Keep `main.ts` minimal: only plugin lifecycle (`onload`, `onunload`,
   `addCommand` registration). Delegate feature logic to separate modules
   under `src/`.

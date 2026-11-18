@@ -9,6 +9,7 @@ import {
 	runVaultQuery,
 } from '../../src/adapters/vault-query-runner';
 import type { BacklinkSnapshot } from '../../src/adapters/backlink-index';
+import { NormalizedDocumentCache } from '../../src/adapters/normalized-document-cache';
 import { resolveThisReference, type NormalizedDocument } from '../../src/core/search';
 
 interface MockNoteSpec {
@@ -454,6 +455,106 @@ describe('runVaultQuery', () => {
 		expect(JSON.parse(JSON.stringify(badConfigRes))).toEqual(badConfigRes);
 	});
 
+	it('matches backlinks identically on the cached and direct paths', async () => {
+		const target = makeMockFileEntry({ path: 'notes/target.md' });
+		const source = makeMockFileEntry({ path: 'sources/Origin.md' });
+		const otherSource = makeMockFileEntry({ path: 'sources/other-lib.md' });
+		const snapshot = new Map([
+			[
+				target,
+				new Map([
+					[source, 2],
+					[otherSource, 1],
+				]),
+			],
+		]) as unknown as BacklinkSnapshot;
+
+		const app = makeMockApp({});
+		(app.vault as unknown as { getMarkdownFiles: () => unknown[] }).getMarkdownFiles = () => [
+			target,
+		];
+		(app.metadataCache as unknown as { getFileCache: () => unknown }).getFileCache = () => ({
+			frontmatter: { status: 'active' },
+		});
+
+		const cache = new NormalizedDocumentCache(app);
+		const queries = {
+			byPath: 'backlinks:"sources/origin"',
+			byBase: 'backlinks:ORIGIN',
+			byCount: 'backlinks:2',
+			viaThis: 'backlinks:@this.backlinks.path',
+			viaCount: 'backlinks:@this.backlinks.count',
+		};
+		const shared = {
+			timeZone: 'UTC',
+			referenceTimeMs: 1_700_000_000_000,
+			backlinks: snapshot,
+			sourcePath: 'notes/target.md',
+		};
+
+		const cached = await runVaultQuery(app, queries, { ...shared, cache });
+		const direct = await runVaultQuery(app, queries, shared);
+		const paths = (result: typeof cached) =>
+			Object.fromEntries(
+				Object.entries(result).map(([key, matches]) => [
+					key,
+					matches.map((match) => match.file.path),
+				]),
+			);
+
+		expect(paths(cached)).toEqual(paths(direct));
+		expect(cached.byPath?.[0]?.file.path).toBe('notes/target.md');
+		expect(cached.byBase?.[0]?.file.path).toBe('notes/target.md');
+		expect(cached.byCount).toEqual([]);
+		expect(cached.viaThis?.[0]?.file.path).toBe('notes/target.md');
+		expect(cached.byPath?.[0]?.backlinks).toEqual([
+			{ path: 'sources/Origin.md', count: 2 },
+			{ path: 'sources/other-lib.md', count: 1 },
+		]);
+		expect(cached['◊host']?.[0]?.backlinks).toEqual(direct['◊host']?.[0]?.backlinks);
+	});
+
+	it('projects backlinks at most once per document while evaluating', async () => {
+		const target = makeMockFileEntry({ path: 'notes/target.md' });
+		const source = makeMockFileEntry({ path: 'sources/Origin.md' });
+		const otherSource = makeMockFileEntry({ path: 'sources/other-lib.md' });
+		const snapshot = new Map([
+			[
+				target,
+				new Map([
+					[source, 2],
+					[otherSource, 1],
+				]),
+			],
+		]) as unknown as BacklinkSnapshot;
+		const isIgnoredFile = vi.fn(() => false);
+
+		const app = makeMockApp({});
+		(app.vault as unknown as { getMarkdownFiles: () => unknown[] }).getMarkdownFiles = () => [
+			target,
+		];
+		(app.metadataCache as unknown as { getFileCache: () => unknown }).getFileCache = () => ({});
+
+		const result = await runVaultQuery(
+			app,
+			{
+				byPath: 'backlinks:"sources/origin"',
+				byBase: 'backlinks:ORIGIN',
+			},
+			{
+				timeZone: 'UTC',
+				referenceTimeMs: 1_700_000_000_000,
+				backlinks: snapshot,
+				cache: new NormalizedDocumentCache(app),
+				isIgnoredFile,
+			},
+		);
+
+		expect(result.byPath?.[0]?.file.path).toBe('notes/target.md');
+		expect(result.byBase?.[0]?.file.path).toBe('notes/target.md');
+		expect(isIgnoredFile).toHaveBeenCalledTimes(2);
+	});
+
 	describe('diagnostic logging', () => {
 		function createLoggerSpy() {
 			const calls: Array<{
@@ -657,6 +758,37 @@ describe('runVaultQuery', () => {
 				matchCounts: { '‼️highPriority‼️': 0 },
 			});
 			expect(typeof summary?.meta?.['durationMs']).toBe('number');
+		});
+
+		it('logs cache counters and query phase timings', async () => {
+			const spy = createLoggerSpy();
+			const app = makeMockApp({
+				notes: [
+					{ path: 'notes/a.md', cache: { frontmatter: { status: 'active' } } },
+					{ path: 'notes/b.md', cache: { frontmatter: { status: 'active' } } },
+				],
+			});
+			const cache = new NormalizedDocumentCache(app);
+
+			await runVaultQuery(app, { q: 'path:"notes"' }, { timeZone: 'UTC', cache }, spy.logger);
+
+			const summary = spy.calls.find((c) => c.message === 'Completed vault query run');
+			expect(summary?.meta).toMatchObject({
+				cacheAdd: 2,
+				cacheUpdate: 0,
+				cacheRemove: 0,
+				cacheHits: 0,
+				cacheStale: 0,
+				uncachedNotes: 0,
+			});
+			expect(typeof summary?.meta?.['reconcileMs']).toBe('number');
+			expect(typeof summary?.meta?.['evaluateMs']).toBe('number');
+			expect(typeof summary?.meta?.['projectMs']).toBe('number');
+			expect(
+				(summary?.meta?.['cacheHits'] as number) +
+					(summary?.meta?.['cacheAdd'] as number) +
+					(summary?.meta?.['cacheUpdate'] as number),
+			).toBe(2);
 		});
 
 		it('logs completion summary with executableCount: 0 when all queries fail compilation', async () => {
@@ -882,6 +1014,11 @@ describe('runVaultQuery', () => {
 			expect(
 				resolveThisReference({ ...hostDoc, backlinks: [] }, ['backlinks', 'path']),
 			).toEqual({ resolved: false, values: [] });
+
+			expect(Object.isFrozen(hostDoc.file)).toBe(true);
+			expect(Object.isFrozen(hostDoc.links)).toBe(true);
+			expect(Object.isFrozen(hostDoc.backlinks)).toBe(true);
+			expect(Object.isFrozen(hostDoc.backlinks?.[0])).toBe(true);
 		});
 	});
 });

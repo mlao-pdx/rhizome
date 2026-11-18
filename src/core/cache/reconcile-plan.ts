@@ -59,14 +59,15 @@ function keyMatches(
  * event only delays convergence until the next pass instead of leaving permanent staleness. The
  * revision token folds in both the `CachedMetadata` identity (to close the same-millisecond
  * `mtime` lag) and the note's link-resolution signature, which is what makes a target create,
- * rename, or delete converge even when no `resolve` event reaches the adapter. Ignored notes are
- * never stored, so a live ignored file that is still present produces a removal.
+ * rename, or delete converge even when no `resolve` event reaches the adapter. Events are
+ * therefore hints, not forced rewrites: a `resolve` or dependent-marking event can never update a
+ * document whose key did not change. Ignored notes are never stored, so a live ignored file that
+ * is still present produces a removal.
  */
 export function planReconcile(
 	current: readonly ReconcileFileState[],
 	stored: readonly ReconcileCacheKey[],
 	expectedFingerprint: string,
-	forcedPaths: ReadonlySet<string> = new Set(),
 ): ReconcilePlan {
 	const storedByPath = new Map<string, ReconcileCacheKey>();
 	for (const key of stored) {
@@ -87,7 +88,7 @@ export function planReconcile(
 			add.push(state.path);
 			continue;
 		}
-		if (forcedPaths.has(state.path) || !keyMatches(state, existing, expectedFingerprint)) {
+		if (!keyMatches(state, existing, expectedFingerprint)) {
 			update.push(state.path);
 		}
 	}
