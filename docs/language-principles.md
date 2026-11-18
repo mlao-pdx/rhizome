@@ -98,10 +98,15 @@ query language into a clunky SQL/aggregates engine or forcing users to write
 
 ### 8. Pin the Clock
 
-- **Pinned reference time per execution:**
-  - All relative temporal anchors (`@now`, `@today`, `@this-week`) resolve
-    against a single pinned timestamp for the entire query/template render
-    pass so results are deterministic and cacheable.
+- **Pinned reference time per execution (event-driven, never timer-polled):**
+  - All relative temporal anchors (`@now`, `@today`, `@this-week` in queries;
+    `now`, `today`, `thisweek`, etc. in templates) resolve against a single
+    pinned timestamp for the entire query/template render pass so results are
+    deterministic and cacheable.
+  - Rendered `rhizome` codeblocks do **not** run background wall-clock timers
+    or polling intervals to auto-refresh as time passes; re-evaluation happens
+    only in response to vault/metadata/template changes or an explicit
+    user-initiated refresh.
 
 ### 9. Structure, Not Prose
 

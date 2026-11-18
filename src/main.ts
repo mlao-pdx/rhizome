@@ -3,6 +3,7 @@ import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
 import { isPathInTemplateFolders, type TemplateFolderConfig } from '@core/templates';
 import { ActiveQueryRoster } from './adapters/active-query-roster';
 import { BacklinkIndex } from './adapters/backlink-index';
+import { CodeBlockRenderCache } from './adapters/codeblock-render-cache';
 import { createRhizomeEditorExtension } from './adapters/codemirror/rhizome-editor-extension';
 import { NormalizedDocumentCache } from './adapters/normalized-document-cache';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
@@ -55,6 +56,7 @@ export default class RhizomePlugin extends Plugin {
 	activeQueryRoster!: ActiveQueryRoster;
 	backlinkIndex!: BacklinkIndex;
 	documentCache!: NormalizedDocumentCache;
+	codeBlockRenderCache!: CodeBlockRenderCache;
 
 	override async onload() {
 		this.settings = { ...DEFAULT_SETTINGS };
@@ -88,6 +90,7 @@ export default class RhizomePlugin extends Plugin {
 		);
 		this.documentCache = new NormalizedDocumentCache(this.app, this.loggerAdapter);
 		this.documentCache.setReady(false);
+		this.codeBlockRenderCache = new CodeBlockRenderCache();
 		this.activeQueryRoster = new ActiveQueryRoster(
 			this.app,
 			this.loggerAdapter,
@@ -97,6 +100,7 @@ export default class RhizomePlugin extends Plugin {
 		this.register(() => this.activeQueryRoster.clear());
 		this.register(() => this.backlinkIndex.dispose());
 		this.register(() => this.documentCache.clear());
+		this.register(() => this.codeBlockRenderCache.clear());
 
 		let refreshTimer: number | null = null;
 		let resetTimer: number | null = null;
@@ -107,6 +111,7 @@ export default class RhizomePlugin extends Plugin {
 			}
 		};
 		const scheduleRefresh = (): void => {
+			this.activeQueryRoster.markVaultDirty();
 			if (refreshTimer !== null) {
 				window.clearTimeout(refreshTimer);
 			}
@@ -116,7 +121,9 @@ export default class RhizomePlugin extends Plugin {
 			}, REACTIVE_QUERY_DEBOUNCE_MS);
 		};
 		const scheduleTemplateReset = (): void => {
+			this.activeQueryRoster.markVaultDirty();
 			if (this.activeQueryRoster.size === 0) {
+				this.activeQueryRoster.resetAll();
 				return;
 			}
 			if (resetTimer !== null) {
@@ -147,6 +154,7 @@ export default class RhizomePlugin extends Plugin {
 			vaultReady = true;
 			this.documentCache.setReady(true);
 			this.backlinkIndex.dispose();
+			this.activeQueryRoster.markVaultDirty();
 			if (this.activeQueryRoster.size > 0) {
 				scheduleRefresh();
 			}

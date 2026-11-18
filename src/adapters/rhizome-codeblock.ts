@@ -8,6 +8,7 @@ import {
 } from 'obsidian';
 import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
 import {
+	parsedTemplateReferencesHost,
 	parseRhizomeTemplatePass1Async,
 	renderParsedRhizomeTemplate,
 	resolveCodeBlockHeadingLevel,
@@ -15,6 +16,8 @@ import {
 	type TemplateRuntimeContext,
 } from '@core/templates';
 import type RhizomePlugin from '../main';
+import { hashVaultQueryResult } from './active-query-roster';
+import { allExtractedQueriesExecutable } from './codeblock-render-cache';
 import { markSensitive } from './logger-format';
 import { resolveDefaultTimeZone, type VaultQueryResult } from './vault-query-runner';
 
@@ -151,6 +154,9 @@ export async function processRhizomeCodeBlock(
 ): Promise<void> {
 	let currentSourcePath = typeof ctx.sourcePath === 'string' ? ctx.sourcePath : '';
 	const onSourcePathRename = (newPath: string): void => {
+		if (currentSourcePath.length > 0 && currentSourcePath !== newPath) {
+			plugin.codeBlockRenderCache?.deleteForSourcePath(currentSourcePath);
+		}
 		currentSourcePath = newPath;
 	};
 
@@ -209,17 +215,47 @@ export async function processRhizomeCodeBlock(
 			void runCycle();
 		};
 
-		const parsed = await parseRhizomeTemplatePass1Async(
+		const folderConfig = {
+			templatesFolder: plugin.settings.templatesFolder,
+			partialsFolder: plugin.settings.partialsFolder,
+			layoutsFolder: plugin.settings.layoutsFolder,
+			configDir: plugin.app.vault.configDir,
+		};
+		const renderCache = plugin.codeBlockRenderCache;
+		const templateRevision = plugin.activeQueryRoster?.templateRevision ?? 0;
+
+		const cachedPass1 = renderCache?.getPass1(
+			currentSourcePath,
 			source,
-			{
-				templatesFolder: plugin.settings.templatesFolder,
-				partialsFolder: plugin.settings.partialsFolder,
-				layoutsFolder: plugin.settings.layoutsFolder,
-				configDir: plugin.app.vault.configDir,
-			},
-			(vaultRelativePath) => readVaultTemplateNote(plugin, vaultRelativePath),
+			folderConfig,
+			templateRevision,
 		);
-		const parseDurationMs = Math.max(0, Date.now() - parseStartedAt);
+		let parsed: Awaited<ReturnType<typeof parseRhizomeTemplatePass1Async>>;
+		let referencesHost: boolean;
+		let parseDurationMs = 0;
+
+		if (cachedPass1 !== undefined) {
+			parsed = cachedPass1.parsed;
+			referencesHost = cachedPass1.referencesHost;
+		} else {
+			parsed = await parseRhizomeTemplatePass1Async(
+				source,
+				folderConfig,
+				(vaultRelativePath) => readVaultTemplateNote(plugin, vaultRelativePath),
+			);
+			parseDurationMs = Math.max(0, Date.now() - parseStartedAt);
+			referencesHost = parsedTemplateReferencesHost(source, parsed);
+			if (parsed.env.diagnostics.length === 0 && parsed.templates !== null) {
+				renderCache?.setPass1(
+					currentSourcePath,
+					source,
+					folderConfig,
+					templateRevision,
+					parsed,
+					referencesHost,
+				);
+			}
+		}
 		if (outerAbortController.signal.aborted || cycleSignal.aborted) {
 			return;
 		}
@@ -231,6 +267,7 @@ export async function processRhizomeCodeBlock(
 				signal: cycleSignal,
 				onReset,
 				onSourcePathRename,
+				includeHostInHash: false,
 				...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
 			});
 			if (
@@ -271,6 +308,9 @@ export async function processRhizomeCodeBlock(
 		for (const q of queries) {
 			queryMap[q.name] = q.query;
 		}
+		const frozenQueryMap = Object.freeze(queryMap);
+		const resolveCurrentHeadingLevel = (): number =>
+			lookupHostHeadingLevel(plugin, currentSourcePath, ctx, el);
 
 		const onUpdate = async (newPayload: VaultQueryResult): Promise<void> => {
 			if (outerAbortController.signal.aborted || cycleSignal.aborted) {
@@ -278,6 +318,21 @@ export async function processRhizomeCodeBlock(
 			}
 			const generation = ++renderGeneration;
 			const updateStartedAt = Date.now();
+			const runtimeCtx = buildRuntimeContext(
+				plugin,
+				updateStartedAt,
+				currentSourcePath,
+				ctx,
+				el,
+			);
+			const currentHeadingLevel = runtimeCtx.headingLevel ?? 0;
+			const currentTemplateRev = plugin.activeQueryRoster?.templateRevision ?? 0;
+			const currentStateRev = plugin.activeQueryRoster?.stateRevision ?? 0;
+			const payloadHash = hashVaultQueryResult(newPayload, {
+				includeHost: referencesHost,
+				headingLevel: currentHeadingLevel,
+			});
+
 			const updatedResult = await renderParsedRhizomeTemplate(
 				source,
 				parsed,
@@ -288,7 +343,7 @@ export async function processRhizomeCodeBlock(
 						heading,
 						...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
 					}),
-				buildRuntimeContext(plugin, updateStartedAt, currentSourcePath, ctx, el),
+				runtimeCtx,
 			);
 			if (
 				outerAbortController.signal.aborted ||
@@ -297,6 +352,19 @@ export async function processRhizomeCodeBlock(
 			) {
 				return;
 			}
+			if (updatedResult.ok && allExtractedQueriesExecutable(parsed, newPayload)) {
+				renderCache?.setRender(
+					currentSourcePath,
+					source,
+					currentHeadingLevel,
+					folderConfig,
+					currentTemplateRev,
+					currentStateRev,
+					payloadHash,
+					newPayload,
+					updatedResult,
+				);
+			}
 			const updateDurationMs = Math.max(0, Date.now() - updateStartedAt);
 			logCodeBlockRenderResult(plugin, currentSourcePath, updatedResult, updateDurationMs);
 			await renderIntoContainer(updatedResult.markdown, generation, cycleSignal);
@@ -304,13 +372,44 @@ export async function processRhizomeCodeBlock(
 
 		const initialGeneration = ++renderGeneration;
 		const hasQueries = Object.keys(queryMap).length > 0;
+		const initialHeadingLevel = resolveCurrentHeadingLevel();
+		const stateRevisionBeforeQuery = plugin.activeQueryRoster?.stateRevision ?? 0;
+		const remountHit = renderCache?.getRemountHit(
+			currentSourcePath,
+			source,
+			initialHeadingLevel,
+			folderConfig,
+			templateRevision,
+			stateRevisionBeforeQuery,
+		);
+		if (remountHit !== undefined) {
+			plugin.activeQueryRoster?.register(
+				frozenQueryMap,
+				{
+					referenceTimeMs,
+					signal: cycleSignal,
+					onReset,
+					onSourcePathRename,
+					includeHostInHash: referencesHost,
+					headingLevel: resolveCurrentHeadingLevel,
+					...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
+				},
+				remountHit.payload,
+				hasQueries || currentSourcePath.length > 0 ? onUpdate : undefined,
+			);
+			await renderIntoContainer(remountHit.result.markdown, initialGeneration, cycleSignal);
+			return;
+		}
+
 		const initialPayload = await plugin.query(
-			Object.freeze(queryMap),
+			frozenQueryMap,
 			{
 				referenceTimeMs,
 				signal: cycleSignal,
 				onReset,
 				onSourcePathRename,
+				includeHostInHash: referencesHost,
+				headingLevel: resolveCurrentHeadingLevel,
 				...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
 			},
 			hasQueries || currentSourcePath.length > 0 ? onUpdate : undefined,
@@ -320,6 +419,41 @@ export async function processRhizomeCodeBlock(
 			cycleSignal.aborted ||
 			initialGeneration !== renderGeneration
 		) {
+			return;
+		}
+
+		const runtimeCtx = buildRuntimeContext(plugin, referenceTimeMs, currentSourcePath, ctx, el);
+		const currentHeadingLevel = runtimeCtx.headingLevel ?? 0;
+		const currentTemplateRev = plugin.activeQueryRoster?.templateRevision ?? 0;
+		const currentStateRev = plugin.activeQueryRoster?.stateRevision ?? 0;
+		const allExecutable = allExtractedQueriesExecutable(parsed, initialPayload);
+		const payloadHash = hashVaultQueryResult(initialPayload, {
+			includeHost: referencesHost,
+			headingLevel: currentHeadingLevel,
+		});
+		const cachedByPayload = allExecutable
+			? renderCache?.getRenderByPayloadHash(
+					currentSourcePath,
+					source,
+					currentHeadingLevel,
+					folderConfig,
+					currentTemplateRev,
+					payloadHash,
+				)
+			: undefined;
+		if (cachedByPayload !== undefined) {
+			renderCache?.setRender(
+				currentSourcePath,
+				source,
+				currentHeadingLevel,
+				folderConfig,
+				currentTemplateRev,
+				currentStateRev,
+				payloadHash,
+				initialPayload,
+				cachedByPayload,
+			);
+			await renderIntoContainer(cachedByPayload.markdown, initialGeneration, cycleSignal);
 			return;
 		}
 
@@ -334,7 +468,7 @@ export async function processRhizomeCodeBlock(
 					heading,
 					...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
 				}),
-			buildRuntimeContext(plugin, referenceTimeMs, currentSourcePath, ctx, el),
+			runtimeCtx,
 		);
 		if (
 			outerAbortController.signal.aborted ||
@@ -342,6 +476,20 @@ export async function processRhizomeCodeBlock(
 			initialGeneration !== renderGeneration
 		) {
 			return;
+		}
+
+		if (initialResult.ok && allExecutable) {
+			renderCache?.setRender(
+				currentSourcePath,
+				source,
+				currentHeadingLevel,
+				folderConfig,
+				currentTemplateRev,
+				currentStateRev,
+				payloadHash,
+				initialPayload,
+				initialResult,
+			);
 		}
 
 		const durationMs = parseDurationMs + Math.max(0, Date.now() - renderStartedAt);

@@ -12,6 +12,7 @@ import type { BacklinkIndex, BacklinkSnapshot } from '../../src/adapters/backlin
 import { processRhizomeCodeBlock } from '../../src/adapters/rhizome-codeblock';
 import { runVaultQuery, type VaultQueryResult } from '../../src/adapters/vault-query-runner';
 import {
+	parsedTemplateReferencesHost,
 	parseRhizomeTemplatePass1,
 	renderParsedRhizomeTemplate,
 } from '../../src/core/templates/template-engine';
@@ -207,6 +208,49 @@ describe('Deterministic payload hashing', () => {
 		expect(hashVaultQueryMatch(one)).not.toBe(hashVaultQueryMatch(two));
 		expect(hashVaultQueryMatch(one)).not.toBe(hashVaultQueryMatch(renamed));
 		expect(hashVaultQueryMatch(match)).not.toBe(hashVaultQueryMatch(one));
+	});
+
+	it('includes headingLevel in the payload hash and respects includeHost', async () => {
+		const { app } = createMutableVaultApp([
+			{
+				path: 'notes/a.md',
+				cache: { tags: [{ tag: '#project', position: {} as never }] },
+			},
+			{
+				path: 'notes/host.md',
+				cache: { frontmatter: { status: 'draft' } },
+			},
+		]);
+		const res1 = await runVaultQuery(
+			app,
+			{ q: '#project' },
+			{ timeZone: 'UTC', sourcePath: 'notes/host.md' },
+		);
+		const res2 = {
+			...res1,
+			'◊host': [
+				{
+					...res1['◊host']![0]!,
+					properties: { status: 'published' },
+				},
+			],
+		};
+
+		// Different headingLevel produces different payload hash
+		expect(hashVaultQueryResult(res1, { headingLevel: 1 })).not.toBe(
+			hashVaultQueryResult(res1, { headingLevel: 2 }),
+		);
+
+		// By default includeHost is true, so changing ◊host changes the hash
+		expect(hashVaultQueryResult(res1)).not.toBe(hashVaultQueryResult(res2));
+
+		// With includeHost: false, changing ◊host does NOT change the hash, unless headingLevel changes
+		expect(hashVaultQueryResult(res1, { includeHost: false, headingLevel: 2 })).toBe(
+			hashVaultQueryResult(res2, { includeHost: false, headingLevel: 2 }),
+		);
+		expect(hashVaultQueryResult(res1, { includeHost: false, headingLevel: 2 })).not.toBe(
+			hashVaultQueryResult(res2, { includeHost: false, headingLevel: 3 }),
+		);
 	});
 });
 
@@ -1123,6 +1167,256 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(apolloRenders[2]).toBe(
 			'Host=Artemis (Projects/Artemis.md) -> LunarRover;MarsProbe;',
 		);
+
+		for (const c of children) c.unload();
+		renderSpy.mockRestore();
+	});
+
+	it('reuses cached query payload and LiquidJS render when a codeblock unmounts and remounts without vault changes', async () => {
+		const harness = createMutableVaultApp([
+			{
+				path: 'notes/alpha.md',
+				cache: { tags: [{ tag: '#task', position: {} as never }] },
+			},
+			{
+				path: 'dashboard.md',
+				cache: {
+					headings: [
+						{ heading: 'Tasks', level: 2, position: { start: { line: 1 } } } as never,
+					],
+				},
+			},
+		]);
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		const renderedMarkdowns: string[] = [];
+		const renderSpy = vi
+			.spyOn(MarkdownRenderer, 'render')
+			.mockImplementation(async (_app, markdown) => {
+				renderedMarkdowns.push(markdown);
+			});
+		const querySpy = vi.spyOn(plugin, 'query');
+
+		const logCalls: Array<{ source: string }> = [];
+		vi.spyOn(plugin.loggerAdapter, 'log').mockImplementation((_level, _msg, meta) => {
+			logCalls.push(meta);
+		});
+
+		const addedChildren: MarkdownRenderChild[] = [];
+		const makeCtx = (lineStart: number) =>
+			({
+				sourcePath: 'dashboard.md',
+				addChild: (child: MarkdownRenderChild) => {
+					addedChildren.push(child);
+				},
+				getSectionInfo: () => ({ lineStart, lineEnd: lineStart + 4 }),
+			}) as unknown as MarkdownPostProcessorContext;
+
+		const source = [
+			'{% query tasks %}#task{% endquery %}',
+			'{{ "Section" | heading: "demote" }}',
+			'{% for item in query.tasks %}- {{ item.file.basename }}\n{% endfor %}',
+		].join('\n');
+
+		// 1. Initial mount runs query and LiquidJS render
+		const el1 = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(source, el1, makeCtx(5), plugin);
+		expect(querySpy).toHaveBeenCalledTimes(1);
+		expect(renderedMarkdowns).toHaveLength(1);
+		expect(renderedMarkdowns[0]).toContain('### Section');
+		expect(renderedMarkdowns[0]).toContain('- alpha');
+		expect(logCalls.filter((c) => c.source === 'template.render')).toHaveLength(1);
+
+		// Simulate stepping cursor into codeblock (unmount) and stepping back out (remount)
+		addedChildren[0]?.unload();
+		expect(plugin.activeQueryRoster.size).toBe(0);
+
+		const el2 = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(source, el2, makeCtx(5), plugin);
+
+		// 2. Remount hits CodeBlockRenderCache: skips plugin.query() and skips LiquidJS render
+		expect(querySpy).toHaveBeenCalledTimes(1);
+		expect(logCalls.filter((c) => c.source === 'template.render')).toHaveLength(1);
+		expect(renderedMarkdowns).toHaveLength(2);
+		expect(renderedMarkdowns[1]).toBe(renderedMarkdowns[0]);
+		// And still re-registers with ActiveQueryRoster so subsequent vault updates work!
+		expect(plugin.activeQueryRoster.size).toBe(1);
+
+		// 3. Subsequent vault change still updates the remounted codeblock reactively
+		harness.setNotes([
+			{
+				path: 'notes/alpha.md',
+				cache: { tags: [{ tag: '#task', position: {} as never }] },
+			},
+			{
+				path: 'notes/beta.md',
+				cache: { tags: [{ tag: '#task', position: {} as never }] },
+			},
+			{
+				path: 'dashboard.md',
+				cache: {
+					headings: [
+						{ heading: 'Tasks', level: 2, position: { start: { line: 1 } } } as never,
+					],
+				},
+			},
+		]);
+		await plugin.activeQueryRoster.nudge();
+		expect(renderedMarkdowns).toHaveLength(3);
+		expect(renderedMarkdowns[2]).toContain('- beta');
+
+		for (const c of addedChildren) c.unload();
+		renderSpy.mockRestore();
+	});
+
+	it('suppresses redundant self-edit echo re-render when host note mtime changes, but re-renders when headingLevel above the codeblock changes', async () => {
+		let hostHeadingLevel = 2;
+		let hostMtime = 1700000000000;
+		const makeNotes = () => [
+			{
+				path: 'notes/alpha.md',
+				cache: { tags: [{ tag: '#task', position: {} as never }] },
+			},
+			{
+				path: 'README.md',
+				mtime: hostMtime,
+				cache: {
+					headings: [
+						{
+							heading: 'Section',
+							level: hostHeadingLevel,
+							position: { start: { line: 1 } },
+						} as never,
+					],
+				},
+			},
+		];
+		const harness = createMutableVaultApp(makeNotes());
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		const renderedMarkdowns: string[] = [];
+		const renderSpy = vi
+			.spyOn(MarkdownRenderer, 'render')
+			.mockImplementation(async (_app, markdown) => {
+				renderedMarkdowns.push(markdown);
+			});
+
+		const el = { empty: () => {} } as unknown as HTMLElement;
+		const addedChildren: MarkdownRenderChild[] = [];
+		const ctx = {
+			sourcePath: 'README.md',
+			addChild: (child: MarkdownRenderChild) => {
+				addedChildren.push(child);
+			},
+			getSectionInfo: () => ({ lineStart: 5, lineEnd: 10 }),
+		} as unknown as MarkdownPostProcessorContext;
+
+		// Template uses `| heading: "demote"` and query.tasks, but does NOT reference `this` or `@this`
+		const source = [
+			'{% query tasks %}#task{% endquery %}',
+			'{{ "Tasks" | heading: "demote" }}',
+			'{% for item in query.tasks %}- {{ item.file.basename }}\n{% endfor %}',
+		].join('\n');
+
+		await processRhizomeCodeBlock(source, el, ctx, plugin);
+		expect(renderedMarkdowns).toHaveLength(1);
+		expect(renderedMarkdowns[0]).toContain('### Tasks');
+
+		// 1. Simulate the 1.5s delayed metadataCache update on README.md after editing the codeblock:
+		// README.md mtime changes, but headingLevel (2) and query.tasks matches do not change.
+		hostMtime += 1500;
+		harness.setNotes(makeNotes());
+		await plugin.activeQueryRoster.nudge(hostMtime, { onlyIfChanged: true });
+
+		// No echo re-render triggered!
+		expect(renderedMarkdowns).toHaveLength(1);
+
+		// 2. Now user changes the heading above the codeblock in README.md from ## (2) to ### (3):
+		hostHeadingLevel = 3;
+		hostMtime += 1500;
+		harness.setNotes(makeNotes());
+		await plugin.activeQueryRoster.nudge(hostMtime, { onlyIfChanged: true });
+
+		// Heading level change invalidates the payload hash and re-renders with #### Tasks!
+		expect(renderedMarkdowns).toHaveLength(2);
+		expect(renderedMarkdowns[1]).toContain('#### Tasks');
+
+		for (const c of addedChildren) c.unload();
+		renderSpy.mockRestore();
+	});
+
+	it('parsedTemplateReferencesHost distinguishes real this/@this usage from plain text, quoted strings, and comments', () => {
+		const check = (src: string) =>
+			parsedTemplateReferencesHost(src, parseRhizomeTemplatePass1(src));
+
+		// Plain English "this" between two Liquid tags or inside quoted string literals -> false
+		expect(check('{{ query.tasks.size }} items in this vault: {{ vault }}')).toBe(false);
+		expect(check('{{ "in this section" | heading }}')).toBe(false);
+		expect(check("{% assign label = 'this is a test' %}{{ label }}")).toBe(false);
+		expect(check('{% comment %}{{ this.file.name }}{% endcomment %}')).toBe(false);
+		expect(check('{% raw %}{{ this.file.name }}{% endraw %}')).toBe(false);
+		expect(check('{% # {{ this.file.name }} %}')).toBe(false);
+		expect(check('{{ item.this }} {{ thisweek }}')).toBe(false);
+
+		// Real `this` in Liquid expressions or `@this` in queries -> true
+		expect(check('{{ this.file.basename }}')).toBe(true);
+		expect(check('{% if this.properties.status == "active" %}ok{% endif %}')).toBe(true);
+		expect(check('{% query q %}tag:@this.tags{% endquery %}')).toBe(true);
+	});
+
+	it('isolates Pass 1 cached ParsedRhizomeTemplate instances per host note sourcePath', async () => {
+		const harness = createMutableVaultApp([
+			{ path: 'notes/a.md', cache: {} },
+			{ path: 'notes/b.md', cache: {} },
+		]);
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		const renderSpy = vi.spyOn(MarkdownRenderer, 'render').mockImplementation(async () => {});
+		const elA = { empty: () => {} } as unknown as HTMLElement;
+		const elB = { empty: () => {} } as unknown as HTMLElement;
+		const children: MarkdownRenderChild[] = [];
+		const sharedSource = '{{ vault }}';
+
+		await processRhizomeCodeBlock(
+			sharedSource,
+			elA,
+			{
+				sourcePath: 'notes/a.md',
+				addChild: (c: MarkdownRenderChild) => children.push(c),
+			} as unknown as MarkdownPostProcessorContext,
+			plugin,
+		);
+		await processRhizomeCodeBlock(
+			sharedSource,
+			elB,
+			{
+				sourcePath: 'notes/b.md',
+				addChild: (c: MarkdownRenderChild) => children.push(c),
+			} as unknown as MarkdownPostProcessorContext,
+			plugin,
+		);
+
+		const folders = plugin.getTemplateFolderConfig();
+		const rev = plugin.activeQueryRoster.templateRevision;
+		const pass1A = plugin.codeBlockRenderCache.getPass1(
+			'notes/a.md',
+			sharedSource,
+			folders,
+			rev,
+		);
+		const pass1B = plugin.codeBlockRenderCache.getPass1(
+			'notes/b.md',
+			sharedSource,
+			folders,
+			rev,
+		);
+
+		expect(pass1A).toBeDefined();
+		expect(pass1B).toBeDefined();
+		expect(pass1A?.parsed).not.toBe(pass1B?.parsed);
 
 		for (const c of children) c.unload();
 		renderSpy.mockRestore();

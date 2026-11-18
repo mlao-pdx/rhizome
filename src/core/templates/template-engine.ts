@@ -207,6 +207,55 @@ export interface ParsedRhizomeTemplate {
 	readonly templates: Template[] | null;
 }
 
+const THIS_QUERY_REF_RE = /@this(?![a-zA-Z0-9_+-])/;
+const LIQUID_TAG_OR_OUTPUT_RE = /\{%-?([\s\S]*?)-?%\}|\{\{-?([\s\S]*?)-?\}\}/g;
+const LIQUID_QUOTED_STRING_RE = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g;
+const BARE_THIS_IDENTIFIER_RE = /(?<![a-zA-Z0-9_.-])\bthis\b(?![a-zA-Z0-9_-])/;
+
+function stripLiquidRawAndComments(source: string): string {
+	return maskQueryBlockBodies(source).replace(
+		/\{%-?\s*raw(?:\s+[\s\S]*?-?%\}|%\}|\s+-%\})[\s\S]*?\{%-?\s*endraw(?:\s+[\s\S]*?-?%\}|%\}|\s+-%\})|\{%-?\s*comment(?:\s+[\s\S]*?-?%\}|%\}|\s+-%\})[\s\S]*?\{%-?\s*endcomment(?:\s+[\s\S]*?-?%\}|%\}|\s+-%\})|\{%-?\s*#[\s\S]*?-?%\}/g,
+		'',
+	);
+}
+
+function liquidSourceReferencesThis(rawSource: string): boolean {
+	const cleaned = stripLiquidRawAndComments(rawSource);
+	LIQUID_TAG_OR_OUTPUT_RE.lastIndex = 0;
+	let match: RegExpExecArray | null;
+	while ((match = LIQUID_TAG_OR_OUTPUT_RE.exec(cleaned)) !== null) {
+		const inner = (match[1] ?? match[2] ?? '').replace(LIQUID_QUOTED_STRING_RE, ' ');
+		if (BARE_THIS_IDENTIFIER_RE.test(inner)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Checks whether a parsed template, any of its referenced partial/layout files, or any of its
+ * extracted `{% query %}` blocks reference the hosting note via `this` or `@this`.
+ */
+export function parsedTemplateReferencesHost(
+	source: string,
+	parsed: ParsedRhizomeTemplate,
+): boolean {
+	for (const q of parsed.env.queries) {
+		if (THIS_QUERY_REF_RE.test(q.query)) {
+			return true;
+		}
+	}
+	if (liquidSourceReferencesThis(source)) {
+		return true;
+	}
+	for (const fileSource of parsed.env.fileSources.values()) {
+		if (liquidSourceReferencesThis(fileSource)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 /**
  * Parses the masked root source, validates static partial/layout filenames, and records any
  * Liquid parse error in `env.diagnostics`. Shared by the synchronous Pass 1 entry points so

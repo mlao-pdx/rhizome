@@ -150,12 +150,34 @@ export function hashVaultQueryMatch(match: VaultQueryMatch): string {
 }
 
 /**
+ * Options for `hashVaultQueryResult`.
+ */
+export interface HashVaultQueryResultOptions {
+	/**
+	 * Whether to include `◊host` (`HOST_QUERY_KEY`) in the computed digest.
+	 * Defaults to `true`.
+	 */
+	readonly includeHost?: boolean | undefined;
+	/**
+	 * Optional heading level (`0..6`) folded into the digest so changes to the heading
+	 * context above a codeblock invalidate its payload hash.
+	 */
+	readonly headingLevel?: number | undefined;
+}
+
+/**
  * Computes a deterministic 64-bit xxHash hex digest for a `VaultQueryResult` payload
  * across all present query keys and their ordered `VaultQueryMatch` arrays.
  */
-export function hashVaultQueryResult(result: VaultQueryResult): string {
+export function hashVaultQueryResult(
+	result: VaultQueryResult,
+	options?: HashVaultQueryResultOptions,
+): string {
+	const includeHost = options?.includeHost ?? true;
 	const acc = new XxHash64Accumulator();
-	const keys = Object.keys(result).sort();
+	const keys = Object.keys(result)
+		.filter((k) => includeHost || k !== HOST_QUERY_KEY)
+		.sort();
 	acc.updateTag(0x40, keys.length);
 	for (let i = 0; i < keys.length; i++) {
 		const key = keys[i]!;
@@ -172,7 +194,26 @@ export function hashVaultQueryResult(result: VaultQueryResult): string {
 			acc.updateU32(d.lo);
 		}
 	}
+	if (typeof options?.headingLevel === 'number' && Number.isFinite(options.headingLevel)) {
+		acc.updateTag(0x43, Math.max(0, Math.trunc(options.headingLevel)));
+	}
 	return acc.digest().hex;
+}
+
+function resolveHeadingLevelOption(
+	headingLevel: number | (() => number) | undefined,
+): number | undefined {
+	if (typeof headingLevel === 'function') {
+		try {
+			const val = headingLevel();
+			return typeof val === 'number' && Number.isFinite(val) ? val : 0;
+		} catch {
+			return 0;
+		}
+	}
+	return typeof headingLevel === 'number' && Number.isFinite(headingLevel)
+		? headingLevel
+		: undefined;
 }
 
 interface ActiveSubscription {
@@ -185,6 +226,8 @@ interface ActiveSubscription {
 	readonly onUpdate: VaultQueryCallback | undefined;
 	readonly onReset: (() => void) | undefined;
 	readonly onSourcePathRename: ((newPath: string) => void) | undefined;
+	readonly includeHostInHash: boolean;
+	readonly headingLevel: number | (() => number) | undefined;
 	sourcePath: string | undefined;
 	lastPayloadHash: string;
 }
@@ -227,6 +270,8 @@ export class ActiveQueryRoster {
 	private rerunPending = false;
 	private rerunOnlyIfChanged = true;
 	private renamePending = false;
+	private vaultRevision = 0;
+	private resetRevision = 0;
 
 	constructor(
 		app: App,
@@ -243,6 +288,31 @@ export class ActiveQueryRoster {
 	/** Number of currently active reactive query subscriptions. */
 	get size(): number {
 		return this.subscriptions.size;
+	}
+
+	/**
+	 * Monotonic revision counter bumped whenever a vault/metadata change is observed or
+	 * a nudge/reset pass runs. Used by the codeblock render cache to detect whether an
+	 * unmounted and remounted codeblock can reuse its last query payload without re-scanning.
+	 */
+	get stateRevision(): number {
+		return this.vaultRevision;
+	}
+
+	/**
+	 * Monotonic revision counter bumped whenever `resetAll()` or `clear()` invalidates
+	 * template/partial/layout state.
+	 */
+	get templateRevision(): number {
+		return this.resetRevision;
+	}
+
+	/**
+	 * Marks that a vault or metadata event occurred so unmounted codeblocks do not reuse
+	 * a pre-event query payload on remount before the debounced nudge fires.
+	 */
+	markVaultDirty(): void {
+		this.vaultRevision++;
 	}
 
 	/**
@@ -272,6 +342,8 @@ export class ActiveQueryRoster {
 		const onAbort = () => {
 			this.subscriptions.delete(id);
 		};
+		const includeHostInHash = options?.includeHostInHash ?? true;
+		const headingLevel = options?.headingLevel;
 		const sub: ActiveSubscription = {
 			id,
 			entries,
@@ -282,8 +354,13 @@ export class ActiveQueryRoster {
 			onUpdate,
 			onReset,
 			onSourcePathRename: options?.onSourcePathRename,
+			includeHostInHash,
+			headingLevel,
 			sourcePath,
-			lastPayloadHash: hashVaultQueryResult(initialResult),
+			lastPayloadHash: hashVaultQueryResult(initialResult, {
+				includeHost: includeHostInHash,
+				headingLevel: resolveHeadingLevelOption(headingLevel),
+			}),
 		};
 		this.subscriptions.set(id, sub);
 
@@ -300,6 +377,8 @@ export class ActiveQueryRoster {
 	 * `onReset()` callback so mounted `rhizome` codeblocks re-run Pass 1 from scratch.
 	 */
 	resetAll(): void {
+		this.resetRevision++;
+		this.vaultRevision++;
 		if (this.subscriptions.size === 0) {
 			return;
 		}
@@ -332,6 +411,7 @@ export class ActiveQueryRoster {
 	 * per configuration group and notifies subscribers whose payload hash changed.
 	 */
 	nudge(referenceTimeMs: number = Date.now(), options?: NudgeOptions): Promise<void> {
+		this.vaultRevision++;
 		if (this.subscriptions.size === 0) {
 			return Promise.resolve();
 		}
@@ -363,6 +443,8 @@ export class ActiveQueryRoster {
 
 	/** Removes all active subscriptions immediately. */
 	clear(): void {
+		this.resetRevision++;
+		this.vaultRevision++;
 		for (const sub of this.subscriptions.values()) {
 			sub.signal?.removeEventListener('abort', sub.onAbort);
 		}
@@ -383,6 +465,7 @@ export class ActiveQueryRoster {
 		}
 		if (markPending) {
 			this.renamePending = true;
+			this.vaultRevision++;
 		}
 		const normOld = normalizePath(oldPath);
 		for (const sub of this.subscriptions.values()) {
@@ -458,7 +541,13 @@ export class ActiveQueryRoster {
 		for (const group of groups.values()) {
 			const uniqueSourcePaths = new Set<string>();
 			for (const sub of group.subs) {
-				if (sub.sourcePath !== undefined) {
+				if (sub.sourcePath === undefined) {
+					continue;
+				}
+				const usesThisInQueries = sub.entries.some(([, rawQuery]) =>
+					/@this(?![a-zA-Z0-9_+-])/.test(rawQuery),
+				);
+				if (sub.includeHostInHash || usesThisInQueries) {
 					uniqueSourcePaths.add(sub.sourcePath);
 				}
 			}
@@ -486,17 +575,6 @@ export class ActiveQueryRoster {
 						)
 					: undefined;
 
-			if (
-				onlyIfChanged &&
-				this.documentCache !== undefined &&
-				docReconciled !== undefined &&
-				!docReconciled.changed &&
-				!backlinksChanged &&
-				!hadPendingRename
-			) {
-				continue;
-			}
-
 			const hostDocsByPath = new Map<string, NormalizedDocument | null>();
 			if (uniqueSourcePaths.size > 0 && engineConfig !== null) {
 				for (const sp of uniqueSourcePaths) {
@@ -512,6 +590,70 @@ export class ActiveQueryRoster {
 					);
 					hostDocsByPath.set(sp, doc ?? null);
 				}
+			}
+
+			if (
+				onlyIfChanged &&
+				this.documentCache !== undefined &&
+				docReconciled !== undefined &&
+				!docReconciled.changed &&
+				!backlinksChanged &&
+				!hadPendingRename
+			) {
+				for (const sub of group.subs) {
+					if (sub.signal?.aborted || !this.subscriptions.has(sub.id)) {
+						this.subscriptions.delete(sub.id);
+						continue;
+					}
+					if (sub.entries.length > 0 || typeof sub.onUpdate !== 'function') {
+						continue;
+					}
+					const subscriberResult: VaultQueryResult = {};
+					if (sub.sourcePath !== undefined && sub.includeHostInHash) {
+						const hostDoc = hostDocsByPath.get(sub.sourcePath) ?? null;
+						subscriberResult[HOST_QUERY_KEY] = hostDoc
+							? [toVaultQueryMatch(hostDoc)]
+							: [];
+					}
+					const nextHash = hashVaultQueryResult(subscriberResult, {
+						includeHost: sub.includeHostInHash,
+						headingLevel: resolveHeadingLevelOption(sub.headingLevel),
+					});
+					if (nextHash !== sub.lastPayloadHash) {
+						sub.lastPayloadHash = nextHash;
+						if (sub.sourcePath !== undefined && !sub.includeHostInHash) {
+							const hostDoc =
+								engineConfig !== null
+									? resolveHostDocument(
+											this.app,
+											sub.sourcePath,
+											engineConfig,
+											resolveLinkPath,
+											this.logger,
+											backlinks,
+											undefined,
+											this.documentCache,
+										)
+									: null;
+							subscriberResult[HOST_QUERY_KEY] = hostDoc
+								? [toVaultQueryMatch(hostDoc)]
+								: [];
+						}
+						try {
+							await sub.onUpdate(subscriberResult);
+						} catch (error) {
+							this.logger?.log(
+								'error',
+								`Reactive query callback failed: ${markSensitive(String(error))}`,
+								{
+									source: 'query.reactive',
+									error: markSensitive(String(error)),
+								},
+							);
+						}
+					}
+				}
+				continue;
 			}
 
 			const queryToDedupKey = new Map<string, string>();
@@ -579,7 +721,7 @@ export class ActiveQueryRoster {
 				}
 
 				const subscriberResult: VaultQueryResult = {};
-				if (sub.sourcePath !== undefined) {
+				if (sub.sourcePath !== undefined && sub.includeHostInHash) {
 					const hostDoc = hostDocsByPath.get(sub.sourcePath) ?? null;
 					subscriberResult[HOST_QUERY_KEY] = hostDoc ? [toVaultQueryMatch(hostDoc)] : [];
 				}
@@ -598,9 +740,32 @@ export class ActiveQueryRoster {
 					}
 				}
 
-				const nextHash = hashVaultQueryResult(subscriberResult);
+				const nextHash = hashVaultQueryResult(subscriberResult, {
+					includeHost: sub.includeHostInHash,
+					headingLevel: resolveHeadingLevelOption(sub.headingLevel),
+				});
 				if (nextHash !== sub.lastPayloadHash) {
 					sub.lastPayloadHash = nextHash;
+					if (sub.sourcePath !== undefined && !sub.includeHostInHash) {
+						let hostDoc = hostDocsByPath.get(sub.sourcePath);
+						if (hostDoc === undefined && engineConfig !== null) {
+							hostDoc =
+								resolveHostDocument(
+									this.app,
+									sub.sourcePath,
+									engineConfig,
+									resolveLinkPath,
+									this.logger,
+									backlinks,
+									undefined,
+									this.documentCache,
+								) ?? null;
+							hostDocsByPath.set(sub.sourcePath, hostDoc);
+						}
+						subscriberResult[HOST_QUERY_KEY] = hostDoc
+							? [toVaultQueryMatch(hostDoc)]
+							: [];
+					}
 					try {
 						await sub.onUpdate(subscriberResult);
 					} catch (error) {

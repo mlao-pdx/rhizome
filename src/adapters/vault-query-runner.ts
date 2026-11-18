@@ -86,6 +86,18 @@ export interface VaultQueryOptions {
 	 */
 	readonly onSourcePathRename?: ((newPath: string) => void) | undefined;
 	/**
+	 * Optional flag controlling whether `ActiveQueryRoster` includes `◊host` in its reactive
+	 * payload hash for this subscriber. Defaults to `true` when `sourcePath` is present.
+	 * Codeblocks that do not reference `this` or `@this` set this to `false` so editing the
+	 * hosting note does not trigger a redundant reactive re-render.
+	 */
+	readonly includeHostInHash?: boolean | undefined;
+	/**
+	 * Optional initial or live heading level (or resolver) folded into `ActiveQueryRoster`'s
+	 * payload hash so changes to the heading level above a mounted codeblock trigger `onUpdate`.
+	 */
+	readonly headingLevel?: number | (() => number) | undefined;
+	/**
 	 * Optional pre-resolved engine configuration to avoid redundant `.obsidian/types.json` reads
 	 * when `ActiveQueryRoster` has already resolved the group's configuration.
 	 */
