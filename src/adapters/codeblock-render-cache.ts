@@ -186,6 +186,36 @@ export class CodeBlockRenderCache {
 		});
 	}
 
+	/**
+	 * Advances the cached render entry's `stateRevision` when a reactive nudge confirms that
+	 * the subscriber's `payloadHash` is unchanged at `stateRevision`, preserving `getRemountHit`
+	 * across trailing no-op nudges.
+	 */
+	advanceStateRevision(
+		sourcePath: string,
+		source: string,
+		headingLevel: number,
+		folders: TemplateFolderConfig,
+		templateRevision: number,
+		payloadHash: string,
+		stateRevision: number,
+	): void {
+		const key = `${sourcePath}\0${headingLevel}\0${source}`;
+		const hit = this.renderCache.get(key);
+		if (
+			hit !== undefined &&
+			hit.templateRevision === templateRevision &&
+			hit.payloadHash === payloadHash &&
+			hit.folderKey === buildFolderKey(folders) &&
+			hit.stateRevision !== stateRevision
+		) {
+			this.renderCache.set(key, {
+				...hit,
+				stateRevision,
+			});
+		}
+	}
+
 	deleteForSourcePath(sourcePath: string): void {
 		const prefix = `${sourcePath}\0`;
 		for (const key of this.pass1Cache.keys()) {

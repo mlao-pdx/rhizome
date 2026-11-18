@@ -226,6 +226,7 @@ interface ActiveSubscription {
 	readonly onUpdate: VaultQueryCallback | undefined;
 	readonly onReset: (() => void) | undefined;
 	readonly onSourcePathRename: ((newPath: string) => void) | undefined;
+	readonly onUnchangedPayload: ((stateRevision: number, payloadHash: string) => void) | undefined;
 	readonly includeHostInHash: boolean;
 	readonly headingLevel: number | (() => number) | undefined;
 	sourcePath: string | undefined;
@@ -354,6 +355,7 @@ export class ActiveQueryRoster {
 			onUpdate,
 			onReset,
 			onSourcePathRename: options?.onSourcePathRename,
+			onUnchangedPayload: options?.onUnchangedPayload,
 			includeHostInHash,
 			headingLevel,
 			sourcePath,
@@ -532,11 +534,13 @@ export class ActiveQueryRoster {
 			return;
 		}
 
+		const backlinkStartedAt = Date.now();
 		const backlinksChanged =
 			typeof this.backlinkIndex?.reconcile === 'function'
 				? this.backlinkIndex.reconcile()
 				: false;
 		const backlinks = this.backlinkIndex?.snapshot();
+		const backlinkReconcileMs = Math.max(0, Date.now() - backlinkStartedAt);
 
 		for (const group of groups.values()) {
 			const uniqueSourcePaths = new Set<string>();
@@ -566,6 +570,7 @@ export class ActiveQueryRoster {
 				);
 			}
 
+			const docReconcileStartedAt = Date.now();
 			const docReconciled =
 				this.documentCache !== undefined && engineConfig !== null
 					? this.documentCache.reconcile(
@@ -574,6 +579,8 @@ export class ActiveQueryRoster {
 							resolveLinkPath,
 						)
 					: undefined;
+			const docReconcileMs = Math.max(0, Date.now() - docReconcileStartedAt);
+			const reconcileDurationMs = backlinkReconcileMs + docReconcileMs;
 
 			const hostDocsByPath = new Map<string, NormalizedDocument | null>();
 			if (uniqueSourcePaths.size > 0 && engineConfig !== null) {
@@ -605,7 +612,15 @@ export class ActiveQueryRoster {
 						this.subscriptions.delete(sub.id);
 						continue;
 					}
-					if (sub.entries.length > 0 || typeof sub.onUpdate !== 'function') {
+					if (typeof sub.onUpdate !== 'function') {
+						continue;
+					}
+					if (sub.entries.length > 0) {
+						try {
+							sub.onUnchangedPayload?.(this.vaultRevision, sub.lastPayloadHash);
+						} catch {
+							// Ignore callback error
+						}
 						continue;
 					}
 					const subscriberResult: VaultQueryResult = {};
@@ -650,6 +665,12 @@ export class ActiveQueryRoster {
 									error: markSensitive(String(error)),
 								},
 							);
+						}
+					} else {
+						try {
+							sub.onUnchangedPayload?.(this.vaultRevision, sub.lastPayloadHash);
+						} catch {
+							// Ignore callback error
 						}
 					}
 				}
@@ -697,6 +718,7 @@ export class ActiveQueryRoster {
 								propertyTypes: group.propertyTypes,
 								referenceTimeMs,
 								queryHostDocs,
+								reconcileDurationMs,
 								...(engineConfig ? { resolvedConfig: engineConfig } : {}),
 								...(backlinks !== undefined ? { backlinks } : {}),
 								...(this.documentCache ? { cache: this.documentCache } : {}),
@@ -777,6 +799,12 @@ export class ActiveQueryRoster {
 								error: markSensitive(String(error)),
 							},
 						);
+					}
+				} else {
+					try {
+						sub.onUnchangedPayload?.(this.vaultRevision, sub.lastPayloadHash);
+					} catch {
+						// Ignore callback error
 					}
 				}
 			}

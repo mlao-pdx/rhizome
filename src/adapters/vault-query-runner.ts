@@ -29,10 +29,14 @@ import { HOST_QUERY_KEY } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import {
 	attachBacklinks,
+	backlinkArraysEqual,
 	copyWithBacklinks,
+	isSnapshotSourcesUnchanged,
 	projectBacklinks,
+	projectBacklinksWithEntries,
 	type BacklinkIndex,
 	type BacklinkSnapshot,
+	type CachedSnapshotSourceEntry,
 } from './backlink-index';
 import { markSensitive } from './logger-format';
 import type { DocumentCacheStats, NormalizedDocumentCache } from './normalized-document-cache';
@@ -126,6 +130,18 @@ export interface VaultQueryOptions {
 	 * already reconciled `cache` for this pass.
 	 */
 	readonly reconciledStats?: DocumentCacheStats | undefined;
+	/**
+	 * Optional pre-pass reconciliation duration in milliseconds supplied when a coordinator
+	 * (`ActiveQueryRoster`) reconciled the backlink index and document cache before calling
+	 * `runVaultQuery`.
+	 */
+	readonly reconcileDurationMs?: number | undefined;
+	/**
+	 * Optional callback invoked by `ActiveQueryRoster` when a reactive nudge pass confirms
+	 * that this subscriber's payload hash did not change at the given `stateRevision`.
+	 */
+	readonly onUnchangedPayload?:
+		((stateRevision: number, payloadHash: string) => void) | undefined;
 }
 
 /**
@@ -159,26 +175,20 @@ export interface VaultQueryMatch {
  */
 export type VaultQueryResult = Record<string, VaultQueryMatch[]>;
 
-/**
- * Projects a `NormalizedDocument` into a user-facing `VaultQueryMatch` POJO.
- *
- * @remarks
- * (design, 2026-11-18) Cached documents never carry backlinks and are frozen, so projection
- * always builds a fresh frozen wrapper. Backlinks are supplied by the caller from the pass's
- * snapshot; when omitted, a document's own attached backlinks are used (the direct-normalize
- * test oracle path). Only the wrapper and the backlinks array need freezing: every other field
- * is already a deep-frozen cache subtree (the oracle path freezes its document once before
- * projection).
- */
-export function toVaultQueryMatch(
+const EMPTY_BACKLINKS: readonly BacklinkRef[] = Object.freeze([]);
+
+interface CachedMatchProjection {
+	readonly match: VaultQueryMatch;
+	sources: ReadonlyMap<TFile, number> | undefined;
+	snapshotEntries: readonly CachedSnapshotSourceEntry[] | undefined;
+}
+
+const projectedMatchCache = new WeakMap<NormalizedDocument, CachedMatchProjection>();
+
+function buildFrozenVaultQueryMatch(
 	doc: NormalizedDocument,
-	backlinks?: readonly BacklinkRef[],
+	frozenBacklinks: readonly BacklinkRef[],
 ): VaultQueryMatch {
-	if (!Object.isFrozen(doc)) {
-		deepFreeze(doc);
-	}
-	const projectedBacklinks = backlinks ?? doc.backlinks ?? [];
-	deepFreeze(projectedBacklinks);
 	return Object.freeze({
 		file: doc.file,
 		aliases: doc.aliases,
@@ -192,8 +202,94 @@ export function toVaultQueryMatch(
 		blocks: doc.blocks,
 		properties: doc.properties,
 		propertyLocations: doc.propertyLocations,
-		backlinks: projectedBacklinks,
+		backlinks: frozenBacklinks,
 	});
+}
+
+function getOrUpdateCachedProjection(
+	doc: NormalizedDocument,
+	backlinks: BacklinkSnapshot | undefined,
+	file: TFile,
+	isIgnored: (file: TFile) => boolean,
+): CachedMatchProjection {
+	const sources = backlinks?.get(file);
+	const cached = projectedMatchCache.get(doc);
+
+	if (sources === undefined || sources.size === 0) {
+		if (cached !== undefined && cached.match.backlinks.length === 0) {
+			cached.sources = undefined;
+			cached.snapshotEntries = undefined;
+			return cached;
+		}
+		const match = buildFrozenVaultQueryMatch(doc, EMPTY_BACKLINKS);
+		const next: CachedMatchProjection = {
+			match,
+			sources: undefined,
+			snapshotEntries: undefined,
+		};
+		projectedMatchCache.set(doc, next);
+		return next;
+	}
+
+	if (
+		cached !== undefined &&
+		cached.sources === sources &&
+		cached.snapshotEntries !== undefined &&
+		isSnapshotSourcesUnchanged(cached.snapshotEntries, isIgnored)
+	) {
+		return cached;
+	}
+
+	const { refs, entries } = projectBacklinksWithEntries(sources, isIgnored);
+	if (cached !== undefined && backlinkArraysEqual(cached.match.backlinks, refs)) {
+		cached.sources = sources;
+		cached.snapshotEntries = entries;
+		return cached;
+	}
+
+	const frozenRefs = refs.length === 0 ? EMPTY_BACKLINKS : deepFreeze(refs);
+	const match = buildFrozenVaultQueryMatch(doc, frozenRefs);
+	const next: CachedMatchProjection = {
+		match,
+		sources,
+		snapshotEntries: entries,
+	};
+	projectedMatchCache.set(doc, next);
+	return next;
+}
+
+/**
+ * Projects a `NormalizedDocument` into a user-facing `VaultQueryMatch` POJO.
+ *
+ * @remarks
+ * (design, 2026-11-18) Cached documents never carry backlinks and are frozen, so projection
+ * builds a frozen wrapper and memoizes it per `NormalizedDocument` via a `WeakMap`. Backlinks
+ * are supplied by the caller from the pass's snapshot; when omitted, a document's own attached
+ * backlinks are used (the direct-normalize test oracle path). Only the wrapper and the backlinks
+ * array need freezing: every other field is already a deep-frozen cache subtree (the oracle path
+ * freezes its document once before projection).
+ */
+export function toVaultQueryMatch(
+	doc: NormalizedDocument,
+	backlinks?: readonly BacklinkRef[],
+): VaultQueryMatch {
+	if (!Object.isFrozen(doc)) {
+		deepFreeze(doc);
+	}
+	const projectedBacklinks = backlinks ?? doc.backlinks ?? EMPTY_BACKLINKS;
+	const cached = projectedMatchCache.get(doc);
+	if (cached !== undefined && backlinkArraysEqual(cached.match.backlinks, projectedBacklinks)) {
+		return cached.match;
+	}
+	const frozenBacklinks =
+		projectedBacklinks.length === 0 ? EMPTY_BACKLINKS : deepFreeze(projectedBacklinks);
+	const match = buildFrozenVaultQueryMatch(doc, frozenBacklinks);
+	projectedMatchCache.set(doc, {
+		match,
+		sources: undefined,
+		snapshotEntries: undefined,
+	});
+	return match;
 }
 
 /**
@@ -471,10 +567,11 @@ export async function runVaultQuery(
 	const isIgnoredFile =
 		options?.isIgnoredFile ?? ((file: TFile) => defaultIsIgnoredFile(app, file));
 	const cache = options?.cache;
+	const preReconcileMs = Math.max(0, options?.reconcileDurationMs ?? 0);
 	const reconcileStartedAt = Date.now();
 	const vaultFiles = cache !== undefined ? app.vault.getMarkdownFiles() : undefined;
 	const prepared = prepareVaultPass(cache, options, resolvedConfig, resolveLinkPath, vaultFiles);
-	const reconcileMs = Math.max(0, Date.now() - reconcileStartedAt);
+	const reconcileMs = preReconcileMs + Math.max(0, Date.now() - reconcileStartedAt);
 	const backlinks = prepared.backlinks;
 
 	const hostDoc: NormalizedDocument | null | undefined =
@@ -527,7 +624,7 @@ export async function runVaultQuery(
 	if (executableQueries.length === 0) {
 		logger?.log('debug', 'Completed vault query run', {
 			source: 'query.run',
-			durationMs: Math.max(0, Date.now() - startedAt),
+			durationMs: preReconcileMs + Math.max(0, Date.now() - startedAt),
 			reconcileMs,
 			evaluateMs: 0,
 			projectMs: 0,
@@ -563,14 +660,35 @@ export async function runVaultQuery(
 			}
 			notesScanned++;
 			propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
-			const ctx = createBacklinkContext(backlinks, file, isIgnoredFile);
+
+			let cachedProjection: CachedMatchProjection | undefined;
+			const ctx: DocumentEvaluationContext | undefined =
+				backlinks !== undefined
+					? {
+							backlinks: () => {
+								cachedProjection ??= getOrUpdateCachedProjection(
+									doc,
+									backlinks,
+									file,
+									isIgnoredFile,
+								);
+								return cachedProjection.match.backlinks;
+							},
+						}
+					: undefined;
 
 			let sharedMatch: VaultQueryMatch | undefined;
 			for (const entry of executableQueries) {
 				if (evaluateDoc(doc, entry.prepared, ctx)) {
 					if (sharedMatch === undefined) {
 						const projectStartedAt = Date.now();
-						sharedMatch = toVaultQueryMatch(doc, ctx?.backlinks());
+						cachedProjection ??= getOrUpdateCachedProjection(
+							doc,
+							backlinks,
+							file,
+							isIgnoredFile,
+						);
+						sharedMatch = cachedProjection.match;
 						projectMs += Date.now() - projectStartedAt;
 					}
 					entry.bucket.push(sharedMatch);
@@ -643,7 +761,7 @@ export async function runVaultQuery(
 	}
 	logger?.log('debug', 'Completed vault query run', {
 		source: 'query.run',
-		durationMs: Math.max(0, Date.now() - startedAt),
+		durationMs: preReconcileMs + Math.max(0, Date.now() - startedAt),
 		reconcileMs,
 		evaluateMs,
 		projectMs,

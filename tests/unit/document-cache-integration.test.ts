@@ -93,6 +93,58 @@ describe('document cache integration', () => {
 
 		expect(cache.digest()).toBe(digest);
 		expect(second).toEqual(first);
+		// Unchanged notes reuse the exact same frozen VaultQueryMatch object reference across passes
+		expect(second['work']?.[0]).toBe(first['work']?.[0]);
+		expect(second['all']?.[0]).toBe(first['all']?.[0]);
+		expect(second['all']?.[1]).toBe(first['all']?.[1]);
+		expect(second['all']?.[2]).toBe(first['all']?.[2]);
+	});
+
+	it('includes pre-pass reconciliation time in query.run reconcileMs and durationMs during reactive nudge', async () => {
+		const vault = prepared();
+		const calls: Array<{ source: string; [key: string]: unknown }> = [];
+		const logger: LoggerPort = {
+			log(_level, _message, meta) {
+				calls.push(meta);
+			},
+		};
+		const cache = new NormalizedDocumentCache(vault.app, logger);
+		const index = new BacklinkIndex(vault.app, () => false, logger);
+		const roster = new ActiveQueryRoster(vault.app, logger, index, cache);
+		const queries = { all: 'path:"notes"' };
+		const options = { timeZone: 'UTC', referenceTimeMs: 1_700_000_000_000 };
+		const initial = await runVaultQuery(vault.app, queries, {
+			...options,
+			cache,
+			backlinkIndex: index,
+		});
+		roster.register(queries, options, initial, () => {});
+		calls.length = 0;
+
+		const origReconcile = cache.reconcile.bind(cache);
+		vi.spyOn(cache, 'reconcile').mockImplementation((files, cfg, resolver) => {
+			const res = origReconcile(files, cfg, resolver);
+			const end = Date.now() + 12;
+			while (Date.now() < end) {
+				// busy-wait to create measurable pre-pass reconciliation time
+			}
+			return res;
+		});
+
+		vault.setState({
+			notes: vault.state.notes.map((note) =>
+				note.id === 0 ? { ...note, mtime: note.mtime + 1 } : { ...note },
+			),
+		});
+		await roster.nudge(1_700_000_000_000, { onlyIfChanged: true });
+
+		const runLog = calls.find((c) => c.source === 'query.run');
+		expect(runLog).toBeDefined();
+		expect(runLog?.['reconcileMs'] as number).toBeGreaterThanOrEqual(10);
+		expect(runLog?.['durationMs'] as number).toBeGreaterThanOrEqual(
+			runLog?.['reconcileMs'] as number,
+		);
+		roster.clear();
 	});
 
 	it('skips a normalization failure per file instead of failing the pass', async () => {

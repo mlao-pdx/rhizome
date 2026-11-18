@@ -36,6 +36,64 @@ function compareBacklinkRefs(a: BacklinkRef, b: BacklinkRef): number {
 	return 0;
 }
 
+export interface CachedSnapshotSourceEntry {
+	readonly file: TFile;
+	readonly path: string;
+	readonly active: boolean;
+}
+
+export function backlinkArraysEqual(a: readonly BacklinkRef[], b: readonly BacklinkRef[]): boolean {
+	if (a === b) {
+		return true;
+	}
+	if (a.length !== b.length) {
+		return false;
+	}
+	for (let i = 0; i < a.length; i++) {
+		const itemA = a[i]!;
+		const itemB = b[i]!;
+		if (itemA.count !== itemB.count || itemA.path !== itemB.path) {
+			return false;
+		}
+	}
+	return true;
+}
+
+export function isSnapshotSourcesUnchanged(
+	entries: readonly CachedSnapshotSourceEntry[],
+	isIgnored: (file: TFile) => boolean,
+): boolean {
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i]!;
+		const active = isLiveTFile(entry.file) && !isIgnored(entry.file);
+		if (active !== entry.active) {
+			return false;
+		}
+		if (active && entry.file.path !== entry.path) {
+			return false;
+		}
+	}
+	return true;
+}
+
+export function projectBacklinksWithEntries(
+	sources: ReadonlyMap<TFile, number>,
+	isIgnored: (file: TFile) => boolean,
+): { refs: BacklinkRef[]; entries: CachedSnapshotSourceEntry[] } {
+	const refs: BacklinkRef[] = [];
+	const entries: CachedSnapshotSourceEntry[] = [];
+	for (const [source, count] of sources) {
+		const active = isLiveTFile(source) && !isIgnored(source);
+		const path = source.path;
+		entries.push({ file: source, path, active });
+		if (active) {
+			refs.push({ path, count });
+		}
+	}
+	refs.sort(compareBacklinkRefs);
+	return { refs, entries };
+}
+
 /**
  * Projects a target's backlinks into `{ path, count }` records, filtering deleted and
  * ignored sources and sorting count descending then path ascending. A fresh array (and
@@ -75,6 +133,8 @@ export function attachBacklinks(
 	return doc;
 }
 
+const copiedDocWithBacklinksCache = new WeakMap<NormalizedDocument, NormalizedDocument>();
+
 /**
  * Projects backlinks onto a copy of `doc` without mutating the cached document.
  *
@@ -92,11 +152,21 @@ export function copyWithBacklinks(
 	isIgnored: (file: TFile) => boolean,
 ): NormalizedDocument {
 	const backlinks = projectBacklinks(snapshot, target, isIgnored);
+	const cached = copiedDocWithBacklinksCache.get(doc);
+	if (
+		cached !== undefined &&
+		cached.backlinks !== undefined &&
+		backlinkArraysEqual(cached.backlinks, backlinks)
+	) {
+		return cached;
+	}
 	deepFreeze(backlinks);
-	return Object.freeze({
+	const copy = Object.freeze({
 		...doc,
 		backlinks,
 	});
+	copiedDocWithBacklinksCache.set(doc, copy);
+	return copy;
 }
 
 function snapshotsEqual(a: BacklinkSnapshot, b: BacklinkSnapshot): boolean {
@@ -115,6 +185,40 @@ function snapshotsEqual(a: BacklinkSnapshot, b: BacklinkSnapshot): boolean {
 		}
 	}
 	return true;
+}
+
+function rawDestEqualsNormalized(
+	raw: unknown,
+	normalized: Readonly<Record<string, number>> | undefined,
+): boolean {
+	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+		return normalized === undefined;
+	}
+	const rawRecord = raw as Record<string, unknown>;
+	let rawFiniteCount = 0;
+	for (const target in rawRecord) {
+		if (!Object.prototype.hasOwnProperty.call(rawRecord, target)) {
+			continue;
+		}
+		const count = rawRecord[target];
+		if (typeof count !== 'number' || !Number.isFinite(count)) {
+			continue;
+		}
+		rawFiniteCount++;
+		if (normalized === undefined || normalized[target] !== count) {
+			return false;
+		}
+	}
+	if (normalized === undefined) {
+		return rawFiniteCount === 0;
+	}
+	let normCount = 0;
+	for (const target in normalized) {
+		if (normalized[target] !== undefined) {
+			normCount++;
+		}
+	}
+	return rawFiniteCount === normCount;
 }
 
 interface LiveVaultFiles {
@@ -140,8 +244,10 @@ export class BacklinkIndex {
 	private readonly logger: LoggerPort | undefined;
 	private current: BacklinkSnapshot | null = null;
 	private currentRevision = 0;
+	private appliedLiveByPath = new Map<string, TFile>();
 	private appliedSources = new Map<string, Record<string, number>>();
 	private appliedTargets = new Set<string>();
+	private appliedIgnoredPaths = new Set<string>();
 
 	constructor(app: App, isIgnored: (file: TFile) => boolean, logger?: LoggerPort) {
 		this.app = app;
@@ -173,9 +279,10 @@ export class BacklinkIndex {
 			return true;
 		}
 		const resolvedLinks = this.readResolvedLinks();
-		const previous = this.appliedSources.get(sourcePath);
-		const current = normalizeResolvedLinks(resolvedLinks[sourcePath]);
-		return !recordsEqual(previous, current);
+		return !rawDestEqualsNormalized(
+			resolvedLinks[sourcePath],
+			this.appliedSources.get(sourcePath),
+		);
 	}
 
 	/** Returns the current snapshot, building it lazily on first use. */
@@ -209,6 +316,11 @@ export class BacklinkIndex {
 			const changed = initial.size > 0;
 			this.logReconcile(startedAt, this.appliedSources.size, initial.size, changed);
 			return changed;
+		}
+
+		if (this.isUnchangedFastPath()) {
+			this.logReconcile(startedAt, 0, 0, false);
+			return false;
 		}
 
 		const { liveByPath, markdownTargets, ignoredPaths } = this.collectLiveFiles();
@@ -298,8 +410,10 @@ export class BacklinkIndex {
 	/** Drops the snapshot so the next `snapshot()` or `reconcile()` rebuilds from scratch. */
 	dispose(): void {
 		this.current = null;
+		this.appliedLiveByPath.clear();
 		this.appliedSources.clear();
 		this.appliedTargets.clear();
+		this.appliedIgnoredPaths.clear();
 	}
 
 	/** Attaches this index's current projected backlinks to `doc`. */
@@ -364,10 +478,71 @@ export class BacklinkIndex {
 		return this.buildFromState(liveByPath, markdownTargets, ignoredPaths, nextSources);
 	}
 
+	private isUnchangedFastPath(): boolean {
+		const files = this.readFiles();
+		let liveCount = 0;
+		let markdownTargetCount = 0;
+		let ignoredCount = 0;
+
+		for (let i = 0; i < files.length; i++) {
+			const file = files[i]!;
+			if (!isLiveTFile(file)) {
+				continue;
+			}
+			const path = file.path;
+			if (isMarkdownPath(path)) {
+				if (this.isIgnored(file)) {
+					if (!this.appliedIgnoredPaths.has(path)) {
+						return false;
+					}
+					ignoredCount++;
+					continue;
+				}
+				if (!this.appliedTargets.has(path)) {
+					return false;
+				}
+				markdownTargetCount++;
+			}
+			if (this.appliedLiveByPath.get(path) !== file) {
+				return false;
+			}
+			liveCount++;
+		}
+
+		if (
+			liveCount !== this.appliedLiveByPath.size ||
+			markdownTargetCount !== this.appliedTargets.size ||
+			ignoredCount !== this.appliedIgnoredPaths.size
+		) {
+			return false;
+		}
+
+		const resolvedLinks = this.readResolvedLinks();
+		let matchedSources = 0;
+		for (const sourcePath in resolvedLinks) {
+			if (!Object.prototype.hasOwnProperty.call(resolvedLinks, sourcePath)) {
+				continue;
+			}
+			if (!this.appliedLiveByPath.has(sourcePath)) {
+				continue;
+			}
+			const raw = resolvedLinks[sourcePath];
+			const applied = this.appliedSources.get(sourcePath);
+			if (!rawDestEqualsNormalized(raw, applied)) {
+				return false;
+			}
+			if (applied !== undefined) {
+				matchedSources++;
+			}
+		}
+
+		return matchedSources === this.appliedSources.size;
+	}
+
 	private buildFromState(
-		liveByPath: ReadonlyMap<string, TFile>,
+		liveByPath: Map<string, TFile>,
 		markdownTargets: Set<string>,
-		ignoredPaths: ReadonlySet<string>,
+		ignoredPaths: Set<string>,
 		nextSources: Map<string, Record<string, number>>,
 	): BacklinkSnapshot {
 		const filteredLinks = Object.create(null) as Record<
@@ -385,8 +560,10 @@ export class BacklinkIndex {
 			}
 		}
 
+		this.appliedLiveByPath = liveByPath;
 		this.appliedSources = nextSources;
 		this.appliedTargets = markdownTargets;
+		this.appliedIgnoredPaths = ignoredPaths;
 		return this.projectSnapshot(pathSources, liveByPath);
 	}
 

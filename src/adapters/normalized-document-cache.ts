@@ -1,11 +1,7 @@
 import { type App, type CachedMetadata, type TFile } from 'obsidian';
 import { deepFreeze } from '@core/cache/deep-freeze';
 import { digestNormalizedDocument } from '@core/cache/doc-digest';
-import {
-	planReconcile,
-	type ReconcileCacheKey,
-	type ReconcileFileState,
-} from '@core/cache/reconcile-plan';
+import type { ReconcileCacheKey } from '@core/cache/reconcile-plan';
 import { XxHash64Accumulator } from '@core/hash/xxhash64';
 import {
 	hasInternalRhizomeFlag,
@@ -47,9 +43,33 @@ export interface CacheReconcileResult {
 	readonly changed: boolean;
 }
 
+interface CachedLinkSnapshot {
+	readonly resolved: Readonly<Record<string, number>> | null;
+	readonly unresolved: Readonly<Record<string, number>> | null;
+	readonly signature: string;
+}
+
+const NO_LINKS_SNAPSHOT: CachedLinkSnapshot = Object.freeze({
+	resolved: null,
+	unresolved: null,
+	signature: '0',
+});
+
 interface CacheEntry {
 	readonly doc: NormalizedDocument;
 	readonly key: DocumentCacheKey;
+	readonly metaRev?: number | undefined;
+	linkSnapshot?: CachedLinkSnapshot | undefined;
+	lastSeenPass?: number | undefined;
+}
+
+interface PendingNormalizeItem {
+	readonly file: TFile;
+	readonly cache: CachedMetadata | null;
+	readonly mtime: number;
+	readonly size: number;
+	readonly metaRev: number;
+	readonly linkSnapshot: CachedLinkSnapshot;
 }
 
 function isIgnoredCache(cache: CachedMetadata | null | undefined): boolean {
@@ -62,6 +82,29 @@ function hasAnyLinks(cache: CachedMetadata | null | undefined): boolean {
 		(cache?.embeds?.length ?? 0) > 0 ||
 		(cache?.frontmatterLinks?.length ?? 0) > 0
 	);
+}
+
+function shallowNumberRecordsEqual(
+	a: Readonly<Record<string, number>> | null,
+	b: Readonly<Record<string, number>> | null,
+): boolean {
+	if (a === null || b === null) {
+		return a === b;
+	}
+	let aCount = 0;
+	for (const k in a) {
+		if (!Object.prototype.hasOwnProperty.call(a, k)) continue;
+		aCount++;
+		if (b[k] !== a[k] || (a[k] === undefined && !Object.prototype.hasOwnProperty.call(b, k))) {
+			return false;
+		}
+	}
+	let bCount = 0;
+	for (const k in b) {
+		if (!Object.prototype.hasOwnProperty.call(b, k)) continue;
+		bCount++;
+	}
+	return aCount === bCount;
 }
 
 function hashRecord(record: unknown): string {
@@ -92,6 +135,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 	private readonly store = new Map<string, CacheEntry>();
 	private readonly metadataRevisions = new WeakMap<object, number>();
 	private nextRevision = 1;
+	private passCounter = 0;
 	private ready = true;
 
 	constructor(app: App, logger?: LoggerPort) {
@@ -195,12 +239,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 		if (stored === undefined) {
 			return true;
 		}
-		const state = this.stateFor(file, cache, false);
-		return (
-			stored.key.mtime !== state.mtime ||
-			stored.key.size !== state.size ||
-			stored.key.revision !== state.revision
-		);
+		return !this.isEntryFresh(stored, file, cache, stored.key.fingerprint);
 	}
 
 	/**
@@ -222,23 +261,32 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			this.delete(file.path);
 			return null;
 		}
-		const state = this.stateFor(file, cache, false);
 		const stored = this.store.get(file.path);
 		if (
 			stored !== undefined &&
-			stored.key.fingerprint === config.normalizationFingerprint &&
-			stored.key.mtime === state.mtime &&
-			stored.key.size === state.size &&
-			stored.key.revision === state.revision
+			this.isEntryFresh(stored, file, cache, config.normalizationFingerprint)
 		) {
 			return stored.doc;
 		}
+		const prevLinkSnapshot = stored?.linkSnapshot;
 		if (stored !== undefined) {
 			this.delete(file.path);
 		}
 		const doc = this.normalize(file, cache, config, resolveLinkPath);
 		if (doc !== null) {
-			this.set(file.path, doc, this.keyFromState(state, config.normalizationFingerprint));
+			const mtime = file.stat?.mtime ?? 0;
+			const size = file.stat?.size ?? 0;
+			const metaRev = this.metadataRevision(cache);
+			const linkSnapshot = this.computeLinkSnapshot(file.path, cache, prevLinkSnapshot);
+			this.setInternal(
+				file.path,
+				doc,
+				mtime,
+				size,
+				metaRev,
+				linkSnapshot,
+				config.normalizationFingerprint,
+			);
 		}
 		return doc;
 	}
@@ -250,7 +298,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 	 * A per-file normalization failure is logged and the entry dropped rather than failing the
 	 * whole pass; the cold-build oracle applies the same policy, so which notes are visible never
 	 * depends on cache state. Ignored notes (`DO_NOT_INDEX_OR_QUERY`) are never added, and any
-	 * previously cached note that gained the ignore flag is placed in `plan.remove` and evicted.
+	 * previously cached note that gained the ignore flag is evicted.
 	 */
 	reconcile(
 		files: readonly TFile[],
@@ -264,13 +312,17 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 				changed: false,
 			};
 		}
-		const current: ReconcileFileState[] = [];
-		const statesByPath = new Map<string, ReconcileFileState>();
-		const filesByPath = new Map<string, TFile>();
-		const cachesByPath = new Map<string, CachedMetadata | null>();
-		let uncached = 0;
 
-		for (const file of files) {
+		const passId = ++this.passCounter;
+		const fingerprint = config.normalizationFingerprint;
+		let uncached = 0;
+		let hits = 0;
+		let seenStoredCount = 0;
+		let toAdd: PendingNormalizeItem[] | undefined;
+		let toUpdate: PendingNormalizeItem[] | undefined;
+
+		for (let i = 0; i < files.length; i++) {
+			const file = files[i]!;
 			if ((file as { deleted?: boolean }).deleted) {
 				continue;
 			}
@@ -281,76 +333,108 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			if (cache === null) {
 				uncached++;
 			}
-			filesByPath.set(file.path, file);
-			cachesByPath.set(file.path, cache);
-			const ignored = isIgnoredCache(cache);
-			const state = this.stateFor(file, cache, ignored);
-			statesByPath.set(file.path, state);
-			current.push(state);
-		}
-
-		const storedKeys: DocumentCacheKey[] = [];
-		for (const entry of this.store.values()) {
-			storedKeys.push(entry.key);
-		}
-
-		const plan = planReconcile(current, storedKeys, config.normalizationFingerprint);
-		const added = new Set(plan.add);
-		const updated = new Set(plan.update);
-		let hits = 0;
-		for (const state of current) {
-			if (state.ignored || added.has(state.path) || updated.has(state.path)) {
+			if (isIgnoredCache(cache)) {
 				continue;
 			}
-			if (this.store.has(state.path)) {
-				hits++;
+
+			const stored = this.store.get(file.path);
+			if (stored !== undefined) {
+				if (stored.lastSeenPass !== passId) {
+					stored.lastSeenPass = passId;
+					seenStoredCount++;
+				}
+				if (this.isEntryFresh(stored, file, cache, fingerprint)) {
+					hits++;
+					continue;
+				}
+				const mtime = file.stat?.mtime ?? 0;
+				const size = file.stat?.size ?? 0;
+				const metaRev = this.metadataRevision(cache);
+				const linkSnapshot = this.computeLinkSnapshot(
+					file.path,
+					cache,
+					stored.linkSnapshot,
+				);
+				toUpdate ??= [];
+				toUpdate.push({ file, cache, mtime, size, metaRev, linkSnapshot });
+			} else {
+				const mtime = file.stat?.mtime ?? 0;
+				const size = file.stat?.size ?? 0;
+				const metaRev = this.metadataRevision(cache);
+				const linkSnapshot = this.computeLinkSnapshot(file.path, cache, undefined);
+				toAdd ??= [];
+				toAdd.push({ file, cache, mtime, size, metaRev, linkSnapshot });
 			}
 		}
 
-		for (const path of plan.remove) {
-			this.delete(path);
+		let remove = 0;
+		if (seenStoredCount < this.store.size) {
+			for (const [path, entry] of this.store) {
+				if (entry.lastSeenPass !== passId) {
+					this.store.delete(path);
+					remove++;
+				}
+			}
 		}
 
 		let add = 0;
+		if (toAdd !== undefined) {
+			for (let i = 0; i < toAdd.length; i++) {
+				const item = toAdd[i]!;
+				const doc = this.normalize(item.file, item.cache, config, resolveLinkPath);
+				if (doc === null) continue;
+				this.setInternal(
+					item.file.path,
+					doc,
+					item.mtime,
+					item.size,
+					item.metaRev,
+					item.linkSnapshot,
+					fingerprint,
+					passId,
+				);
+				add++;
+			}
+		}
+
 		let update = 0;
 		let removedOnFailedUpdate = 0;
-		for (const path of plan.add) {
-			const file = filesByPath.get(path);
-			const state = statesByPath.get(path);
-			if (!file || !state) continue;
-			const doc = this.normalize(file, cachesByPath.get(path), config, resolveLinkPath);
-			if (doc === null) continue;
-			this.set(path, doc, this.keyFromState(state, config.normalizationFingerprint));
-			add++;
-		}
-		for (const path of plan.update) {
-			const file = filesByPath.get(path);
-			const state = statesByPath.get(path);
-			if (!file || !state) continue;
-			this.delete(path);
-			const doc = this.normalize(file, cachesByPath.get(path), config, resolveLinkPath);
-			if (doc === null) {
-				removedOnFailedUpdate++;
-				continue;
+		if (toUpdate !== undefined) {
+			for (let i = 0; i < toUpdate.length; i++) {
+				const item = toUpdate[i]!;
+				this.delete(item.file.path);
+				const doc = this.normalize(item.file, item.cache, config, resolveLinkPath);
+				if (doc === null) {
+					removedOnFailedUpdate++;
+					continue;
+				}
+				this.setInternal(
+					item.file.path,
+					doc,
+					item.mtime,
+					item.size,
+					item.metaRev,
+					item.linkSnapshot,
+					fingerprint,
+					passId,
+				);
+				update++;
 			}
-			this.set(path, doc, this.keyFromState(state, config.normalizationFingerprint));
-			update++;
 		}
 
 		const stats: DocumentCacheStats = {
 			add,
 			update,
-			remove: plan.remove.length,
+			remove,
 			hits,
 			stale: update,
 			uncached,
 		};
-		const changed =
-			add > 0 || update > 0 || plan.remove.length > 0 || removedOnFailedUpdate > 0;
+		const changed = add > 0 || update > 0 || remove > 0 || removedOnFailedUpdate > 0;
 		this.logger?.log('debug', 'Reconciled normalized document cache', {
 			source: 'query.cache',
 			durationMs: Math.max(0, Date.now() - startedAt),
-			count: add + update + plan.remove.length,
+			count: add + update + remove,
 			...stats,
 			changed,
 		});
@@ -391,30 +475,61 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 		}
 	}
 
-	private stateFor(
-		file: TFile,
-		cache?: CachedMetadata | null,
-		ignored?: boolean,
-	): ReconcileFileState {
-		const resolvedCache =
-			cache === undefined ? this.app.metadataCache.getFileCache(file) : cache;
-		return {
-			path: file.path,
-			mtime: file.stat?.mtime ?? 0,
-			size: file.stat?.size ?? 0,
-			revision: `${this.metadataRevision(resolvedCache)}:${this.linksSignature(file.path, resolvedCache)}`,
-			ignored: ignored ?? isIgnoredCache(resolvedCache),
-		};
+	private setInternal(
+		path: string,
+		doc: NormalizedDocument,
+		mtime: number,
+		size: number,
+		metaRev: number,
+		linkSnapshot: CachedLinkSnapshot,
+		fingerprint: string,
+		lastSeenPass?: number,
+	): void {
+		const frozen = deepFreeze(doc);
+		const key: DocumentCacheKey = Object.freeze({
+			path,
+			mtime,
+			size,
+			revision: `${metaRev}:${linkSnapshot.signature}`,
+			fingerprint,
+		});
+		this.store.set(path, {
+			doc: frozen,
+			key,
+			metaRev,
+			linkSnapshot,
+			lastSeenPass,
+		});
 	}
 
-	private keyFromState(state: ReconcileFileState, fingerprint: string): DocumentCacheKey {
-		return {
-			path: state.path,
-			mtime: state.mtime,
-			size: state.size,
-			revision: state.revision,
-			fingerprint,
-		};
+	private isEntryFresh(
+		stored: CacheEntry,
+		file: TFile,
+		cache: CachedMetadata | null | undefined,
+		fingerprint: string,
+	): boolean {
+		const mtime = file.stat?.mtime ?? 0;
+		const size = file.stat?.size ?? 0;
+		if (
+			stored.key.fingerprint !== fingerprint ||
+			stored.key.mtime !== mtime ||
+			stored.key.size !== size
+		) {
+			return false;
+		}
+		const metaRev = this.metadataRevision(cache);
+		if (stored.metaRev !== undefined && stored.metaRev !== metaRev) {
+			return false;
+		}
+		const nextLinkSnapshot = this.computeLinkSnapshot(file.path, cache, stored.linkSnapshot);
+		if (stored.metaRev !== undefined && stored.linkSnapshot !== undefined) {
+			if (nextLinkSnapshot.signature === stored.linkSnapshot.signature) {
+				stored.linkSnapshot = nextLinkSnapshot;
+				return true;
+			}
+			return false;
+		}
+		return stored.key.revision === `${metaRev}:${nextLinkSnapshot.signature}`;
 	}
 
 	private metadataRevision(cache: CachedMetadata | null | undefined): number {
@@ -429,17 +544,36 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 		return revision;
 	}
 
-	private linksSignature(path: string, cache: CachedMetadata | null | undefined): string {
+	private computeLinkSnapshot(
+		path: string,
+		cache: CachedMetadata | null | undefined,
+		prev: CachedLinkSnapshot | undefined,
+	): CachedLinkSnapshot {
 		if (!hasAnyLinks(cache)) {
-			return '0';
+			return NO_LINKS_SNAPSHOT;
 		}
 		const metadataCache = this.app.metadataCache as {
 			resolvedLinks?: Record<string, Record<string, number>>;
 			unresolvedLinks?: Record<string, Record<string, number>>;
 		};
-		return hashRecord({
-			resolved: metadataCache.resolvedLinks?.[path] ?? null,
-			unresolved: metadataCache.unresolvedLinks?.[path] ?? null,
+		const rawResolved = metadataCache.resolvedLinks?.[path] ?? null;
+		const rawUnresolved = metadataCache.unresolvedLinks?.[path] ?? null;
+		if (
+			prev !== undefined &&
+			prev !== NO_LINKS_SNAPSHOT &&
+			shallowNumberRecordsEqual(rawResolved, prev.resolved) &&
+			shallowNumberRecordsEqual(rawUnresolved, prev.unresolved)
+		) {
+			return prev;
+		}
+		const signature = hashRecord({
+			resolved: rawResolved,
+			unresolved: rawUnresolved,
 		});
+		return {
+			resolved: rawResolved ? { ...rawResolved } : null,
+			unresolved: rawUnresolved ? { ...rawUnresolved } : null,
+			signature,
+		};
 	}
 }

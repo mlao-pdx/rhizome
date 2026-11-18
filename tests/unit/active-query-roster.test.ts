@@ -1198,7 +1198,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 			});
 		const querySpy = vi.spyOn(plugin, 'query');
 
-		const logCalls: Array<{ source: string }> = [];
+		const logCalls: Array<{ source: string; [key: string]: unknown }> = [];
 		vi.spyOn(plugin.loggerAdapter, 'log').mockImplementation((_level, _msg, meta) => {
 			logCalls.push(meta);
 		});
@@ -1227,6 +1227,9 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(renderedMarkdowns[0]).toContain('### Section');
 		expect(renderedMarkdowns[0]).toContain('- alpha');
 		expect(logCalls.filter((c) => c.source === 'template.render')).toHaveLength(1);
+		expect(
+			logCalls.filter((c) => c.source === 'template.render')[0]?.['cached'],
+		).toBeUndefined();
 
 		// Simulate stepping cursor into codeblock (unmount) and stepping back out (remount)
 		addedChildren[0]?.unload();
@@ -1235,9 +1238,12 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		const el2 = { empty: () => {} } as unknown as HTMLElement;
 		await processRhizomeCodeBlock(source, el2, makeCtx(5), plugin);
 
-		// 2. Remount hits CodeBlockRenderCache: skips plugin.query() and skips LiquidJS render
+		// 2. Remount hits CodeBlockRenderCache: skips plugin.query() and skips LiquidJS render,
+		// and logs template.render with cached: true, cacheHit: 'remount'
 		expect(querySpy).toHaveBeenCalledTimes(1);
-		expect(logCalls.filter((c) => c.source === 'template.render')).toHaveLength(1);
+		const renderLogs = logCalls.filter((c) => c.source === 'template.render');
+		expect(renderLogs).toHaveLength(2);
+		expect(renderLogs[1]).toMatchObject({ cached: true, cacheHit: 'remount' });
 		expect(renderedMarkdowns).toHaveLength(2);
 		expect(renderedMarkdowns[1]).toBe(renderedMarkdowns[0]);
 		// And still re-registers with ActiveQueryRoster so subsequent vault updates work!
@@ -1333,6 +1339,16 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		// No echo re-render triggered!
 		expect(renderedMarkdowns).toHaveLength(1);
 
+		// And if the user steps into and out of the codeblock after that trailing nudge,
+		// stateRevision was synchronized so getRemountHit() succeeds without calling plugin.query()!
+		const querySpy = vi.spyOn(plugin, 'query');
+		addedChildren[0]?.unload();
+		const elRemount = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(source, elRemount, ctx, plugin);
+		expect(querySpy).not.toHaveBeenCalled();
+		expect(renderedMarkdowns).toHaveLength(2);
+		expect(renderedMarkdowns[1]).toBe(renderedMarkdowns[0]);
+
 		// 2. Now user changes the heading above the codeblock in README.md from ## (2) to ### (3):
 		hostHeadingLevel = 3;
 		hostMtime += 1500;
@@ -1340,8 +1356,8 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		await plugin.activeQueryRoster.nudge(hostMtime, { onlyIfChanged: true });
 
 		// Heading level change invalidates the payload hash and re-renders with #### Tasks!
-		expect(renderedMarkdowns).toHaveLength(2);
-		expect(renderedMarkdowns[1]).toContain('#### Tasks');
+		expect(renderedMarkdowns).toHaveLength(3);
+		expect(renderedMarkdowns[2]).toContain('#### Tasks');
 
 		for (const c of addedChildren) c.unload();
 		renderSpy.mockRestore();

@@ -113,6 +113,7 @@ function logCodeBlockRenderResult(
 	sourcePath: string,
 	result: TemplateRenderResult,
 	durationMs: number,
+	cacheHit?: 'remount' | 'payload',
 ): void {
 	if (!result.ok) {
 		const isRenderError = result.diagnostics.some((d) => d.code === 'TEMPLATE_RENDER_ERROR');
@@ -135,6 +136,7 @@ function logCodeBlockRenderResult(
 				source: 'template.render',
 				durationMs,
 				count: result.queries.length,
+				...(cacheHit !== undefined ? { cached: true, cacheHit } : {}),
 			},
 		);
 	}
@@ -373,6 +375,20 @@ export async function processRhizomeCodeBlock(
 		const initialGeneration = ++renderGeneration;
 		const hasQueries = Object.keys(queryMap).length > 0;
 		const initialHeadingLevel = resolveCurrentHeadingLevel();
+		const onUnchangedPayload = (stateRev: number, unchangedPayloadHash: string): void => {
+			if (outerAbortController.signal.aborted || cycleSignal.aborted) {
+				return;
+			}
+			renderCache?.advanceStateRevision(
+				currentSourcePath,
+				source,
+				resolveCurrentHeadingLevel(),
+				folderConfig,
+				plugin.activeQueryRoster?.templateRevision ?? 0,
+				unchangedPayloadHash,
+				stateRev,
+			);
+		};
 		const stateRevisionBeforeQuery = plugin.activeQueryRoster?.stateRevision ?? 0;
 		const remountHit = renderCache?.getRemountHit(
 			currentSourcePath,
@@ -390,12 +406,21 @@ export async function processRhizomeCodeBlock(
 					signal: cycleSignal,
 					onReset,
 					onSourcePathRename,
+					onUnchangedPayload,
 					includeHostInHash: referencesHost,
 					headingLevel: resolveCurrentHeadingLevel,
 					...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
 				},
 				remountHit.payload,
 				hasQueries || currentSourcePath.length > 0 ? onUpdate : undefined,
+			);
+			const durationMs = Math.max(0, Date.now() - parseStartedAt);
+			logCodeBlockRenderResult(
+				plugin,
+				currentSourcePath,
+				remountHit.result,
+				durationMs,
+				'remount',
 			);
 			await renderIntoContainer(remountHit.result.markdown, initialGeneration, cycleSignal);
 			return;
@@ -408,6 +433,7 @@ export async function processRhizomeCodeBlock(
 				signal: cycleSignal,
 				onReset,
 				onSourcePathRename,
+				onUnchangedPayload,
 				includeHostInHash: referencesHost,
 				headingLevel: resolveCurrentHeadingLevel,
 				...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
@@ -452,6 +478,13 @@ export async function processRhizomeCodeBlock(
 				payloadHash,
 				initialPayload,
 				cachedByPayload,
+			);
+			logCodeBlockRenderResult(
+				plugin,
+				currentSourcePath,
+				cachedByPayload,
+				parseDurationMs,
+				'payload',
 			);
 			await renderIntoContainer(cachedByPayload.markdown, initialGeneration, cycleSignal);
 			return;
