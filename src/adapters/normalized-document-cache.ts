@@ -13,6 +13,7 @@ import {
 } from '@core/search';
 import type { DocumentCachePort } from '@ports/document-cache-port';
 import type { LoggerPort } from '@ports/logger-port';
+import type { BodyScanCache } from './body-scan-cache';
 import { markSensitive } from './logger-format';
 
 /**
@@ -59,6 +60,7 @@ interface CacheEntry {
 	readonly doc: NormalizedDocument;
 	readonly key: DocumentCacheKey;
 	readonly metaRev?: number | undefined;
+	readonly bodyRev?: number | undefined;
 	linkSnapshot?: CachedLinkSnapshot | undefined;
 	lastSeenPass?: number | undefined;
 }
@@ -69,6 +71,7 @@ interface PendingNormalizeItem {
 	readonly mtime: number;
 	readonly size: number;
 	readonly metaRev: number;
+	readonly bodyRev: number;
 	readonly linkSnapshot: CachedLinkSnapshot;
 }
 
@@ -132,15 +135,17 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 > {
 	private readonly app: App;
 	private readonly logger: LoggerPort | undefined;
+	private readonly bodyScanCache: BodyScanCache | undefined;
 	private readonly store = new Map<string, CacheEntry>();
 	private readonly metadataRevisions = new WeakMap<object, number>();
 	private nextRevision = 1;
 	private passCounter = 0;
 	private ready = true;
 
-	constructor(app: App, logger?: LoggerPort) {
+	constructor(app: App, logger?: LoggerPort, bodyScanCache?: BodyScanCache) {
 		this.app = app;
 		this.logger = logger;
+		this.bodyScanCache = bodyScanCache;
 	}
 
 	/** Number of stored entries. */
@@ -277,6 +282,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			const mtime = file.stat?.mtime ?? 0;
 			const size = file.stat?.size ?? 0;
 			const metaRev = this.metadataRevision(cache);
+			const bodyRev = this.bodyScanCache?.getBodyRevision(file.path) ?? 0;
 			const linkSnapshot = this.computeLinkSnapshot(file.path, cache, prevLinkSnapshot);
 			this.setInternal(
 				file.path,
@@ -284,6 +290,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 				mtime,
 				size,
 				metaRev,
+				bodyRev,
 				linkSnapshot,
 				config.normalizationFingerprint,
 			);
@@ -350,20 +357,22 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 				const mtime = file.stat?.mtime ?? 0;
 				const size = file.stat?.size ?? 0;
 				const metaRev = this.metadataRevision(cache);
+				const bodyRev = this.bodyScanCache?.getBodyRevision(file.path) ?? 0;
 				const linkSnapshot = this.computeLinkSnapshot(
 					file.path,
 					cache,
 					stored.linkSnapshot,
 				);
 				toUpdate ??= [];
-				toUpdate.push({ file, cache, mtime, size, metaRev, linkSnapshot });
+				toUpdate.push({ file, cache, mtime, size, metaRev, bodyRev, linkSnapshot });
 			} else {
 				const mtime = file.stat?.mtime ?? 0;
 				const size = file.stat?.size ?? 0;
 				const metaRev = this.metadataRevision(cache);
+				const bodyRev = this.bodyScanCache?.getBodyRevision(file.path) ?? 0;
 				const linkSnapshot = this.computeLinkSnapshot(file.path, cache, undefined);
 				toAdd ??= [];
-				toAdd.push({ file, cache, mtime, size, metaRev, linkSnapshot });
+				toAdd.push({ file, cache, mtime, size, metaRev, bodyRev, linkSnapshot });
 			}
 		}
 
@@ -389,6 +398,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 					item.mtime,
 					item.size,
 					item.metaRev,
+					item.bodyRev,
 					item.linkSnapshot,
 					fingerprint,
 					passId,
@@ -414,6 +424,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 					item.mtime,
 					item.size,
 					item.metaRev,
+					item.bodyRev,
 					item.linkSnapshot,
 					fingerprint,
 					passId,
@@ -461,7 +472,16 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 		resolveLinkPath: ResolveLinkPathFn,
 	): NormalizedDocument | null {
 		try {
-			return normalizeObsidianMetadata(file, cache ?? null, config, [], resolveLinkPath);
+			const inlineProps = this.bodyScanCache?.getInlineProperties(file.path) ?? [];
+			const tasks = this.bodyScanCache?.getTasks(file.path) ?? [];
+			return normalizeObsidianMetadata(
+				file,
+				cache ?? null,
+				config,
+				inlineProps,
+				resolveLinkPath,
+				tasks,
+			);
 		} catch (error) {
 			this.logger?.log(
 				'warn',
@@ -481,6 +501,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 		mtime: number,
 		size: number,
 		metaRev: number,
+		bodyRev: number,
 		linkSnapshot: CachedLinkSnapshot,
 		fingerprint: string,
 		lastSeenPass?: number,
@@ -490,13 +511,14 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			path,
 			mtime,
 			size,
-			revision: `${metaRev}:${linkSnapshot.signature}`,
+			revision: `${metaRev}:${bodyRev}:${linkSnapshot.signature}`,
 			fingerprint,
 		});
 		this.store.set(path, {
 			doc: frozen,
 			key,
 			metaRev,
+			bodyRev,
 			linkSnapshot,
 			lastSeenPass,
 		});
@@ -521,6 +543,10 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 		if (stored.metaRev !== undefined && stored.metaRev !== metaRev) {
 			return false;
 		}
+		const bodyRev = this.bodyScanCache?.getBodyRevision(file.path) ?? 0;
+		if (stored.bodyRev !== undefined && stored.bodyRev !== bodyRev) {
+			return false;
+		}
 		const nextLinkSnapshot = this.computeLinkSnapshot(file.path, cache, stored.linkSnapshot);
 		if (stored.metaRev !== undefined && stored.linkSnapshot !== undefined) {
 			if (nextLinkSnapshot.signature === stored.linkSnapshot.signature) {
@@ -529,7 +555,10 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			}
 			return false;
 		}
-		return stored.key.revision === `${metaRev}:${nextLinkSnapshot.signature}`;
+		return (
+			stored.key.revision === `${metaRev}:${bodyRev}:${nextLinkSnapshot.signature}` ||
+			(bodyRev === 0 && stored.key.revision === `${metaRev}:${nextLinkSnapshot.signature}`)
+		);
 	}
 
 	private metadataRevision(cache: CachedMetadata | null | undefined): number {

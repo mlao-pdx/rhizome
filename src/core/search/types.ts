@@ -134,10 +134,14 @@ export type TypedPropertyValue =
 
 export type SanitizedScalar = string | number | boolean | null;
 
+export type PropertySource = 'frontmatter' | 'dataview' | 'rhizome';
+
+export type TagSource = PropertySource | 'inline';
+
 export interface PropertyOccurrence {
 	key: string; // Normalized: rawKey.trim().toLowerCase()
 	rawKey: string; // Key casing as provided in cache/inline
-	source: 'frontmatter' | 'inline';
+	source: PropertySource;
 	line: number | null; // Positive safe integer (1-based) when available; null otherwise
 	propertyType: ObsidianPropertyType;
 	rawValue: SanitizedScalar | SanitizedScalar[];
@@ -160,7 +164,7 @@ export interface DocumentDiagnostic {
 	rawKey: string;
 	rawValue: string;
 	expectedType: ObsidianPropertyType;
-	source: 'frontmatter' | 'inline';
+	source: PropertySource;
 	line: number | null;
 	occurrenceIndex: number;
 	valueIndex: number;
@@ -202,20 +206,54 @@ export interface NormalizedLink {
 
 export interface NormalizedTagLocation {
 	tag: string; // Authored-case tag with leading '#' stripped
-	source: 'frontmatter' | 'inline';
+	source: TagSource;
 	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
 }
 
 export interface NormalizedAliasLocation {
 	alias: string; // Authored-case alias string
-	source: 'frontmatter' | 'inline';
+	source: PropertySource;
 	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
 }
 
 export interface NormalizedPropertyLocation {
 	property: string; // Trimmed authored-case property key
 	value: SanitizedScalar | SanitizedScalar[]; // Sanitized per-occurrence value (vacuous scalar -> null)
-	source: 'frontmatter' | 'inline';
+	source: PropertySource;
+	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
+}
+
+export type TaskStatusType = 'TODO' | 'IN_PROGRESS' | 'ON_HOLD' | 'DONE' | 'CANCELLED' | 'NON_TASK';
+
+export type TaskPriority = 'highest' | 'high' | 'medium' | 'normal' | 'low' | 'lowest';
+
+export type TaskSignifierFormat = 'emoji' | 'dataview' | 'mixed' | 'none';
+
+export interface NormalizedTask {
+	line: number; // 1-based line number
+	status: string; // 1-char checkbox symbol inside [...]
+	statusType: TaskStatusType;
+	completed: boolean; // statusType === 'DONE'
+	done: boolean; // statusType === 'DONE' || statusType === 'CANCELLED' || statusType === 'NON_TASK'
+	text: string; // Description with 11 signifiers + trailing ^block-id stripped; #tags and custom [key:: val] preserved
+	cleanText: string; // Description with #tags and custom [key:: val] / (key:: val) also stripped
+	priority: TaskPriority;
+	priorityNumber: number; // 0 (highest) .. 5 (lowest), 3 = normal
+	created: string | null; // YYYY-MM-DD
+	start: string | null; // YYYY-MM-DD
+	scheduled: string | null; // YYYY-MM-DD
+	due: string | null; // YYYY-MM-DD
+	completion: string | null; // YYYY-MM-DD
+	cancelled: string | null; // YYYY-MM-DD
+	repeat: string | null;
+	onCompletion: string | null;
+	id: string | null;
+	dependsOn: string[];
+	tags: string[]; // Authored-case, '#'-stripped, deduplicated tags on the task line
+	blockId: string | null; // Trailing ^block-id without leading '^'
+	parentLine: number | null; // 1-based line number of parent list item, or null
+	format: TaskSignifierFormat; // Signifier syntax attribution on this task line
+	properties: Record<string, unknown>; // Null-prototype map of custom non-signifier [key:: val] / (key:: val) on this task line
 	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
 }
 
@@ -240,6 +278,7 @@ export interface NormalizedDocument {
 	links: NormalizedLink[]; // Outgoing links (frontmatterLinks + inline links, excluding embeds)
 	embeds: NormalizedLink[]; // Outgoing embeds
 	blocks: NormalizedBlock[];
+	tasks: NormalizedTask[]; // Tasks extracted from the note body in line order
 	propertyOccurrences: PropertyOccurrence[]; // Cache-level occurrence stream
 	propertyKeys: string[]; // Exact first-seen order of trimmed authored property keys
 	properties: Record<string, unknown>; // Null-prototype O(1) lookup map with authored keys and Collision Resolution Rule

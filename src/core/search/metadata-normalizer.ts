@@ -1,3 +1,4 @@
+import type { ExtractedTaskInput } from '../scanner/task-extractor';
 import {
 	buildPropertiesViews,
 	coercePropertyValue,
@@ -22,11 +23,15 @@ import {
 	type NormalizedLink,
 	type NormalizedPropertyLocation,
 	type NormalizedTagLocation,
+	type NormalizedTask,
 	type PropertyOccurrence,
+	type PropertySource,
 	type ResolvedEngineConfig,
 	type SanitizedScalar,
 	type TypedPropertyValue,
 } from './types';
+
+export type { ExtractedTaskInput };
 
 const internalFileEpochMsMap = new WeakMap<
 	NormalizedFileInfo,
@@ -107,6 +112,7 @@ export interface ObsidianMetadataCacheInput {
 export interface InlinePropertyInput {
 	readonly key: string;
 	readonly value: unknown;
+	readonly source?: 'dataview' | 'rhizome' | undefined;
 	readonly line?: number | null | undefined;
 	readonly position?: ObsidianPosInput | null | undefined;
 }
@@ -332,6 +338,7 @@ export function normalizeObsidianMetadata(
 	resolvedConfig: ResolvedEngineConfig,
 	inlineProperties: readonly InlinePropertyInput[] = [],
 	resolveLinkPath?: ResolveLinkPathFn,
+	extractedTasks: readonly ExtractedTaskInput[] = [],
 ): NormalizedDocument {
 	const ctime = validateIntegerTimestampMs(tfile.stat.ctime, 'ctime');
 	const mtime = validateIntegerTimestampMs(tfile.stat.mtime, 'mtime');
@@ -354,7 +361,7 @@ export function normalizeObsidianMetadata(
 		tv: TypedPropertyValue,
 		key: string,
 		rawKey: string,
-		source: 'frontmatter' | 'inline',
+		source: PropertySource,
 		line: number | null,
 		occurrenceIndex: number,
 		valueIndex: number,
@@ -402,7 +409,7 @@ export function normalizeObsidianMetadata(
 	const recordSystemScopeEntry = (
 		systemScope: 'tag' | 'aliases' | 'cssclasses',
 		val: unknown,
-		source: 'frontmatter' | 'inline',
+		source: PropertySource,
 		rawPosition?: ObsidianPosInput | null,
 	): void => {
 		const items = Array.isArray(val) ? (val as readonly unknown[]) : [val];
@@ -462,7 +469,7 @@ export function normalizeObsidianMetadata(
 	const addOccurrence = (
 		rawKey: string,
 		val: unknown,
-		source: 'frontmatter' | 'inline',
+		source: PropertySource,
 		rawLine?: number | null,
 		rawPosition?: ObsidianPosInput | null,
 	): void => {
@@ -543,7 +550,8 @@ export function normalizeObsidianMetadata(
 		addOccurrence(k, v, 'frontmatter', null, null);
 	}
 	for (const inline of inlineProperties) {
-		addOccurrence(inline.key, inline.value, 'inline', inline.line, inline.position);
+		const inlineSource: PropertySource = inline.source === 'rhizome' ? 'rhizome' : 'dataview';
+		addOccurrence(inline.key, inline.value, inlineSource, inline.line, inline.position);
 	}
 
 	const { propertyKeys, properties } = buildPropertiesViews(propertyOccurrences);
@@ -645,6 +653,50 @@ export function normalizeObsidianMetadata(
 		}
 	}
 
+	const tasks: NormalizedTask[] = extractedTasks.map((t) => {
+		const cleanedTaskBlockId = t.blockId ? t.blockId.replace(/^\^+/, '') : '';
+		const taskOrigin =
+			cleanedTaskBlockId.length > 0
+				? originResolver.forBlock(cleanedTaskBlockId)
+				: originResolver.resolve(t.position);
+
+		const taskProperties = Object.create(null) as Record<string, unknown>;
+		if (t.properties && typeof t.properties === 'object') {
+			for (const [pk, pv] of Object.entries(t.properties)) {
+				if (FORBIDDEN_KEYS.has(pk) || FORBIDDEN_KEYS.has(pk.toLowerCase())) continue;
+				taskProperties[pk] = Array.isArray(pv) ? [...(pv as readonly unknown[])] : pv;
+			}
+		}
+
+		return {
+			line: t.line,
+			status: t.status,
+			statusType: t.statusType,
+			completed: t.completed,
+			done: t.done,
+			text: t.text,
+			cleanText: t.cleanText,
+			priority: t.priority,
+			priorityNumber: t.priorityNumber,
+			created: t.created,
+			start: t.start,
+			scheduled: t.scheduled,
+			due: t.due,
+			completion: t.completion,
+			cancelled: t.cancelled,
+			repeat: t.repeat,
+			onCompletion: t.onCompletion,
+			id: t.id,
+			dependsOn: [...t.dependsOn],
+			tags: [...t.tags],
+			blockId: t.blockId,
+			parentLine: t.parentLine,
+			format: t.format,
+			properties: taskProperties,
+			origin: taskOrigin,
+		};
+	});
+
 	const size = tfile.stat.size === 0 ? 0 : tfile.stat.size;
 
 	const file: NormalizedFileInfo = {
@@ -671,6 +723,7 @@ export function normalizeObsidianMetadata(
 		links,
 		embeds,
 		blocks,
+		tasks,
 		propertyOccurrences,
 		propertyKeys,
 		properties,

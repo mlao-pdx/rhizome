@@ -426,7 +426,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					rawKey: string;
 					rawValue: string;
 					expectedType: ObsidianPropertyType;
-					source: 'frontmatter' | 'inline';
+					source: DocumentDiagnostic['source'];
 					line: number | null;
 					code: DocumentDiagnostic['code'];
 					hint: string | null;
@@ -811,7 +811,12 @@ describe('search metadata normalizer & property coercion invariants', () => {
 						Array.from(new Set(doc.aliasLocations.map((al) => al.alias))),
 					);
 
-					const sourceOrder = { frontmatter: 0, inline: 1 } as const;
+					const sourceOrder = {
+						frontmatter: 0,
+						dataview: 1,
+						rhizome: 1,
+						inline: 2,
+					} as const;
 					for (const stream of [
 						doc.tagLocations,
 						doc.aliasLocations,

@@ -170,6 +170,7 @@ export function buildRhizomeTemplateContext(
 			hostMatch && Array.isArray(hostMatch.embeds) ? hostMatch.embeds : EMPTY_FROZEN_ARRAY,
 		blocks:
 			hostMatch && Array.isArray(hostMatch.blocks) ? hostMatch.blocks : EMPTY_FROZEN_ARRAY,
+		tasks: hostMatch && Array.isArray(hostMatch.tasks) ? hostMatch.tasks : EMPTY_FROZEN_ARRAY,
 		properties:
 			hostMatch && hostMatch.properties && typeof hostMatch.properties === 'object'
 				? hostMatch.properties

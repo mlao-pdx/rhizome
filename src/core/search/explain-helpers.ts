@@ -369,6 +369,15 @@ export function describeScopeSemantics(scope: string): ScopeSemanticsInfo {
 				formatPlainStringMatch: (val) =>
 					`contains ${formatInlineCode(val)} (case-insensitive)`,
 			};
+		case 'tasks':
+			return {
+				friendlyTitle: 'Task filter',
+				singularTarget: 'task description',
+				targetsDescription: 'note `tasks` description text (`tasks[].text`)',
+				matchRuleDescription: 'case-insensitive substring match',
+				formatPlainStringMatch: (val) =>
+					`contains ${formatInlineCode(val)} (case-insensitive)`,
+			};
 		default: {
 			const scopeCode = formatInlineCode(scope);
 			return {

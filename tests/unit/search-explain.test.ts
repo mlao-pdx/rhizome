@@ -405,6 +405,7 @@ describe('explainQuery', () => {
 			links: [],
 			embeds: [],
 			blocks: [],
+			tasks: [],
 			propertyOccurrences: [],
 			propertyKeys: ['priority'],
 			properties: Object.assign(Object.create(null) as Record<string, unknown>, {

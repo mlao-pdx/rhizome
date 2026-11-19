@@ -147,8 +147,8 @@ export function evaluatorConfig(timeZone: string): ResolvedEngineConfig {
 		},
 		customScopes: [
 			{
-				canonicalName: 'Tasks',
-				aliases: ['task'],
+				canonicalName: 'Callouts',
+				aliases: ['callout'],
 				extract: (doc) => doc.aliases,
 				matchString: (target, query, quoted) =>
 					quoted

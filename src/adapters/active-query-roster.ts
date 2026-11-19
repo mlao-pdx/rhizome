@@ -124,6 +124,12 @@ function updateMatch(acc: XxHash64Accumulator, match: VaultQueryMatch): void {
 		acc.updateString(backlink.path);
 		acc.updateNumber(backlink.count);
 	}
+
+	const tasks = match.tasks;
+	acc.updateTag(0x2a, tasks.length);
+	for (let i = 0; i < tasks.length; i++) {
+		acc.updateValue(tasks[i]!);
+	}
 }
 
 const matchDigestCache = new WeakMap<VaultQueryMatch, Digest64>();

@@ -191,6 +191,23 @@ export class RhizomeSettingTab extends PluginSettingTab {
 					},
 				],
 			},
+			{
+				type: 'group',
+				heading: 'Indexing',
+				items: [
+					{
+						name: 'Rebuild index',
+						desc: 'Clears the cached metadata index and re-scans all notes in the vault.',
+						render: (setting) => {
+							setting.addButton((button) =>
+								button.setButtonText('Rebuild index').onClick(async () => {
+									await this.plugin.rebuildIndex();
+								}),
+							);
+						},
+					},
+				],
+			},
 			// Ordering invariant: the Diagnostics sub-page entry bar must always
 			// remain the last item in `getSettingDefinitions()` at the bottom of
 			// the opening settings page. Add new setting groups above this line.

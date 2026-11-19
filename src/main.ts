@@ -3,6 +3,7 @@ import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
 import { isPathInTemplateFolders, type TemplateFolderConfig } from '@core/templates';
 import { ActiveQueryRoster } from './adapters/active-query-roster';
 import { BacklinkIndex } from './adapters/backlink-index';
+import { BodyScanCache } from './adapters/body-scan-cache';
 import { CodeBlockRenderCache } from './adapters/codeblock-render-cache';
 import { createRhizomeEditorExtension } from './adapters/codemirror/rhizome-editor-extension';
 import { NormalizedDocumentCache } from './adapters/normalized-document-cache';
@@ -55,6 +56,7 @@ export default class RhizomePlugin extends Plugin {
 	dataStore!: PluginDataStore;
 	activeQueryRoster!: ActiveQueryRoster;
 	backlinkIndex!: BacklinkIndex;
+	bodyScanCache!: BodyScanCache;
 	documentCache!: NormalizedDocumentCache;
 	codeBlockRenderCache!: CodeBlockRenderCache;
 
@@ -88,7 +90,12 @@ export default class RhizomePlugin extends Plugin {
 			(file) => this.isIgnoredNote(file),
 			this.loggerAdapter,
 		);
-		this.documentCache = new NormalizedDocumentCache(this.app, this.loggerAdapter);
+		this.bodyScanCache = new BodyScanCache(this.app, this.loggerAdapter);
+		this.documentCache = new NormalizedDocumentCache(
+			this.app,
+			this.loggerAdapter,
+			this.bodyScanCache,
+		);
 		this.documentCache.setReady(false);
 		this.codeBlockRenderCache = new CodeBlockRenderCache();
 		this.activeQueryRoster = new ActiveQueryRoster(
@@ -99,6 +106,7 @@ export default class RhizomePlugin extends Plugin {
 		);
 		this.register(() => this.activeQueryRoster.clear());
 		this.register(() => this.backlinkIndex.dispose());
+		this.register(() => this.bodyScanCache.dispose());
 		this.register(() => this.documentCache.clear());
 		this.register(() => this.codeBlockRenderCache.clear());
 
@@ -149,6 +157,7 @@ export default class RhizomePlugin extends Plugin {
 			isMarkdownPath(path) && isPathInTemplateFolders(path, this.getTemplateFolderConfig());
 
 		let vaultReady = false;
+		const startupTasks: Array<Promise<void>> = [];
 		const markVaultReady = (): void => {
 			if (vaultReady) return;
 			vaultReady = true;
@@ -158,6 +167,20 @@ export default class RhizomePlugin extends Plugin {
 			if (this.activeQueryRoster.size > 0) {
 				scheduleRefresh();
 			}
+			startupTasks.push(
+				(async () => {
+					const hydrated = await this.bodyScanCache.hydrateFromIndexedDB();
+					if (hydrated > 0) {
+						this.activeQueryRoster.markVaultDirty();
+						if (this.activeQueryRoster.size > 0) {
+							scheduleRefresh();
+						}
+					}
+					await this.bodyScanCache.reconcileVaultBodies(() => {
+						scheduleRefresh();
+					});
+				})(),
+			);
 		};
 
 		this.registerEvent(this.app.metadataCache.on('resolved', markVaultReady));
@@ -166,7 +189,7 @@ export default class RhizomePlugin extends Plugin {
 		// live vault state happens once when the pass runs. Excluded (DO_NOT_INDEX_OR_QUERY)
 		// notes are ignored unless they were previously indexed and need eviction.
 		this.registerEvent(
-			this.app.metadataCache.on('changed', (file, _data, cache) => {
+			this.app.metadataCache.on('changed', (file, data, cache) => {
 				if (isTemplateFolderNote(file?.path)) {
 					scheduleTemplateReset();
 				}
@@ -178,11 +201,17 @@ export default class RhizomePlugin extends Plugin {
 					return;
 				}
 				const nextCache = cache ?? this.app.metadataCache.getFileCache(file);
+				const ignored = isDoNotIndexFrontmatter(nextCache);
+				if (ignored) {
+					this.bodyScanCache.delete(file.path);
+				} else if (typeof data === 'string') {
+					this.bodyScanCache.ingestFromText(file, data, nextCache);
+				}
 				// Excluded notes (DO_NOT_INDEX_OR_QUERY, e.g. diagnostic logs) are ignored.
 				// Exception: if the note is currently present in documentCache or tracked as a
 				// backlink source, allow the event through so reconciliation evicts it.
 				if (
-					isDoNotIndexFrontmatter(nextCache) &&
+					ignored &&
 					this.documentCache.get(file.path) === undefined &&
 					!this.backlinkIndex.hasSource(file.path)
 				) {
@@ -203,6 +232,7 @@ export default class RhizomePlugin extends Plugin {
 					scheduleRefresh();
 					return;
 				}
+				this.bodyScanCache.delete(file.path);
 				const lastCache = prevCache ?? this.app.metadataCache.getFileCache(file);
 				// Excluded notes (DO_NOT_INDEX_OR_QUERY) are ignored on deletion unless they are
 				// still present in documentCache or backlinkIndex and need eviction.
@@ -219,6 +249,7 @@ export default class RhizomePlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
 				if (typeof oldPath === 'string' && typeof file?.path === 'string') {
+					this.bodyScanCache.rename(oldPath, file.path);
 					const renamedCache = getAbstractFileCache(this.app, file);
 					// Excluded notes (DO_NOT_INDEX_OR_QUERY) are ignored on rename unless oldPath
 					// or newPath is currently cached or tracked in backlinkIndex, in which case
@@ -304,6 +335,20 @@ export default class RhizomePlugin extends Plugin {
 				new DiagnosticsLoggingModal(this.app, this).open();
 			}
 		});
+		if (startupTasks.length > 0) {
+			await Promise.all(startupTasks);
+		}
+	}
+
+	async rebuildIndex(): Promise<void> {
+		await this.bodyScanCache.clearAll();
+		this.documentCache.clear();
+		this.backlinkIndex.dispose();
+		this.activeQueryRoster.markVaultDirty();
+		await this.bodyScanCache.reconcileVaultBodies(() => {
+			this.activeQueryRoster.markVaultDirty();
+		});
+		this.activeQueryRoster.resetAll();
 	}
 
 	override onunload() {

@@ -256,6 +256,7 @@ describe('runVaultQuery', () => {
 			'links',
 			'embeds',
 			'blocks',
+			'tasks',
 			'properties',
 			'propertyLocations',
 			'backlinks',

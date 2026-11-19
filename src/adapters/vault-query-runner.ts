@@ -19,6 +19,7 @@ import {
 	type NormalizedLink,
 	type NormalizedPropertyLocation,
 	type NormalizedTagLocation,
+	type NormalizedTask,
 	normalizeObsidianMetadata,
 	type PreparedQuery,
 	type PropertyTypeRegistry,
@@ -163,6 +164,7 @@ export interface VaultQueryMatch {
 	readonly links: NormalizedLink[];
 	readonly embeds: NormalizedLink[];
 	readonly blocks: NormalizedBlock[];
+	readonly tasks: NormalizedTask[];
 	readonly properties: Record<string, unknown>;
 	readonly propertyLocations: NormalizedPropertyLocation[];
 	readonly backlinks: readonly BacklinkRef[];
@@ -200,6 +202,7 @@ function buildFrozenVaultQueryMatch(
 		links: doc.links,
 		embeds: doc.embeds,
 		blocks: doc.blocks,
+		tasks: doc.tasks,
 		properties: doc.properties,
 		propertyLocations: doc.propertyLocations,
 		backlinks: frozenBacklinks,

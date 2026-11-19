@@ -335,7 +335,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				rawKey: 'Sprint',
 				rawValue: '2026-10-01..2026-01-01',
 				expectedType: 'date',
-				source: 'inline',
+				source: 'dataview',
 				line: 14,
 				occurrenceIndex: 1,
 				valueIndex: 0,
@@ -350,7 +350,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				rawKey: 'due',
 				rawValue: '2026-01-01..@today',
 				expectedType: 'date',
-				source: 'inline',
+				source: 'dataview',
 				line: 15,
 				occurrenceIndex: 2,
 				valueIndex: 0,
@@ -425,7 +425,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			{ tag: 'Project', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
 			{ tag: 'work/urgent', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
 			{ tag: 'work/urgent', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
-			{ tag: 'extra-tag', source: 'inline', origin: '[[RootNote.md|RootNote]]' },
+			{ tag: 'extra-tag', source: 'dataview', origin: '[[RootNote.md|RootNote]]' },
 			{ tag: 'work/urgent', source: 'inline', origin: '[[RootNote.md|RootNote]]' },
 			{ tag: 'inline-tag', source: 'inline', origin: '[[RootNote.md|RootNote]]' },
 		]);
@@ -440,7 +440,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 		expect(doc.aliasLocations).toEqual([
 			{ alias: 'First Alias', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
 			{ alias: '42', source: 'frontmatter', origin: '[[RootNote.md|RootNote]]' },
-			{ alias: 'Second Alias', source: 'inline', origin: '[[RootNote.md|RootNote]]' },
+			{ alias: 'Second Alias', source: 'dataview', origin: '[[RootNote.md|RootNote]]' },
 		]);
 		expect(doc.headings).toEqual([
 			{ text: 'H1', level: 1, origin: '[[RootNote.md#H1|RootNote]]' },
@@ -556,7 +556,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			{
 				key: '__proto__',
 				rawKey: '__proto__',
-				source: 'inline',
+				source: 'dataview',
 				line: 1,
 				propertyType: 'text',
 				rawValue: 'x',
@@ -843,17 +843,17 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			},
 			{
 				tag: 'inline-a',
-				source: 'inline',
+				source: 'dataview',
 				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
 			},
 			{
 				tag: 'inline-b',
-				source: 'inline',
+				source: 'dataview',
 				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
 			},
 			{
 				tag: 'inline-in-block',
-				source: 'inline',
+				source: 'dataview',
 				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
 			},
 			{
@@ -888,12 +888,12 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			},
 			{
 				alias: 'Shared Alias',
-				source: 'inline',
+				source: 'dataview',
 				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
 			},
 			{
 				alias: 'White Wizard',
-				source: 'inline',
+				source: 'dataview',
 				origin: '[[Projects/Plan.md#^inner-block|Plan]]',
 			},
 		]);
@@ -910,7 +910,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 			{
 				property: 'Owner',
 				value: 'Bob',
-				source: 'inline',
+				source: 'dataview',
 				origin: '[[Projects/Plan.md#Clean Heading|Plan]]',
 			},
 		]);

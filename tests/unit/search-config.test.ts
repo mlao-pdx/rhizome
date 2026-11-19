@@ -114,6 +114,7 @@ function createFixtureDoc(): NormalizedDocument {
 				origin: '[[Projects/Active/Sprint-12.md#^decision-1|Sprint-12]]',
 			},
 		],
+		tasks: [],
 		propertyOccurrences: [],
 		propertyKeys: [],
 		properties: Object.create(null) as Record<string, unknown>,
@@ -205,6 +206,7 @@ describe('BUILT_IN_SCOPES & substringStringMatch', () => {
 			['embeds', ['embeds', 'embed']],
 			['blocks', ['blocks', 'block']],
 			['backlinks', ['backlinks', 'backlink']],
+			['tasks', ['tasks', 'task']],
 		];
 
 		for (const [canonicalName, aliases] of expectedAliases) {
@@ -391,9 +393,9 @@ describe('initEngineConfig', () => {
 	});
 
 	it('Conformance Test 12b: trims custom scope canonicalName, deduplicates lowercase aliases, and defensively clones/freezes', () => {
-		const mutableAliases = ['tasks', 'task', ' TASK '];
-		const customTaskScope: ScopeDefinition = {
-			canonicalName: ' Tasks ',
+		const mutableAliases = ['callouts', 'callout', ' CALLOUT '];
+		const customCalloutScope: ScopeDefinition = {
+			canonicalName: ' Callouts ',
 			aliases: mutableAliases,
 			extract: () => ['urgent'],
 			matchString: substringStringMatch,
@@ -403,7 +405,7 @@ describe('initEngineConfig', () => {
 			timeZone: 'UTC',
 			propertyTypes: {},
 			// Pass the same object reference twice to verify seenSourceDefs deduplication
-			customScopes: [customTaskScope, customTaskScope],
+			customScopes: [customCalloutScope, customCalloutScope],
 		});
 		expect(res.ok).toBe(true);
 		if (!res.ok) return;
@@ -411,18 +413,18 @@ describe('initEngineConfig', () => {
 		// Mutate caller's input array after initEngineConfig to verify defensive cloning
 		mutableAliases.push('mutated');
 
-		const byTask = res.config.getScope('task');
-		const byTasks = res.config.getScope('TASKS');
-		expect(byTask).toBeDefined();
-		expect(byTask).toBe(byTasks);
-		expect(byTask).not.toBe(customTaskScope);
-		expect(Object.isFrozen(byTask)).toBe(true);
-		expect(Object.isFrozen(byTask?.aliases)).toBe(true);
-		expect(byTask?.canonicalName).toBe('Tasks');
-		expect(byTask?.aliases).toEqual(['tasks', 'task']);
+		const byCallout = res.config.getScope('callout');
+		const byCallouts = res.config.getScope('CALLOUTS');
+		expect(byCallout).toBeDefined();
+		expect(byCallout).toBe(byCallouts);
+		expect(byCallout).not.toBe(customCalloutScope);
+		expect(Object.isFrozen(byCallout)).toBe(true);
+		expect(Object.isFrozen(byCallout?.aliases)).toBe(true);
+		expect(byCallout?.canonicalName).toBe('Callouts');
+		expect(byCallout?.aliases).toEqual(['callouts', 'callout']);
 		expect(res.config.getScope('mutated')).toBeUndefined();
-		expect(res.config.getAllScopeNames()).toContain('tasks');
-		expect(res.config.getAllScopeNames()).toContain('task');
+		expect(res.config.getAllScopeNames()).toContain('callouts');
+		expect(res.config.getAllScopeNames()).toContain('callout');
 	});
 
 	it('rejects invalid custom scope names, reserved boolean keywords, and built-in/custom scope collisions', () => {
@@ -506,8 +508,8 @@ describe('initEngineConfig', () => {
 			propertyTypes: { b: 'date', a: 'number' },
 			customScopes: [
 				{
-					canonicalName: 'tasks',
-					aliases: ['task'],
+					canonicalName: 'callouts',
+					aliases: ['callout'],
 					extract: () => [],
 					matchString: substringStringMatch,
 				},

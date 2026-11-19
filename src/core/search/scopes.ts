@@ -25,8 +25,8 @@ export function hierarchicalTagMatch(target: string, queryValue: string): boolea
 }
 
 /**
- * The 11 built-in per-note metadata scopes (`file`, `path`, `ext`, `tag`, `aliases`, `cssclasses`,
- * `headings`, `links`, `embeds`, `blocks`, `backlinks`). Backlinks are resolved link metadata
+ * The 12 built-in per-note metadata scopes (`file`, `path`, `ext`, `tag`, `aliases`, `cssclasses`,
+ * `headings`, `links`, `embeds`, `blocks`, `backlinks`, `tasks`). Backlinks are resolved link metadata
  * supplied per pass through `DocumentEvaluationContext` (or attached to the document in the
  * direct-normalize oracle path).
  */
@@ -119,6 +119,12 @@ export const BUILT_IN_SCOPES: readonly ScopeDefinition[] = Object.freeze(
 					const basename = name.toLowerCase().endsWith('.md') ? name.slice(0, -3) : name;
 					return [b.path, basename];
 				}),
+			matchString: substringStringMatch,
+		},
+		{
+			canonicalName: 'tasks',
+			aliases: Object.freeze(['tasks', 'task']),
+			extract: (doc: NormalizedDocument) => doc.tasks.map((t) => t.text),
 			matchString: substringStringMatch,
 		},
 	].map((s) => Object.freeze(s)),

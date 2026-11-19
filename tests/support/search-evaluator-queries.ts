@@ -87,6 +87,7 @@ export const scopeArb = fc.constantFrom(
 	'header',
 	'block',
 	'task',
+	'callout',
 );
 export const colonPropertyArb = fc.constantFrom('status', 'labels', 'topics');
 export const temporalLiteralArb = fc.constantFrom(

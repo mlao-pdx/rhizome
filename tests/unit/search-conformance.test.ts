@@ -227,8 +227,8 @@ describe('search conformance matrix', () => {
 		const custom = createStandardConfig({
 			customScopes: [
 				{
-					canonicalName: ' Tasks ',
-					aliases: ['tasks', 'task'],
+					canonicalName: ' Callouts ',
+					aliases: ['callouts', 'callout'],
 					extract: (doc) => doc.aliases,
 					matchString,
 				},
@@ -248,17 +248,17 @@ describe('search conformance matrix', () => {
 			{ frontmatter: { aliases: ['Urgent review'] } },
 			custom,
 		);
-		for (const query of ['task:urgent', 'task:/^urgent/i', 'task:"Urgent review"']) {
+		for (const query of ['callout:urgent', 'callout:/^urgent/i', 'callout:"Urgent review"']) {
 			matchString.mockClear();
 			const compiled = assertReports(query, [doc, urgent], [urgent], custom);
-			expect(compiled.ast).toMatchObject({ scope: 'Tasks' });
-			if (query === 'task:/^urgent/i') expect(matchString).not.toHaveBeenCalled();
+			expect(compiled.ast).toMatchObject({ scope: 'Callouts' });
+			if (query === 'callout:/^urgent/i') expect(matchString).not.toHaveBeenCalled();
 			else expect(matchString).toHaveBeenCalled();
 		}
 		expect(matchString).toHaveBeenCalledWith('Urgent review', 'Urgent review', true);
-		expect(custom.getScope('task')).toMatchObject({
-			canonicalName: 'Tasks',
-			aliases: ['tasks', 'task'],
+		expect(custom.getScope('callout')).toMatchObject({
+			canonicalName: 'Callouts',
+			aliases: ['callouts', 'callout'],
 		});
 	});
 
@@ -344,7 +344,7 @@ describe('search conformance matrix', () => {
 			rawKey: 'Sprint',
 			rawValue: '2026-10-01..2026-01-01',
 			expectedType: 'date',
-			source: 'inline',
+			source: 'dataview',
 			line: 14,
 			occurrenceIndex: 1,
 			valueIndex: 0,
@@ -359,7 +359,7 @@ describe('search conformance matrix', () => {
 			rawKey: 'due',
 			rawValue: '2026-01-01..@today',
 			expectedType: 'date',
-			source: 'inline',
+			source: 'dataview',
 			line: 15,
 			occurrenceIndex: 2,
 			valueIndex: 0,
@@ -444,8 +444,8 @@ describe('search conformance matrix', () => {
 		const custom = createStandardConfig({
 			customScopes: [
 				{
-					canonicalName: 'Tasks',
-					aliases: ['task'],
+					canonicalName: 'Callouts',
+					aliases: ['callout'],
 					extract: (doc) => doc.aliases,
 					matchString: substringStringMatch,
 				},
@@ -454,7 +454,7 @@ describe('search conformance matrix', () => {
 		const getScope = vi.fn(custom.getScope);
 		const instrumented = Object.freeze({ ...custom, getScope });
 		const query =
-			'file:/a/i AND task:/^urgent/i AND [status: /open/i] AND aliases:/u/i AND [due: = @today] AND [score: > 1] AND [done: = true]';
+			'file:/a/i AND callout:/^urgent/i AND [status: /open/i] AND aliases:/u/i AND [due: = @today] AND [score: > 1] AND [done: = true]';
 		const { prepared } = compile(query, instrumented);
 		const doc = makeDoc(
 			'A.md',

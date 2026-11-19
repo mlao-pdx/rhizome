@@ -219,8 +219,8 @@ describe('Step 3: Scope resolution & suggestions (ERROR_UNKNOWN_SCOPE)', () => {
 			propertyTypes: {},
 			customScopes: [
 				{
-					canonicalName: ' Tasks ',
-					aliases: ['tasks', 'task'],
+					canonicalName: ' Callouts ',
+					aliases: ['callouts', 'callout'],
 					extract: () => [],
 					matchString: substringStringMatch,
 				},
@@ -229,13 +229,13 @@ describe('Step 3: Scope resolution & suggestions (ERROR_UNKNOWN_SCOPE)', () => {
 		expect(customCfgRes.ok).toBe(true);
 		if (!customCfgRes.ok) return;
 
-		const r1 = compileQuery('task:urgent', customCfgRes.config, PINNED_REF_MS);
+		const r1 = compileQuery('callout:urgent', customCfgRes.config, PINNED_REF_MS);
 		expect(r1.executable).toBe(true);
-		expect((r1.ast as ScopedFilterNode).scope).toBe('Tasks');
+		expect((r1.ast as ScopedFilterNode).scope).toBe('Callouts');
 
-		const r2 = compileQuery('task:/^urgent/i', customCfgRes.config, PINNED_REF_MS);
+		const r2 = compileQuery('callout:/^urgent/i', customCfgRes.config, PINNED_REF_MS);
 		expect(r2.executable).toBe(true);
-		expect((r2.ast as ScopedFilterNode).scope).toBe('Tasks');
+		expect((r2.ast as ScopedFilterNode).scope).toBe('Callouts');
 	});
 });
 
@@ -833,6 +833,7 @@ describe('Step 6: PreparedQuery & AST deep freeze (Conformance Test 16c)', () =>
 			links: [],
 			embeds: [],
 			blocks: [],
+			tasks: [],
 			propertyOccurrences: [],
 			propertyKeys: ['bad_score'],
 			properties: Object.assign(Object.create(null) as Record<string, unknown>, {

@@ -202,6 +202,11 @@ export function refScopeFootnote(registry: FootnoteRegistry, canonicalScope: str
 				'scope-backlinks',
 				'**Backlinks Scope (`backlinks:` / `backlink:`)**: Searches the source notes that resolve links to this note, matching each source vault path and basename with case-insensitive substring matching by default. Link counts are returned in the payload but are not matched.',
 			);
+		case 'tasks':
+			return registry.ref(
+				'scope-tasks',
+				'**Tasks Scope (`tasks:` / `task:`)**: Searches task descriptions (`tasks[].text`) extracted from markdown task list items (`- [ ]`, `- [x]`, etc.) in the note body, with case-insensitive substring matching by default.',
+			);
 		default: {
 			const id = `scope-custom-${slugifyScopeName(canonicalScope)}`;
 			const code = formatInlineCode(`${canonicalScope}:`);

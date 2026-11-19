@@ -375,8 +375,8 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 			propertyTypes: {},
 			customScopes: [
 				{
-					canonicalName: 'tasks',
-					aliases: ['task', 'todo'],
+					canonicalName: 'callouts',
+					aliases: ['callout', 'todo'],
 					extract: () => [],
 					matchString: substringStringMatch,
 				},
@@ -398,7 +398,7 @@ describe('Grammar Disambiguation & Conformance Scenarios', () => {
 		expect(compiled.executable).toBe(true);
 		expect(compiled.ast).toMatchObject({
 			type: 'SCOPED_FILTER',
-			scope: 'tasks',
+			scope: 'callouts',
 			rawScope: 'todo',
 		});
 

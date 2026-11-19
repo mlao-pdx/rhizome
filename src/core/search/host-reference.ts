@@ -72,6 +72,8 @@ function lookupRootSegment(hostDoc: NormalizedDocument, segment: string): unknow
 			return hostDoc.embeds;
 		case 'blocks':
 			return hostDoc.blocks;
+		case 'tasks':
+			return hostDoc.tasks;
 		case 'properties':
 			return hostDoc.properties;
 		case 'propertylocations':

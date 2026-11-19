@@ -28,6 +28,7 @@ export function digestNormalizedDocument(doc: NormalizedDocument): string {
 		doc.links,
 		doc.embeds,
 		doc.blocks,
+		doc.tasks,
 		doc.propertyOccurrences,
 		doc.propertyKeys,
 		doc.properties,
