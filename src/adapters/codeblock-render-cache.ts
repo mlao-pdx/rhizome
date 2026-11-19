@@ -7,6 +7,95 @@ import type { VaultQueryResult } from './vault-query-runner';
 
 const MAX_CACHE_ENTRIES = 64;
 
+/**
+ * Checkpoint 1 threshold: minimum total matched records across a codeblock's extracted
+ * `{% query %}` blocks to display an initial `[!info]` standby callout before running
+ * LiquidJS Pass 2 (`renderParsedRhizomeTemplate`).
+ */
+export const LARGE_QUERY_RECORD_THRESHOLD = 12_000;
+
+/**
+ * Checkpoint 2 line threshold: minimum rendered Markdown line count (`1` + newline count)
+ * to display an initial `[!info]` standby callout before running `MarkdownRenderer.render`.
+ */
+export const LARGE_MARKDOWN_LINE_THRESHOLD = 3_000;
+
+/**
+ * Checkpoint 2 character threshold: minimum rendered Markdown character length to display
+ * an initial `[!info]` standby callout before running `MarkdownRenderer.render`.
+ */
+export const LARGE_MARKDOWN_CHAR_THRESHOLD = 250_000;
+
+const STANDBY_RECORD_COUNT_FORMATTER = new Intl.NumberFormat('en-US');
+
+/**
+ * Character and line counts for a rendered Markdown string produced by Pass 2.
+ */
+export interface MarkdownOutputMetrics {
+	readonly chars: number;
+	readonly lines: number;
+}
+
+/**
+ * Sums the matched record counts across all extracted user `{% query %}` blocks in `parsed`
+ * (excluding internal keys such as `◊host`).
+ */
+export function countExtractedQueryRecords(
+	parsed: ParsedRhizomeTemplate,
+	payload: VaultQueryResult,
+): number {
+	let total = 0;
+	for (const q of parsed.env.queries) {
+		const matches = payload[q.name];
+		if (Array.isArray(matches)) {
+			total += matches.length;
+		}
+	}
+	return total;
+}
+
+/**
+ * Computes the character length and 1-based line count (`0` when empty) of `markdown`
+ * in a single allocation-free pass.
+ */
+export function measureMarkdownOutput(markdown: string): MarkdownOutputMetrics {
+	const chars = markdown.length;
+	if (chars === 0) {
+		return { chars: 0, lines: 0 };
+	}
+	let lines = 1;
+	for (let i = 0; i < chars; i++) {
+		if (markdown.charCodeAt(i) === 10) {
+			lines++;
+		}
+	}
+	return { chars, lines };
+}
+
+/**
+ * Returns `true` when `metrics` reaches or exceeds Checkpoint 2 (`LARGE_MARKDOWN_LINE_THRESHOLD`
+ * or `LARGE_MARKDOWN_CHAR_THRESHOLD`).
+ */
+export function exceedsLargeMarkdownThreshold(metrics: MarkdownOutputMetrics): boolean {
+	return (
+		metrics.lines >= LARGE_MARKDOWN_LINE_THRESHOLD ||
+		metrics.chars >= LARGE_MARKDOWN_CHAR_THRESHOLD
+	);
+}
+
+/**
+ * Formats the `[!info]` standby Markdown callout displayed while a large template result set
+ * or Markdown output is rendering.
+ */
+export function formatLargeRenderStandbyCallout(totalRecords: number): string {
+	const clamped = Number.isFinite(totalRecords) ? Math.max(0, Math.trunc(totalRecords)) : 0;
+	const formattedCount = STANDBY_RECORD_COUNT_FORMATTER.format(clamped);
+	return [
+		'> [!info]',
+		`> The template needs to render across a large result set (~${formattedCount} records).<br>Please stand-by.`,
+	].join('\n');
+}
+
 interface CachedPass1Entry {
 	readonly templateRevision: number;
 	readonly folderKey: string;

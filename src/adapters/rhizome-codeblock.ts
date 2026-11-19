@@ -17,11 +17,29 @@ import {
 } from '@core/templates';
 import type RhizomePlugin from '../main';
 import { hashVaultQueryResult } from './active-query-roster';
-import { allExtractedQueriesExecutable } from './codeblock-render-cache';
+import {
+	allExtractedQueriesExecutable,
+	countExtractedQueryRecords,
+	exceedsLargeMarkdownThreshold,
+	formatLargeRenderStandbyCallout,
+	LARGE_MARKDOWN_CHAR_THRESHOLD,
+	LARGE_MARKDOWN_LINE_THRESHOLD,
+	LARGE_QUERY_RECORD_THRESHOLD,
+	measureMarkdownOutput,
+} from './codeblock-render-cache';
 import { markSensitive } from './logger-format';
 import { resolveDefaultTimeZone, type VaultQueryResult } from './vault-query-runner';
 
-export { resolveCodeBlockHeadingLevel };
+export {
+	countExtractedQueryRecords,
+	exceedsLargeMarkdownThreshold,
+	formatLargeRenderStandbyCallout,
+	LARGE_MARKDOWN_CHAR_THRESHOLD,
+	LARGE_MARKDOWN_LINE_THRESHOLD,
+	LARGE_QUERY_RECORD_THRESHOLD,
+	measureMarkdownOutput,
+	resolveCodeBlockHeadingLevel,
+};
 
 function lookupHostHeadingLevel(
 	plugin: RhizomePlugin,
@@ -108,13 +126,24 @@ async function readVaultTemplateNote(
 	}
 }
 
+interface CodeBlockRenderTelemetry {
+	readonly parseMs: number;
+	readonly liquidMs: number;
+	readonly markdownRenderMs: number;
+	readonly records: number;
+	readonly outputChars: number;
+	readonly outputLines: number;
+	readonly standbyShown?: boolean | undefined;
+	readonly cacheHit?: 'remount' | 'payload' | undefined;
+}
+
 function logCodeBlockRenderResult(
 	plugin: RhizomePlugin,
 	sourcePath: string,
 	result: TemplateRenderResult,
-	durationMs: number,
-	cacheHit?: 'remount' | 'payload',
+	telemetry: CodeBlockRenderTelemetry,
 ): void {
+	const durationMs = telemetry.parseMs + telemetry.liquidMs + telemetry.markdownRenderMs;
 	if (!result.ok) {
 		const isRenderError = result.diagnostics.some((d) => d.code === 'TEMPLATE_RENDER_ERROR');
 		plugin.loggerAdapter?.log(
@@ -126,6 +155,13 @@ function logCodeBlockRenderResult(
 				count: result.diagnostics.length,
 				queryCount: result.queries.length,
 				codes: result.diagnostics.map((d) => d.code),
+				parseMs: telemetry.parseMs,
+				liquidMs: telemetry.liquidMs,
+				markdownRenderMs: telemetry.markdownRenderMs,
+				records: telemetry.records,
+				outputChars: telemetry.outputChars,
+				outputLines: telemetry.outputLines,
+				...(telemetry.standbyShown ? { standbyShown: true } : {}),
 			},
 		);
 	} else {
@@ -136,10 +172,80 @@ function logCodeBlockRenderResult(
 				source: 'template.render',
 				durationMs,
 				count: result.queries.length,
-				...(cacheHit !== undefined ? { cached: true, cacheHit } : {}),
+				parseMs: telemetry.parseMs,
+				liquidMs: telemetry.liquidMs,
+				markdownRenderMs: telemetry.markdownRenderMs,
+				records: telemetry.records,
+				outputChars: telemetry.outputChars,
+				outputLines: telemetry.outputLines,
+				...(telemetry.standbyShown ? { standbyShown: true } : {}),
+				...(telemetry.cacheHit !== undefined
+					? { cached: true, cacheHit: telemetry.cacheHit }
+					: {}),
 			},
 		);
 	}
+}
+
+const PAINT_YIELD_FALLBACK_MS = 32;
+
+/**
+ * Yields to the browser rendering pipeline (`requestAnimationFrame` followed by a macrotask,
+ * bounded by a `32 ms` fallback timer when the window is occluded or minimized) so a standby
+ * callout mounted into `el` is composited and painted before heavy synchronous template or
+ * DOM work blocks the main thread. Resolves early if either signal aborts.
+ */
+function yieldForBrowserPaint(outerSignal: AbortSignal, cycleSignal: AbortSignal): Promise<void> {
+	if (outerSignal.aborted || cycleSignal.aborted) {
+		return Promise.resolve();
+	}
+	return new Promise<void>((resolve) => {
+		let settled = false;
+		let timeoutId: number | null = null;
+		let fallbackTimeoutId: number | null = null;
+		let rafId: number | null = null;
+
+		const finish = (): void => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			if (rafId !== null && typeof window.cancelAnimationFrame === 'function') {
+				window.cancelAnimationFrame(rafId);
+				rafId = null;
+			}
+			if (timeoutId !== null) {
+				window.clearTimeout(timeoutId);
+				timeoutId = null;
+			}
+			if (fallbackTimeoutId !== null) {
+				window.clearTimeout(fallbackTimeoutId);
+				fallbackTimeoutId = null;
+			}
+			outerSignal.removeEventListener('abort', finish);
+			cycleSignal.removeEventListener('abort', finish);
+			resolve();
+		};
+
+		outerSignal.addEventListener('abort', finish, { once: true });
+		cycleSignal.addEventListener('abort', finish, { once: true });
+
+		const scheduleMacrotask = (): void => {
+			rafId = null;
+			if (settled || outerSignal.aborted || cycleSignal.aborted) {
+				finish();
+				return;
+			}
+			timeoutId = window.setTimeout(finish, 0);
+		};
+
+		if (typeof window.requestAnimationFrame === 'function') {
+			rafId = window.requestAnimationFrame(scheduleMacrotask);
+			fallbackTimeoutId = window.setTimeout(finish, PAINT_YIELD_FALLBACK_MS);
+		} else {
+			scheduleMacrotask();
+		}
+	});
 }
 
 /**
@@ -172,18 +278,19 @@ export async function processRhizomeCodeBlock(
 	});
 
 	let activeRenderChild: MarkdownRenderChild | null = null;
+	let hasCommittedRender = false;
 	let renderGeneration = 0;
 	const renderIntoContainer = async (
 		markdown: string,
 		generation: number,
 		cycleSignal: AbortSignal,
-	): Promise<void> => {
+	): Promise<number | null> => {
 		if (
 			outerAbortController.signal.aborted ||
 			cycleSignal.aborted ||
 			generation !== renderGeneration
 		) {
-			return;
+			return null;
 		}
 		if (activeRenderChild !== null) {
 			outerChild.removeChild(activeRenderChild);
@@ -195,7 +302,86 @@ export async function processRhizomeCodeBlock(
 		const renderChild = new MarkdownRenderChild(el);
 		activeRenderChild = renderChild;
 		outerChild.addChild(renderChild);
+		const markdownStartedAt = Date.now();
 		await MarkdownRenderer.render(plugin.app, markdown, el, currentSourcePath, renderChild);
+		const markdownRenderMs = Math.max(0, Date.now() - markdownStartedAt);
+		if (
+			outerAbortController.signal.aborted ||
+			cycleSignal.aborted ||
+			generation !== renderGeneration
+		) {
+			return null;
+		}
+		return markdownRenderMs;
+	};
+
+	const showStandbyCalloutAndYield = async (
+		totalRecords: number,
+		generation: number,
+		cycleSignal: AbortSignal,
+	): Promise<boolean> => {
+		const standbyMarkdown = formatLargeRenderStandbyCallout(totalRecords);
+		const rendered = await renderIntoContainer(standbyMarkdown, generation, cycleSignal);
+		if (rendered === null) {
+			return false;
+		}
+		await yieldForBrowserPaint(outerAbortController.signal, cycleSignal);
+		return (
+			!outerAbortController.signal.aborted &&
+			!cycleSignal.aborted &&
+			generation === renderGeneration
+		);
+	};
+
+	const commitCycleRender = async (
+		result: TemplateRenderResult,
+		options: {
+			readonly generation: number;
+			readonly cycleSignal: AbortSignal;
+			readonly totalRecords: number;
+			readonly parseMs: number;
+			readonly liquidMs: number;
+			readonly standbyAlreadyShown?: boolean | undefined;
+			readonly cacheHit?: 'remount' | 'payload' | undefined;
+		},
+	): Promise<void> => {
+		const outputMetrics = measureMarkdownOutput(result.markdown);
+		let standbyShown = options.standbyAlreadyShown === true;
+		if (
+			!hasCommittedRender &&
+			!standbyShown &&
+			result.ok &&
+			exceedsLargeMarkdownThreshold(outputMetrics)
+		) {
+			const ok = await showStandbyCalloutAndYield(
+				options.totalRecords,
+				options.generation,
+				options.cycleSignal,
+			);
+			if (!ok) {
+				return;
+			}
+			standbyShown = true;
+		}
+		const markdownRenderMs = await renderIntoContainer(
+			result.markdown,
+			options.generation,
+			options.cycleSignal,
+		);
+		if (markdownRenderMs === null) {
+			return;
+		}
+		hasCommittedRender = true;
+		logCodeBlockRenderResult(plugin, currentSourcePath, result, {
+			parseMs: options.parseMs,
+			liquidMs: options.liquidMs,
+			markdownRenderMs,
+			records: options.totalRecords,
+			outputChars: outputMetrics.chars,
+			outputLines: outputMetrics.lines,
+			standbyShown,
+			cacheHit: options.cacheHit,
+		});
 	};
 
 	const runCycle = async (): Promise<void> => {
@@ -299,9 +485,25 @@ export async function processRhizomeCodeBlock(
 			) {
 				return;
 			}
-			const durationMs = parseDurationMs + Math.max(0, Date.now() - renderStartedAt);
-			logCodeBlockRenderResult(plugin, currentSourcePath, errorResult, durationMs);
-			await renderIntoContainer(errorResult.markdown, generation, cycleSignal);
+			const liquidMs = Math.max(0, Date.now() - renderStartedAt);
+			const outputMetrics = measureMarkdownOutput(errorResult.markdown);
+			const markdownRenderMs = await renderIntoContainer(
+				errorResult.markdown,
+				generation,
+				cycleSignal,
+			);
+			if (markdownRenderMs === null) {
+				return;
+			}
+			hasCommittedRender = true;
+			logCodeBlockRenderResult(plugin, currentSourcePath, errorResult, {
+				parseMs: parseDurationMs,
+				liquidMs,
+				markdownRenderMs,
+				records: 0,
+				outputChars: outputMetrics.chars,
+				outputLines: outputMetrics.lines,
+			});
 			return;
 		}
 
@@ -367,9 +569,26 @@ export async function processRhizomeCodeBlock(
 					updatedResult,
 				);
 			}
-			const updateDurationMs = Math.max(0, Date.now() - updateStartedAt);
-			logCodeBlockRenderResult(plugin, currentSourcePath, updatedResult, updateDurationMs);
-			await renderIntoContainer(updatedResult.markdown, generation, cycleSignal);
+			const liquidMs = Math.max(0, Date.now() - updateStartedAt);
+			const totalRecords = countExtractedQueryRecords(parsed, newPayload);
+			const outputMetrics = measureMarkdownOutput(updatedResult.markdown);
+			const markdownRenderMs = await renderIntoContainer(
+				updatedResult.markdown,
+				generation,
+				cycleSignal,
+			);
+			if (markdownRenderMs === null) {
+				return;
+			}
+			hasCommittedRender = true;
+			logCodeBlockRenderResult(plugin, currentSourcePath, updatedResult, {
+				parseMs: 0,
+				liquidMs,
+				markdownRenderMs,
+				records: totalRecords,
+				outputChars: outputMetrics.chars,
+				outputLines: outputMetrics.lines,
+			});
 		};
 
 		const initialGeneration = ++renderGeneration;
@@ -414,15 +633,15 @@ export async function processRhizomeCodeBlock(
 				remountHit.payload,
 				hasQueries || currentSourcePath.length > 0 ? onUpdate : undefined,
 			);
-			const durationMs = Math.max(0, Date.now() - parseStartedAt);
-			logCodeBlockRenderResult(
-				plugin,
-				currentSourcePath,
-				remountHit.result,
-				durationMs,
-				'remount',
-			);
-			await renderIntoContainer(remountHit.result.markdown, initialGeneration, cycleSignal);
+			const totalRecords = countExtractedQueryRecords(parsed, remountHit.payload);
+			await commitCycleRender(remountHit.result, {
+				generation: initialGeneration,
+				cycleSignal,
+				totalRecords,
+				parseMs: parseDurationMs,
+				liquidMs: 0,
+				cacheHit: 'remount',
+			});
 			return;
 		}
 
@@ -448,6 +667,7 @@ export async function processRhizomeCodeBlock(
 			return;
 		}
 
+		const totalRecords = countExtractedQueryRecords(parsed, initialPayload);
 		const runtimeCtx = buildRuntimeContext(plugin, referenceTimeMs, currentSourcePath, ctx, el);
 		const currentHeadingLevel = runtimeCtx.headingLevel ?? 0;
 		const currentTemplateRev = plugin.activeQueryRoster?.templateRevision ?? 0;
@@ -479,15 +699,28 @@ export async function processRhizomeCodeBlock(
 				initialPayload,
 				cachedByPayload,
 			);
-			logCodeBlockRenderResult(
-				plugin,
-				currentSourcePath,
-				cachedByPayload,
-				parseDurationMs,
-				'payload',
-			);
-			await renderIntoContainer(cachedByPayload.markdown, initialGeneration, cycleSignal);
+			await commitCycleRender(cachedByPayload, {
+				generation: initialGeneration,
+				cycleSignal,
+				totalRecords,
+				parseMs: parseDurationMs,
+				liquidMs: 0,
+				cacheHit: 'payload',
+			});
 			return;
+		}
+
+		let standbyShown = false;
+		if (!hasCommittedRender && totalRecords >= LARGE_QUERY_RECORD_THRESHOLD) {
+			const ok = await showStandbyCalloutAndYield(
+				totalRecords,
+				initialGeneration,
+				cycleSignal,
+			);
+			if (!ok) {
+				return;
+			}
+			standbyShown = true;
 		}
 
 		const renderStartedAt = Date.now();
@@ -503,6 +736,7 @@ export async function processRhizomeCodeBlock(
 				}),
 			runtimeCtx,
 		);
+		const liquidMs = Math.max(0, Date.now() - renderStartedAt);
 		if (
 			outerAbortController.signal.aborted ||
 			cycleSignal.aborted ||
@@ -525,9 +759,14 @@ export async function processRhizomeCodeBlock(
 			);
 		}
 
-		const durationMs = parseDurationMs + Math.max(0, Date.now() - renderStartedAt);
-		logCodeBlockRenderResult(plugin, currentSourcePath, initialResult, durationMs);
-		await renderIntoContainer(initialResult.markdown, initialGeneration, cycleSignal);
+		await commitCycleRender(initialResult, {
+			generation: initialGeneration,
+			cycleSignal,
+			totalRecords,
+			parseMs: parseDurationMs,
+			liquidMs,
+			standbyAlreadyShown: standbyShown,
+		});
 	};
 
 	await runCycle();

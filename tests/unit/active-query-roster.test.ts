@@ -9,7 +9,16 @@ import {
 	hashVaultQueryResult,
 } from '../../src/adapters/active-query-roster';
 import type { BacklinkIndex, BacklinkSnapshot } from '../../src/adapters/backlink-index';
-import { processRhizomeCodeBlock } from '../../src/adapters/rhizome-codeblock';
+import {
+	countExtractedQueryRecords,
+	exceedsLargeMarkdownThreshold,
+	formatLargeRenderStandbyCallout,
+	LARGE_MARKDOWN_CHAR_THRESHOLD,
+	LARGE_MARKDOWN_LINE_THRESHOLD,
+	LARGE_QUERY_RECORD_THRESHOLD,
+	measureMarkdownOutput,
+	processRhizomeCodeBlock,
+} from '../../src/adapters/rhizome-codeblock';
 import { runVaultQuery, type VaultQueryResult } from '../../src/adapters/vault-query-runner';
 import {
 	parsedTemplateReferencesHost,
@@ -1433,6 +1442,212 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(pass1A).toBeDefined();
 		expect(pass1B).toBeDefined();
 		expect(pass1A?.parsed).not.toBe(pass1B?.parsed);
+
+		for (const c of children) c.unload();
+		renderSpy.mockRestore();
+	});
+
+	it('exposes calibrated large-render thresholds and measures output/record counts accurately', () => {
+		expect(LARGE_QUERY_RECORD_THRESHOLD).toBe(12_000);
+		expect(LARGE_MARKDOWN_LINE_THRESHOLD).toBe(3_000);
+		expect(LARGE_MARKDOWN_CHAR_THRESHOLD).toBe(250_000);
+
+		const parsed = parseRhizomeTemplatePass1(
+			'{% query alpha %}#a{% endquery %}{% query beta %}#b{% endquery %}',
+		);
+		const fakePayload = {
+			alpha: new Array(7_500).fill({}),
+			beta: new Array(4_500).fill({}),
+			'◊host': [{}],
+		} as unknown as VaultQueryResult;
+		expect(countExtractedQueryRecords(parsed, fakePayload)).toBe(12_000);
+
+		expect(measureMarkdownOutput('')).toEqual({ chars: 0, lines: 0 });
+		expect(measureMarkdownOutput('single line')).toEqual({ chars: 11, lines: 1 });
+		expect(measureMarkdownOutput('a\nb\nc')).toEqual({ chars: 5, lines: 3 });
+
+		expect(exceedsLargeMarkdownThreshold({ chars: 100, lines: 2_999 })).toBe(false);
+		expect(exceedsLargeMarkdownThreshold({ chars: 100, lines: 3_000 })).toBe(true);
+		expect(exceedsLargeMarkdownThreshold({ chars: 249_999, lines: 10 })).toBe(false);
+		expect(exceedsLargeMarkdownThreshold({ chars: 250_000, lines: 10 })).toBe(true);
+
+		expect(formatLargeRenderStandbyCallout(19_951)).toBe(
+			'> [!info]\n> The template needs to render across a large result set (~19,951 records).<br>Please stand-by.',
+		);
+	});
+
+	it('renders an initial [!info] standby callout at Checkpoint 1 (>= 12,000 records) without double-yielding at Checkpoint 2 and logs full render telemetry', async () => {
+		const harness = createMutableVaultApp([
+			{ path: 'notes/alpha.md', cache: {} },
+			{ path: 'README.md', cache: {} },
+		]);
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		const seed = await runVaultQuery(harness.app, { q: '' }, { timeZone: 'UTC' });
+		const baseMatch = seed['q']![0]!;
+		const hostMatch = seed['q']![1]!;
+		const largeMatches = new Array<typeof baseMatch>(12_500).fill(baseMatch);
+		vi.spyOn(plugin, 'query').mockResolvedValue({
+			myQuery: largeMatches,
+			'◊host': [hostMatch],
+		});
+
+		const renderedMarkdowns: string[] = [];
+		const renderSpy = vi
+			.spyOn(MarkdownRenderer, 'render')
+			.mockImplementation(async (_app, markdown) => {
+				renderedMarkdowns.push(markdown);
+			});
+
+		const logCalls: Array<{ source: string; [key: string]: unknown }> = [];
+		vi.spyOn(plugin.loggerAdapter, 'log').mockImplementation((_level, _msg, meta) => {
+			logCalls.push(meta);
+		});
+
+		const el = { empty: () => {} } as unknown as HTMLElement;
+		const children: MarkdownRenderChild[] = [];
+		const ctx = {
+			sourcePath: 'README.md',
+			addChild: (c: MarkdownRenderChild) => children.push(c),
+		} as unknown as MarkdownPostProcessorContext;
+
+		// Produces 12,500 lines (exceeding both Checkpoint 1 and Checkpoint 2),
+		// but standby callout must only be rendered once before the final output.
+		const source = [
+			'{% query myQuery %}#daily{% endquery %}',
+			'{% for item in query.myQuery %}- {{ item.file.basename }}\n{% endfor %}',
+		].join('\n');
+
+		await processRhizomeCodeBlock(source, el, ctx, plugin);
+
+		expect(renderedMarkdowns).toHaveLength(2);
+		expect(renderedMarkdowns[0]).toBe(
+			'> [!info]\n> The template needs to render across a large result set (~12,500 records).<br>Please stand-by.',
+		);
+		expect(renderedMarkdowns[1]).toContain('- alpha\n');
+
+		const renderLogs = logCalls.filter((c) => c.source === 'template.render');
+		expect(renderLogs).toHaveLength(1);
+		expect(renderLogs[0]).toMatchObject({
+			source: 'template.render',
+			count: 1,
+			records: 12_500,
+			standbyShown: true,
+			outputLines: 12_502,
+		});
+		expect(typeof renderLogs[0]?.['parseMs']).toBe('number');
+		expect(typeof renderLogs[0]?.['liquidMs']).toBe('number');
+		expect(typeof renderLogs[0]?.['markdownRenderMs']).toBe('number');
+		expect(typeof renderLogs[0]?.['outputChars']).toBe('number');
+		expect(renderLogs[0]?.['durationMs']).toBe(
+			(renderLogs[0]?.['parseMs'] as number) +
+				(renderLogs[0]?.['liquidMs'] as number) +
+				(renderLogs[0]?.['markdownRenderMs'] as number),
+		);
+
+		// Remounting when the cached output is < 3,000 lines despite >= 12,000 records skips standby
+		const summarySource =
+			'{% query myQuery %}#daily{% endquery %}Count={{ query.myQuery.size }}';
+		renderedMarkdowns.length = 0;
+		const elSummary1 = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(summarySource, elSummary1, ctx, plugin);
+		// Initial mount hits Checkpoint 1 (>= 12,000 records)
+		expect(renderedMarkdowns).toHaveLength(2);
+		expect(renderedMarkdowns[1]).toBe('Count=12500');
+
+		children[1]?.unload();
+		renderedMarkdowns.length = 0;
+		const elSummaryRemount = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(summarySource, elSummaryRemount, ctx, plugin);
+		// Remount cache hit checks Checkpoint 2 (output size): 'Count=12500' is 1 line, so no standby flash!
+		expect(renderedMarkdowns).toEqual(['Count=12500']);
+
+		for (const c of children) c.unload();
+		renderSpy.mockRestore();
+	});
+
+	it('renders an initial [!info] standby callout at Checkpoint 2 (>= 3,000 lines or >= 250,000 chars) on initial mount and remount, and suppresses standby on reactive onUpdate', async () => {
+		const harness = createMutableVaultApp([
+			{ path: 'notes/alpha.md', cache: {} },
+			{ path: 'notes/beta.md', cache: {} },
+		]);
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		const seed = await runVaultQuery(harness.app, { q: '' }, { timeZone: 'UTC' });
+		const alphaMatch = seed['q']![0]!;
+		const betaMatch = seed['q']![1]!;
+
+		let capturedOnUpdate: ((payload: VaultQueryResult) => void | Promise<void>) | undefined;
+		const matches3500 = new Array<typeof alphaMatch>(3_500).fill(alphaMatch);
+		vi.spyOn(plugin, 'query').mockImplementation(async (_queries, _opts, onUpdate) => {
+			capturedOnUpdate = onUpdate;
+			return { tasks: matches3500 };
+		});
+
+		const renderedMarkdowns: string[] = [];
+		const renderSpy = vi
+			.spyOn(MarkdownRenderer, 'render')
+			.mockImplementation(async (_app, markdown) => {
+				renderedMarkdowns.push(markdown);
+			});
+
+		const logCalls: Array<{ source: string; [key: string]: unknown }> = [];
+		vi.spyOn(plugin.loggerAdapter, 'log').mockImplementation((_level, _msg, meta) => {
+			logCalls.push(meta);
+		});
+
+		const children: MarkdownRenderChild[] = [];
+		const ctx = {
+			sourcePath: 'dashboard.md',
+			addChild: (c: MarkdownRenderChild) => children.push(c),
+		} as unknown as MarkdownPostProcessorContext;
+
+		const source = [
+			'{% query tasks %}#task{% endquery %}',
+			'{% for item in query.tasks %}- {{ item.file.basename }}\n{% endfor %}',
+		].join('\n');
+
+		// 1. Initial mount: 3,500 records (< 12,000 Checkpoint 1), > 3,000 lines (>= 3,000 Checkpoint 2)
+		const el1 = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(source, el1, ctx, plugin);
+
+		expect(renderedMarkdowns).toHaveLength(2);
+		expect(renderedMarkdowns[0]).toBe(
+			'> [!info]\n> The template needs to render across a large result set (~3,500 records).<br>Please stand-by.',
+		);
+		expect(renderedMarkdowns[1]).toContain('- alpha\n');
+
+		// 2. Reactive onUpdate on the already-mounted codeblock does NOT flash the standby callout
+		renderedMarkdowns.length = 0;
+		const matches3501 = [...matches3500, betaMatch];
+		await capturedOnUpdate?.({ tasks: matches3501 });
+		expect(renderedMarkdowns).toHaveLength(1);
+		expect(renderedMarkdowns[0]).toContain('- beta');
+
+		// 3. Unmount and remount at the same stateRevision: remount hit triggers Checkpoint 2 standby callout
+		children[0]?.unload();
+		renderedMarkdowns.length = 0;
+		const elRemount = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(source, elRemount, ctx, plugin);
+
+		expect(renderedMarkdowns).toHaveLength(2);
+		expect(renderedMarkdowns[0]).toBe(
+			'> [!info]\n> The template needs to render across a large result set (~3,501 records).<br>Please stand-by.',
+		);
+		expect(renderedMarkdowns[1]).toContain('- beta');
+
+		const remountLog = logCalls
+			.filter((c) => c.source === 'template.render')
+			.find((c) => c['cacheHit'] === 'remount');
+		expect(remountLog).toMatchObject({
+			cached: true,
+			cacheHit: 'remount',
+			standbyShown: true,
+			records: 3_501,
+			outputLines: 3_503,
+		});
 
 		for (const c of children) c.unload();
 		renderSpy.mockRestore();
