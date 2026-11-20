@@ -1,4 +1,9 @@
 import { FORBIDDEN_KEYS } from '@core/search';
+import {
+	checkFilterOutputSize,
+	checkFilterRenderLimit,
+	FILTER_LIMIT_CHECK_STRIDE,
+} from './render-limits';
 import { isPlainRecord, type LiquidFilterThis } from './selector-evaluator';
 import { isVacuousSortOrGroupValue, readContextLanguage } from './sort-group-filters';
 import { TemporalDrop, unwrapLiquidValue } from './temporal-drop';
@@ -225,8 +230,11 @@ export function tableFilter(
 
 	if (Array.isArray(unwrapped)) {
 		rows = [];
-		for (const item of unwrapped) {
-			const uItem = unwrapLiquidValue(item);
+		for (let i = 0; i < unwrapped.length; i++) {
+			if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+				checkFilterRenderLimit(this);
+			}
+			const uItem = unwrapLiquidValue(unwrapped[i]);
 			if (isPlainRecord(uItem)) {
 				rows.push(uItem);
 			}
@@ -243,7 +251,11 @@ export function tableFilter(
 
 	const columns: string[] = [];
 	const seenColumns = new Set<string>();
-	for (const row of rows) {
+	for (let i = 0; i < rows.length; i++) {
+		if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(this);
+		}
+		const row = rows[i]!;
 		for (const key of Object.keys(row)) {
 			if (FORBIDDEN_KEYS.has(key) || seenColumns.has(key)) continue;
 			seenColumns.add(key);
@@ -265,9 +277,17 @@ export function tableFilter(
 		return ALIGNMENT_DIVIDERS[align];
 	});
 
-	const lines: string[] = [`| ${headerCells.join(' | ')} |`, `| ${dividerCells.join(' | ')} |`];
+	const headerLine = `| ${headerCells.join(' | ')} |`;
+	const dividerLine = `| ${dividerCells.join(' | ')} |`;
+	const lines: string[] = [headerLine, dividerLine];
+	let totalChars = 1 + headerLine.length + 1 + dividerLine.length + 1;
+	checkFilterOutputSize(totalChars);
 
-	for (const row of rows) {
+	for (let i = 0; i < rows.length; i++) {
+		if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(this);
+		}
+		const row = rows[i]!;
 		const rowCells = columns.map((col) => {
 			if (!Object.prototype.hasOwnProperty.call(row, col)) {
 				return '';
@@ -275,8 +295,13 @@ export function tableFilter(
 			const formatted = formatTableCellValue(row[col], language);
 			return escapeTableCell(formatted);
 		});
-		lines.push(`| ${rowCells.join(' | ')} |`);
+		const rowLine = `| ${rowCells.join(' | ')} |`;
+		totalChars += rowLine.length + 1;
+		checkFilterOutputSize(totalChars);
+		lines.push(rowLine);
 	}
 
-	return `\n${lines.join('\n')}\n`;
+	const rendered = `\n${lines.join('\n')}\n`;
+	checkFilterOutputSize(rendered.length);
+	return rendered;
 }

@@ -7,6 +7,7 @@ import {
 	groupByFilter,
 	isVacuousSortOrGroupValue,
 } from './group-by-filter';
+import { checkFilterRenderLimit, FILTER_LIMIT_CHECK_STRIDE } from './render-limits';
 import {
 	evaluateSelectorOnItem,
 	isPlainRecord,
@@ -442,6 +443,9 @@ function executeSort(
 			: [Object.freeze({ segments: Object.freeze([]), filterRaw: null, direction: 'asc' })];
 
 	const decorated = items.map((item, index) => {
+		if ((index & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(filterThis);
+		}
 		const classifiedKeys = selectors.map((sel) => {
 			const rawKey =
 				!sel.isNullLiteral && sel.segments.length === 0 && sel.filterRaw === null
@@ -452,7 +456,11 @@ function executeSort(
 		return { item, index, classifiedKeys };
 	});
 
+	let compareSteps = 0;
 	decorated.sort((a, b) => {
+		if ((++compareSteps & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(filterThis);
+		}
 		for (let s = 0; s < selectors.length; s++) {
 			const dir = selectors[s]!.direction;
 			const aKey = a.classifiedKeys[s] ?? null;

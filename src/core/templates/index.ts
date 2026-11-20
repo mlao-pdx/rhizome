@@ -6,6 +6,7 @@ export * from './moment-date-formatter';
 export * from './temporal-range-tokenizer';
 export * from './temporal-liquid-extensions';
 export * from './selector-evaluator';
+export * from './render-limits';
 export * from './payload-filters';
 export * from './aggregate-filter';
 export * from './group-by-filter';

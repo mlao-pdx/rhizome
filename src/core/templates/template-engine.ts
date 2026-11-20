@@ -3,6 +3,13 @@ import { Liquid, LiquidError, Tag, type Template, toPromise } from 'liquidjs';
 import { registerHeadingTag } from './heading-filter';
 import { registerPayloadLiquidFilters } from './payload-filters';
 import {
+	installBoundedTemplateRenderer,
+	TEMPLATE_MEMORY_LIMIT,
+	TEMPLATE_MEMORY_LIMIT_HINT,
+	TEMPLATE_RENDER_LIMIT_MS,
+	TEMPLATE_RENDER_TIME_LIMIT_HINT,
+} from './render-limits';
+import {
 	createQueryTagEnvironment,
 	maskQueryBlockBodies,
 	offsetRangeToSourceSpan,
@@ -82,6 +89,20 @@ export function extractLiquidErrorDiagnostic(
 				span = offsetRangeToSourceSpan(targetSource, tok.begin, end);
 			}
 		}
+	} else if (err instanceof Error) {
+		const customHint = (err as { hint?: unknown }).hint;
+		if (typeof customHint === 'string' && customHint.trim().length > 0) {
+			resolvedHint = customHint.trim();
+		}
+	}
+
+	const lowerMsg = rawMessage.toLowerCase();
+	if (lowerMsg.includes('template render limit exceeded')) {
+		rawMessage = 'Template render exceeded the 5,000 ms time limit';
+		resolvedHint = TEMPLATE_RENDER_TIME_LIMIT_HINT;
+	} else if (lowerMsg.includes('memory alloc limit exceeded')) {
+		rawMessage = 'Template render exceeded the 32 MB memory allocation limit';
+		resolvedHint = TEMPLATE_MEMORY_LIMIT_HINT;
 	}
 
 	const firstLine = (rawMessage.split(/\r\n|\r|\n/)[0] ?? 'Template error').trim();
@@ -169,8 +190,11 @@ function buildRhizomeLiquidInstance(
 		dynamicPartials: true,
 		relativeReference: false,
 		ownPropertyOnly: true,
+		renderLimit: TEMPLATE_RENDER_LIMIT_MS,
+		memoryLimit: TEMPLATE_MEMORY_LIMIT,
 		operators: createRhizomeLiquidOperators(),
 	});
+	installBoundedTemplateRenderer(liquid);
 	registerQueryTag(liquid, getBinding);
 	registerHeadingTag(liquid, getBinding);
 	registerTemporalLiquidExtensions(liquid);
@@ -211,6 +235,8 @@ const THIS_QUERY_REF_RE = /@this(?![a-zA-Z0-9_+-])/;
 const LIQUID_TAG_OR_OUTPUT_RE = /\{%-?([\s\S]*?)-?%\}|\{\{-?([\s\S]*?)-?\}\}/g;
 const LIQUID_QUOTED_STRING_RE = /"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'/g;
 const BARE_THIS_IDENTIFIER_RE = /(?<![a-zA-Z0-9_.-])\bthis\b(?![a-zA-Z0-9_-])/;
+const LOOP_TAG_RE =
+	/\{%-?\s*(?:for|tablerow)\b|\{%-?\s*render\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')\s+for\b/;
 
 function stripLiquidRawAndComments(source: string): string {
 	return maskQueryBlockBodies(source).replace(
@@ -250,6 +276,25 @@ export function parsedTemplateReferencesHost(
 	}
 	for (const fileSource of parsed.env.fileSources.values()) {
 		if (liquidSourceReferencesThis(fileSource)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * Checks whether the stripped root template or any of its referenced partial/layout files
+ * contains a Liquid loop tag (`{% for %}`, `{% tablerow %}`, or `{% render '...' for ... %}`).
+ */
+export function parsedTemplateHasLoopTag(
+	rawSource: string,
+	parsed: ParsedRhizomeTemplate,
+): boolean {
+	if (LOOP_TAG_RE.test(stripLiquidRawAndComments(rawSource))) {
+		return true;
+	}
+	for (const fileSource of parsed.env.fileSources.values()) {
+		if (LOOP_TAG_RE.test(stripLiquidRawAndComments(fileSource))) {
 			return true;
 		}
 	}
@@ -708,6 +753,8 @@ export async function renderParsedRhizomeTemplate(
 			const rootScope = buildRhizomeTemplateContext(safePayload, runtimeContext);
 			const renderedRaw: unknown = await parsed.liquid.render(templates, rootScope, {
 				globals: rootScope,
+				renderLimit: TEMPLATE_RENDER_LIMIT_MS,
+				memoryLimit: TEMPLATE_MEMORY_LIMIT,
 			});
 			const markdown = typeof renderedRaw === 'string' ? renderedRaw : '';
 

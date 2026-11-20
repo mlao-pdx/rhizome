@@ -1,4 +1,5 @@
 import { compareDateIntervals, type DateInterval } from '@core/search';
+import { checkFilterRenderLimit, FILTER_LIMIT_CHECK_STRIDE } from './render-limits';
 import {
 	evaluateSelectorOnItem,
 	type LiquidFilterThis,
@@ -199,7 +200,11 @@ function filterCollectionByWhere(
 	);
 
 	const out: unknown[] = [];
-	for (const item of items) {
+	for (let i = 0; i < items.length; i++) {
+		if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(filterThis);
+		}
+		const item = items[i];
 		const actualVal = evalCollectionItem(item, selector, filterThis);
 		if (matchesPreparedWhereTarget(actualVal, preparedTarget) === includeMatch) {
 			out.push(item);
@@ -233,6 +238,9 @@ function searchFirstInCollection(
 	);
 
 	for (let i = 0; i < items.length; i++) {
+		if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(filterThis);
+		}
 		const item = items[i];
 		const actualVal = evalCollectionItem(item, selector, filterThis);
 		if (matchesPreparedWhereTarget(actualVal, preparedTarget)) {
@@ -319,7 +327,12 @@ export function mapFilter(
 	const selector = resolveCollectionSelector(selectorArg);
 	if (!selector) return [];
 
-	return unwrapped.map((item) => evalCollectionItem(item, selector, this));
+	return unwrapped.map((item, i) => {
+		if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(this);
+		}
+		return evalCollectionItem(item, selector, this);
+	});
 }
 
 /**
@@ -333,6 +346,7 @@ export function uniqFilter(
 ): unknown[] {
 	const unwrapped = unwrapLiquidValue(input);
 	if (!Array.isArray(unwrapped)) return [];
+	const items: readonly unknown[] = unwrapped;
 
 	const ctx = this && typeof this === 'object' && 'context' in this ? this.context : undefined;
 	const { timeZone, referenceTimeMs } = readContextTemporalMeta(ctx);
@@ -342,7 +356,11 @@ export function uniqFilter(
 
 	const seen = new Set<string>();
 	const out: unknown[] = [];
-	for (const item of unwrapped) {
+	for (let i = 0; i < items.length; i++) {
+		if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(this);
+		}
+		const item = items[i];
 		const targetVal = selector
 			? evalCollectionItem(item, selector, this)
 			: unwrapLiquidValue(item);
@@ -384,7 +402,11 @@ export function sumFilter(
 		}
 	};
 
-	for (const item of items) {
+	for (let i = 0; i < items.length; i++) {
+		if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(this);
+		}
+		const item = items[i];
 		const val = selector ? evalCollectionItem(item, selector, this) : item;
 		addValue(val);
 	}

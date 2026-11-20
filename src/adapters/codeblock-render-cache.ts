@@ -3,6 +3,7 @@ import {
 	type TemplateFolderConfig,
 	type TemplateRenderResult,
 } from '@core/templates';
+import { SENTINEL_CHAR_THRESHOLD, SENTINEL_LINE_THRESHOLD } from './render-sentinel-store';
 import type { VaultQueryResult } from './vault-query-runner';
 
 const MAX_CACHE_ENTRIES = 64;
@@ -10,7 +11,7 @@ const MAX_CACHE_ENTRIES = 64;
 /**
  * Checkpoint 1 threshold: minimum total matched records across a codeblock's extracted
  * `{% query %}` blocks to display an initial `[!info]` standby callout before running
- * LiquidJS Pass 2 (`renderParsedRhizomeTemplate`).
+ * LiquidJS Pass 2 (`renderParsedRhizomeTemplate`) when the template contains a loop tag.
  */
 export const LARGE_QUERY_RECORD_THRESHOLD = 12_000;
 
@@ -18,15 +19,13 @@ export const LARGE_QUERY_RECORD_THRESHOLD = 12_000;
  * Checkpoint 2 line threshold: minimum rendered Markdown line count (`1` + newline count)
  * to display an initial `[!info]` standby callout before running `MarkdownRenderer.render`.
  */
-export const LARGE_MARKDOWN_LINE_THRESHOLD = 3_000;
+export const LARGE_MARKDOWN_LINE_THRESHOLD = 5_000;
 
 /**
  * Checkpoint 2 character threshold: minimum rendered Markdown character length to display
  * an initial `[!info]` standby callout before running `MarkdownRenderer.render`.
  */
-export const LARGE_MARKDOWN_CHAR_THRESHOLD = 250_000;
-
-const STANDBY_RECORD_COUNT_FORMATTER = new Intl.NumberFormat('en-US');
+export const LARGE_MARKDOWN_CHAR_THRESHOLD = 100_000;
 
 /**
  * Character and line counts for a rendered Markdown string produced by Pass 2.
@@ -84,16 +83,24 @@ export function exceedsLargeMarkdownThreshold(metrics: MarkdownOutputMetrics): b
 }
 
 /**
- * Formats the `[!info]` standby Markdown callout displayed while a large template result set
- * or Markdown output is rendering.
+ * Returns `true` when `metrics` crosses the write-ahead crash sentinel threshold
+ * (`SENTINEL_CHAR_THRESHOLD` `64 KiB` or `SENTINEL_LINE_THRESHOLD` `5,000` lines).
  */
-export function formatLargeRenderStandbyCallout(totalRecords: number): string {
-	const clamped = Number.isFinite(totalRecords) ? Math.max(0, Math.trunc(totalRecords)) : 0;
-	const formattedCount = STANDBY_RECORD_COUNT_FORMATTER.format(clamped);
-	return [
-		'> [!info]',
-		`> The template needs to render across a large result set (~${formattedCount} records).<br>Please stand-by.`,
-	].join('\n');
+export function exceedsSentinelThreshold(metrics: MarkdownOutputMetrics): boolean {
+	return metrics.chars >= SENTINEL_CHAR_THRESHOLD || metrics.lines >= SENTINEL_LINE_THRESHOLD;
+}
+
+/**
+ * Returns `true` when `result` is a Pass 2 runtime render failure (`TEMPLATE_RENDER_ERROR`,
+ * such as hitting the `5,000 ms` render deadline or `3.25 MiB` output cap) that is safe to
+ * cache across Live Preview remounts until vault state or templates change.
+ */
+export function isRuntimeRenderErrorResult(result: TemplateRenderResult): boolean {
+	return (
+		!result.ok &&
+		result.diagnostics.length > 0 &&
+		result.diagnostics.every((d) => d.code === 'TEMPLATE_RENDER_ERROR')
+	);
 }
 
 interface CachedPass1Entry {
@@ -101,6 +108,7 @@ interface CachedPass1Entry {
 	readonly folderKey: string;
 	readonly parsed: ParsedRhizomeTemplate;
 	readonly referencesHost: boolean;
+	readonly hasLoopTag?: boolean | undefined;
 }
 
 interface CachedRenderEntry {
@@ -145,6 +153,16 @@ export function allExtractedQueriesExecutable(
 	return true;
 }
 
+export interface InFlightCoalescedHandle<T> {
+	readonly promise: Promise<T>;
+	readonly isLeader: boolean;
+}
+
+interface InFlightSubscriptionEntry<T> {
+	promise: Promise<T>;
+	subscribers: number;
+}
+
 /**
  * Bounded per-plugin cache of Pass 1 parsed templates (`ParsedRhizomeTemplate`) and Pass 2
  * rendered outputs (`TemplateRenderResult` + last `VaultQueryResult` payload) so stepping a
@@ -163,14 +181,22 @@ export function allExtractedQueriesExecutable(
  */
 export class CodeBlockRenderCache {
 	private readonly pass1Cache = new Map<string, CachedPass1Entry>();
+	private readonly pass1InFlight = new Map<string, Promise<unknown>>();
 	private readonly renderCache = new Map<string, CachedRenderEntry>();
+	private readonly inFlight = new Map<string, InFlightSubscriptionEntry<unknown>>();
 
 	getPass1(
 		sourcePath: string,
 		source: string,
 		folders: TemplateFolderConfig,
 		templateRevision: number,
-	): { readonly parsed: ParsedRhizomeTemplate; readonly referencesHost: boolean } | undefined {
+	):
+		| {
+				readonly parsed: ParsedRhizomeTemplate;
+				readonly referencesHost: boolean;
+				readonly hasLoopTag?: boolean | undefined;
+		  }
+		| undefined {
 		const folderKey = buildFolderKey(folders);
 		const key = `${sourcePath}\0${source}`;
 		const hit = this.pass1Cache.get(key);
@@ -179,7 +205,11 @@ export class CodeBlockRenderCache {
 			hit.templateRevision === templateRevision &&
 			hit.folderKey === folderKey
 		) {
-			return { parsed: hit.parsed, referencesHost: hit.referencesHost };
+			return {
+				parsed: hit.parsed,
+				referencesHost: hit.referencesHost,
+				hasLoopTag: hit.hasLoopTag,
+			};
 		}
 		return undefined;
 	}
@@ -191,6 +221,7 @@ export class CodeBlockRenderCache {
 		templateRevision: number,
 		parsed: ParsedRhizomeTemplate,
 		referencesHost: boolean,
+		hasLoopTag?: boolean,
 	): void {
 		const key = `${sourcePath}\0${source}`;
 		setBounded(this.pass1Cache, key, {
@@ -198,7 +229,30 @@ export class CodeBlockRenderCache {
 			folderKey: buildFolderKey(folders),
 			parsed,
 			referencesHost,
+			hasLoopTag,
 		});
+	}
+
+	getOrRunPass1<T>(
+		sourcePath: string,
+		source: string,
+		folders: TemplateFolderConfig,
+		templateRevision: number,
+		factory: () => Promise<T>,
+	): Promise<T> {
+		const folderKey = buildFolderKey(folders);
+		const key = `${sourcePath}\0${templateRevision}\0${folderKey}\0${source}`;
+		const existing = this.pass1InFlight.get(key) as Promise<T> | undefined;
+		if (existing !== undefined) {
+			return existing;
+		}
+		const runPromise = factory().finally(() => {
+			if (this.pass1InFlight.get(key) === runPromise) {
+				this.pass1InFlight.delete(key);
+			}
+		});
+		this.pass1InFlight.set(key, runPromise);
+		return runPromise;
 	}
 
 	/**
@@ -305,6 +359,64 @@ export class CodeBlockRenderCache {
 		}
 	}
 
+	/**
+	 * Coalesces concurrent identical initial renders (such as Editor + Minimap or split panes
+	 * mounting the same codeblock simultaneously) so `factory` executes query + LiquidJS Pass 2
+	 * once while tracking active subscribers so `factory` can skip Pass 2 if every awaiting
+	 * mount aborts mid-flight.
+	 */
+	getOrRunInFlight<T>(
+		params: {
+			readonly sourcePath: string;
+			readonly source: string;
+			readonly headingLevel: number;
+			readonly folders: TemplateFolderConfig;
+			readonly templateRevision: number;
+			readonly stateRevision: number;
+		},
+		callerSignal: AbortSignal,
+		factory: (hasLiveSubscribers: () => boolean) => Promise<T>,
+	): InFlightCoalescedHandle<T> {
+		if (callerSignal.aborted) {
+			return { promise: factory(() => false), isLeader: true };
+		}
+		const folderKey = buildFolderKey(params.folders);
+		const key = `${params.sourcePath}\0${params.headingLevel}\0${params.templateRevision}\0${params.stateRevision}\0${folderKey}\0${params.source}`;
+
+		let entry = this.inFlight.get(key) as InFlightSubscriptionEntry<T> | undefined;
+		const isLeader = entry === undefined;
+		if (!entry) {
+			const created: InFlightSubscriptionEntry<T> = {
+				promise: Promise.resolve() as unknown as Promise<T>,
+				subscribers: 1,
+			};
+			entry = created;
+			this.inFlight.set(key, created);
+			created.promise = factory(() => created.subscribers > 0).finally(() => {
+				if (this.inFlight.get(key) === created) {
+					this.inFlight.delete(key);
+				}
+			});
+		} else {
+			entry.subscribers += 1;
+		}
+
+		const target = entry;
+		let released = false;
+		const release = (): void => {
+			if (released) return;
+			released = true;
+			target.subscribers -= 1;
+		};
+		callerSignal.addEventListener('abort', release, { once: true });
+		const trackedPromise = target.promise.finally(() => {
+			callerSignal.removeEventListener('abort', release);
+			release();
+		});
+
+		return { promise: trackedPromise, isLeader };
+	}
+
 	deleteForSourcePath(sourcePath: string): void {
 		const prefix = `${sourcePath}\0`;
 		for (const key of this.pass1Cache.keys()) {
@@ -312,15 +424,27 @@ export class CodeBlockRenderCache {
 				this.pass1Cache.delete(key);
 			}
 		}
+		for (const key of this.pass1InFlight.keys()) {
+			if (key.startsWith(prefix)) {
+				this.pass1InFlight.delete(key);
+			}
+		}
 		for (const key of this.renderCache.keys()) {
 			if (key.startsWith(prefix)) {
 				this.renderCache.delete(key);
+			}
+		}
+		for (const key of this.inFlight.keys()) {
+			if (key.startsWith(prefix)) {
+				this.inFlight.delete(key);
 			}
 		}
 	}
 
 	clear(): void {
 		this.pass1Cache.clear();
+		this.pass1InFlight.clear();
 		this.renderCache.clear();
+		this.inFlight.clear();
 	}
 }

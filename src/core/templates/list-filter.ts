@@ -1,6 +1,11 @@
 import { FORBIDDEN_KEYS } from '@core/search';
 import type { GroupByBucket } from './group-by-filter';
 import {
+	checkFilterOutputSize,
+	checkFilterRenderLimit,
+	FILTER_LIMIT_CHECK_STRIDE,
+} from './render-limits';
+import {
 	isPlainRecord,
 	type LiquidFilterThis,
 	type ParsedPathSelector,
@@ -187,19 +192,30 @@ export function sentenceFilter(
 		return '';
 	}
 
-	const rawItems = Array.isArray(unwrapped) ? unwrapped : [unwrapped];
+	const rawItems: readonly unknown[] = Array.isArray(unwrapped) ? unwrapped : [unwrapped];
 	const renderedItems: string[] = [];
+	let approxChars = 0;
 
-	for (const rawEl of rawItems) {
+	for (let i = 0; i < rawItems.length; i++) {
+		if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(this);
+		}
+		const rawEl = rawItems[i];
 		if (isVacuousSortOrGroupValue(rawEl)) continue;
 		const el = unwrapLiquidValue(rawEl);
 		const scalar = formatTableScalar(el);
+		let pushed: string | null = null;
 		if (scalar !== null) {
-			renderedItems.push(scalar);
+			pushed = scalar;
 		} else if (isPlainRecord(el)) {
-			renderedItems.push(formatEllipsizedObject(el));
+			pushed = formatEllipsizedObject(el);
 		} else if (Array.isArray(el)) {
-			renderedItems.push('{...}');
+			pushed = '{...}';
+		}
+		if (pushed !== null) {
+			approxChars += pushed.length + (renderedItems.length > 0 ? 2 : 0);
+			checkFilterOutputSize(approxChars);
+			renderedItems.push(pushed);
 		}
 	}
 
@@ -212,17 +228,25 @@ export function sentenceFilter(
 		const connStr =
 			typeof uConnector === 'string' ? uConnector : (formatTableScalar(uConnector) ?? '');
 		if (renderedItems.length === 1) {
-			return renderedItems[0]!;
+			const single = renderedItems[0]!;
+			checkFilterOutputSize(single.length);
+			return single;
 		}
 		if (renderedItems.length === 2) {
-			return `${renderedItems[0]!} ${connStr} ${renderedItems[1]!}`;
+			const pair = `${renderedItems[0]!} ${connStr} ${renderedItems[1]!}`;
+			checkFilterOutputSize(pair.length);
+			return pair;
 		}
-		return `${renderedItems.slice(0, -1).join(', ')}, ${connStr} ${renderedItems[renderedItems.length - 1]!}`;
+		const multi = `${renderedItems.slice(0, -1).join(', ')}, ${connStr} ${renderedItems[renderedItems.length - 1]!}`;
+		checkFilterOutputSize(multi.length);
+		return multi;
 	}
 
 	const ctx = this && typeof this === 'object' && 'context' in this ? this.context : undefined;
 	const language = readContextLanguage(ctx);
-	return getConjunctionListFormatter(language).format(renderedItems);
+	const formatted = getConjunctionListFormatter(language).format(renderedItems);
+	checkFilterOutputSize(formatted.length);
+	return formatted;
 }
 
 /**
@@ -241,6 +265,37 @@ export interface ListRenderEnv {
 	readonly selectors: readonly ParsedPathSelector[];
 	readonly filterThis: LiquidFilterThis | void;
 	readonly language: string;
+	readonly limitTracker?: {
+		steps: number;
+		chars: number;
+	};
+}
+
+/**
+ * Advances the shared step counter on `env` and checks `ctx.renderLimit` every `1,024` steps.
+ */
+export function recordListRenderStep(env: ListRenderEnv): void {
+	const tracker = env.limitTracker;
+	if (!tracker) {
+		return;
+	}
+	if ((++tracker.steps & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+		checkFilterRenderLimit(env.filterThis);
+	}
+}
+
+/**
+ * Adds emitted line characters (plus newline separator) to `env.limitTracker` and enforces
+ * `MAX_TEMPLATE_OUTPUT_CHARS` before final string concatenation.
+ */
+export function recordListRenderLine(env: ListRenderEnv, line: string): void {
+	const tracker = env.limitTracker;
+	if (!tracker) {
+		checkFilterOutputSize(line.length);
+		return;
+	}
+	tracker.chars += line.length + 1;
+	checkFilterOutputSize(tracker.chars);
 }
 
 /**
@@ -318,14 +373,16 @@ function formatLeafItemAtHorizon(rawItem: unknown, env: ListRenderEnv): string |
 function emitHorizonLine(
 	parts: readonly string[],
 	maxDepth: number,
-	language: string,
+	env: ListRenderEnv,
 ): RenderListResult {
 	if (parts.length === 0) {
 		return { lines: [], hitHorizon: false };
 	}
-	const joined = getConjunctionListFormatter(language).format(parts);
+	const joined = getConjunctionListFormatter(env.language).format(parts);
+	const line = formatBulletLine(maxDepth + 1, '- ', joined);
+	recordListRenderLine(env, line);
 	return {
-		lines: [formatBulletLine(maxDepth + 1, '- ', joined)],
+		lines: [line],
 		hitHorizon: true,
 	};
 }
@@ -344,12 +401,13 @@ export function renderKeyValueEntriesAtDepth(
 	if (depth > maxDepth) {
 		const parts: string[] = [];
 		for (const k of keys) {
+			recordListRenderStep(env);
 			const atom = formatHorizonAtom(obj[k]);
 			if (atom !== null) {
 				parts.push(`${k}: ${atom}`);
 			}
 		}
-		return emitHorizonLine(parts, maxDepth, env.language);
+		return emitHorizonLine(parts, maxDepth, env);
 	}
 
 	const lines: string[] = [];
@@ -357,6 +415,7 @@ export function renderKeyValueEntriesAtDepth(
 	let itemIdx = startIndex;
 
 	for (const k of keys) {
+		recordListRenderStep(env);
 		const rawVal = obj[k];
 		if (isVacuousSortOrGroupValue(rawVal)) continue;
 		const v = unwrapLiquidValue(rawVal);
@@ -364,14 +423,18 @@ export function renderKeyValueEntriesAtDepth(
 		const scalar = formatTableScalar(v);
 
 		if (scalar !== null) {
-			lines.push(formatBulletLine(depth, marker, `${k}: ${scalar}`));
+			const line = formatBulletLine(depth, marker, `${k}: ${scalar}`);
+			recordListRenderLine(env, line);
+			lines.push(line);
 			itemIdx++;
 			continue;
 		}
 
 		if (isGroupByBucket(v)) {
+			const headLine = formatBulletLine(depth, marker, k);
+			recordListRenderLine(env, headLine);
 			const bucketRes = renderGroupBucketAtDepth(v, depth + 1, 0, env, true);
-			lines.push(formatBulletLine(depth, marker, k), ...bucketRes.lines);
+			lines.push(headLine, ...bucketRes.lines);
 			if (bucketRes.hitHorizon) hitHorizon = true;
 			itemIdx++;
 			continue;
@@ -382,7 +445,9 @@ export function renderKeyValueEntriesAtDepth(
 			if (childKeys.length === 0) continue;
 			const childRes = renderKeyValueEntriesAtDepth(v, childKeys, depth + 1, env);
 			if (childRes.lines.length === 0) continue;
-			lines.push(formatBulletLine(depth, marker, k), ...childRes.lines);
+			const headLine = formatBulletLine(depth, marker, k);
+			recordListRenderLine(env, headLine);
+			lines.push(headLine, ...childRes.lines);
 			if (childRes.hitHorizon) hitHorizon = true;
 			itemIdx++;
 			continue;
@@ -391,7 +456,9 @@ export function renderKeyValueEntriesAtDepth(
 		if (Array.isArray(v)) {
 			const childRes = renderArrayAtDepth(v, depth + 1, env, false);
 			if (childRes.lines.length === 0) continue;
-			lines.push(formatBulletLine(depth, marker, k), ...childRes.lines);
+			const headLine = formatBulletLine(depth, marker, k);
+			recordListRenderLine(env, headLine);
+			lines.push(headLine, ...childRes.lines);
 			if (childRes.hitHorizon) hitHorizon = true;
 			itemIdx++;
 		}
@@ -423,7 +490,9 @@ function renderObjectItemInArray(
 	if (keys.length === 1) {
 		const scalar = formatTableScalar(firstVal);
 		if (scalar !== null) {
-			return { lines: [formatBulletLine(depth, marker, scalar)], hitHorizon: false };
+			const line = formatBulletLine(depth, marker, scalar);
+			recordListRenderLine(env, line);
+			return { lines: [line], hitHorizon: false };
 		}
 		if (isGroupByBucket(firstVal)) {
 			return renderGroupBucketAtDepth(firstVal, depth, itemIndex, env);
@@ -441,10 +510,12 @@ function renderObjectItemInArray(
 		hitHorizon = true;
 	}
 
+	const headLine = formatBulletLine(depth, marker, headline);
+	recordListRenderLine(env, headLine);
 	const restRes = renderKeyValueEntriesAtDepth(obj, keys.slice(1), depth + 1, env);
 	if (restRes.hitHorizon) hitHorizon = true;
 	return {
-		lines: [formatBulletLine(depth, marker, headline), ...restRes.lines],
+		lines: [headLine, ...restRes.lines],
 		hitHorizon,
 	};
 }
@@ -459,10 +530,11 @@ export function renderGroupBucketAtDepth(
 	env: ListRenderEnv,
 	forceHorizonIfBeyond = false,
 ): RenderListResult {
+	recordListRenderStep(env);
 	const maxDepth = env.styles.length;
 	if (forceHorizonIfBeyond && depth > maxDepth) {
 		const atom = formatHorizonAtom(bucket);
-		return emitHorizonLine(atom !== null ? [atom] : [], maxDepth, env.language);
+		return emitHorizonLine(atom !== null ? [atom] : [], maxDepth, env);
 	}
 
 	const nestedGroups = Array.isArray(bucket.groups) ? bucket.groups : undefined;
@@ -473,15 +545,17 @@ export function renderGroupBucketAtDepth(
 		if (depth >= maxDepth) {
 			const parts: string[] = [];
 			for (const g of nestedGroups) {
+				recordListRenderStep(env);
 				const atom = formatHorizonAtom(g);
 				if (atom !== null) parts.push(atom);
 			}
-			childRes = emitHorizonLine(parts, maxDepth, env.language);
+			childRes = emitHorizonLine(parts, maxDepth, env);
 		} else {
 			const childLines: string[] = [];
 			let anyHorizon = false;
 			let childIdx = 0;
 			for (const g of nestedGroups) {
+				recordListRenderStep(env);
 				if (!isGroupByBucket(g)) continue;
 				const gRes = renderGroupBucketAtDepth(g, depth + 1, childIdx, env);
 				childLines.push(...gRes.lines);
@@ -509,8 +583,10 @@ export function renderGroupBucketAtDepth(
 	}
 
 	const marker = formatMarker(env.styles, depth, itemIndex);
+	const headLine = formatBulletLine(depth, marker, headline);
+	recordListRenderLine(env, headLine);
 	return {
-		lines: [formatBulletLine(depth, marker, headline), ...childRes.lines],
+		lines: [headLine, ...childRes.lines],
 		hitHorizon: childRes.hitHorizon,
 	};
 }
@@ -528,6 +604,7 @@ export function renderArrayAtDepth(
 	if (depth > maxDepth) {
 		const parts: string[] = [];
 		for (const rawItem of items) {
+			recordListRenderStep(env);
 			const formatted = applyLeafSelectors
 				? formatLeafItemAtHorizon(rawItem, env)
 				: formatHorizonAtom(rawItem);
@@ -535,7 +612,7 @@ export function renderArrayAtDepth(
 				parts.push(formatted);
 			}
 		}
-		return emitHorizonLine(parts, maxDepth, env.language);
+		return emitHorizonLine(parts, maxDepth, env);
 	}
 
 	const lines: string[] = [];
@@ -543,6 +620,7 @@ export function renderArrayAtDepth(
 	let itemIdx = 0;
 
 	for (const rawEl of items) {
+		recordListRenderStep(env);
 		if (isVacuousSortOrGroupValue(rawEl)) continue;
 		const el = unwrapLiquidValue(rawEl);
 
@@ -573,7 +651,9 @@ export function renderArrayAtDepth(
 		const scalar = formatTableScalar(el);
 		if (scalar !== null) {
 			const marker = formatMarker(env.styles, depth, itemIdx);
-			lines.push(formatBulletLine(depth, marker, scalar));
+			const line = formatBulletLine(depth, marker, scalar);
+			recordListRenderLine(env, line);
+			lines.push(line);
 			itemIdx++;
 			continue;
 		}
@@ -590,12 +670,14 @@ export function renderArrayAtDepth(
 			) {
 				hitHorizon = true;
 			}
+			const headLine = formatBulletLine(depth, marker, headAtom);
+			recordListRenderLine(env, headLine);
 			const restRes =
 				nonVacuous.length > 1
 					? renderArrayAtDepth(nonVacuous.slice(1), depth + 1, env, false)
 					: { lines: [], hitHorizon: false };
 			if (restRes.hitHorizon) hitHorizon = true;
-			lines.push(formatBulletLine(depth, marker, headAtom), ...restRes.lines);
+			lines.push(headLine, ...restRes.lines);
 			itemIdx++;
 		}
 	}
@@ -627,21 +709,28 @@ export function listFilter(
 		selectors,
 		filterThis: this,
 		language,
+		limitTracker: { steps: 0, chars: 0 },
 	};
 
 	if (isGroupByBucket(unwrapped)) {
-		return renderGroupBucketAtDepth(unwrapped, 1, 0, env).lines.join('\n');
+		const rendered = renderGroupBucketAtDepth(unwrapped, 1, 0, env).lines.join('\n');
+		checkFilterOutputSize(rendered.length);
+		return rendered;
 	}
 
 	if (Array.isArray(unwrapped)) {
-		return renderArrayAtDepth(unwrapped, 1, env, true).lines.join('\n');
+		const rendered = renderArrayAtDepth(unwrapped, 1, env, true).lines.join('\n');
+		checkFilterOutputSize(rendered.length);
+		return rendered;
 	}
 
 	if (isPlainRecord(unwrapped)) {
 		const obj = selectors.length > 0 ? pickFromObject(unwrapped, selectors, this) : unwrapped;
 		const keys = getNonVacuousKeys(obj);
 		if (keys.length === 0) return '';
-		return renderKeyValueEntriesAtDepth(obj, keys, 1, env).lines.join('\n');
+		const rendered = renderKeyValueEntriesAtDepth(obj, keys, 1, env).lines.join('\n');
+		checkFilterOutputSize(rendered.length);
+		return rendered;
 	}
 
 	if (selectors.length > 0) {
@@ -651,7 +740,9 @@ export function listFilter(
 	const scalar = formatTableScalar(unwrapped);
 	if (scalar !== null) {
 		const marker = formatMarker(styles, 1, 0);
-		return formatBulletLine(1, marker, scalar);
+		const rendered = formatBulletLine(1, marker, scalar);
+		checkFilterOutputSize(rendered.length);
+		return rendered;
 	}
 
 	return '';

@@ -13,6 +13,7 @@ import {
 } from './collection-filters';
 import { headingFilter } from './heading-filter';
 import { listFilter, sentenceFilter } from './list-filter';
+import { checkFilterRenderLimit, FILTER_LIMIT_CHECK_STRIDE } from './render-limits';
 import {
 	isPlainRecord,
 	type LiquidFilterThis,
@@ -84,7 +85,12 @@ export function pickFilter(
 	const selectors = parsePickOrAggSelectors(args);
 	const unwrapped = unwrapLiquidValue(input);
 	if (Array.isArray(unwrapped)) {
-		return unwrapped.map((el) => pickFromObject(el, selectors, this));
+		return unwrapped.map((el, i) => {
+			if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+				checkFilterRenderLimit(this);
+			}
+			return pickFromObject(el, selectors, this);
+		});
 	}
 	if (isPlainRecord(unwrapped)) {
 		return pickFromObject(unwrapped, selectors, this);

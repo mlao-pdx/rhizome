@@ -8,6 +8,7 @@ import {
 } from 'obsidian';
 import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
 import {
+	parsedTemplateHasLoopTag,
 	parsedTemplateReferencesHost,
 	parseRhizomeTemplatePass1Async,
 	renderParsedRhizomeTemplate,
@@ -18,21 +19,35 @@ import {
 import type RhizomePlugin from '../main';
 import { hashVaultQueryResult } from './active-query-roster';
 import {
+	appendQuarantineRetryButton,
+	formatDynamicStandbyCallout,
+	formatLargeRenderStandbyCallout,
+	formatQuarantinedCalloutMarkdown,
+	logCodeBlockRenderResult,
+	schedulePostRenderPaintCleanup,
+	type StandbyTrigger,
+	yieldForBrowserPaint,
+} from './codeblock-callouts';
+import {
 	allExtractedQueriesExecutable,
 	countExtractedQueryRecords,
 	exceedsLargeMarkdownThreshold,
-	formatLargeRenderStandbyCallout,
+	exceedsSentinelThreshold,
+	isRuntimeRenderErrorResult,
 	LARGE_MARKDOWN_CHAR_THRESHOLD,
 	LARGE_MARKDOWN_LINE_THRESHOLD,
 	LARGE_QUERY_RECORD_THRESHOLD,
 	measureMarkdownOutput,
 } from './codeblock-render-cache';
 import { markSensitive } from './logger-format';
+import { computeCodeBlockSentinelHash } from './render-sentinel-store';
 import { resolveDefaultTimeZone, type VaultQueryResult } from './vault-query-runner';
 
 export {
 	countExtractedQueryRecords,
 	exceedsLargeMarkdownThreshold,
+	exceedsSentinelThreshold,
+	formatDynamicStandbyCallout,
 	formatLargeRenderStandbyCallout,
 	LARGE_MARKDOWN_CHAR_THRESHOLD,
 	LARGE_MARKDOWN_LINE_THRESHOLD,
@@ -126,133 +141,20 @@ async function readVaultTemplateNote(
 	}
 }
 
-interface CodeBlockRenderTelemetry {
-	readonly parseMs: number;
+interface CoalescedInitialRender {
+	readonly payload: VaultQueryResult;
+	readonly result: TemplateRenderResult;
+	readonly totalRecords: number;
 	readonly liquidMs: number;
-	readonly markdownRenderMs: number;
-	readonly records: number;
-	readonly outputChars: number;
-	readonly outputLines: number;
-	readonly standbyShown?: boolean | undefined;
-	readonly cacheHit?: 'remount' | 'payload' | undefined;
-}
-
-function logCodeBlockRenderResult(
-	plugin: RhizomePlugin,
-	sourcePath: string,
-	result: TemplateRenderResult,
-	telemetry: CodeBlockRenderTelemetry,
-): void {
-	const durationMs = telemetry.parseMs + telemetry.liquidMs + telemetry.markdownRenderMs;
-	if (!result.ok) {
-		const isRenderError = result.diagnostics.some((d) => d.code === 'TEMPLATE_RENDER_ERROR');
-		plugin.loggerAdapter?.log(
-			'warn',
-			`Template ${isRenderError ? 'render' : 'parse'} diagnostics in ${markSensitive(sourcePath)}`,
-			{
-				source: isRenderError ? 'template.render' : 'template.parse',
-				durationMs,
-				count: result.diagnostics.length,
-				queryCount: result.queries.length,
-				codes: result.diagnostics.map((d) => d.code),
-				parseMs: telemetry.parseMs,
-				liquidMs: telemetry.liquidMs,
-				markdownRenderMs: telemetry.markdownRenderMs,
-				records: telemetry.records,
-				outputChars: telemetry.outputChars,
-				outputLines: telemetry.outputLines,
-				...(telemetry.standbyShown ? { standbyShown: true } : {}),
-			},
-		);
-	} else {
-		plugin.loggerAdapter?.log(
-			'debug',
-			`Rendered rhizome codeblock in ${markSensitive(sourcePath)}`,
-			{
-				source: 'template.render',
-				durationMs,
-				count: result.queries.length,
-				parseMs: telemetry.parseMs,
-				liquidMs: telemetry.liquidMs,
-				markdownRenderMs: telemetry.markdownRenderMs,
-				records: telemetry.records,
-				outputChars: telemetry.outputChars,
-				outputLines: telemetry.outputLines,
-				...(telemetry.standbyShown ? { standbyShown: true } : {}),
-				...(telemetry.cacheHit !== undefined
-					? { cached: true, cacheHit: telemetry.cacheHit }
-					: {}),
-			},
-		);
-	}
-}
-
-const PAINT_YIELD_FALLBACK_MS = 32;
-
-/**
- * Yields to the browser rendering pipeline (`requestAnimationFrame` followed by a macrotask,
- * bounded by a `32 ms` fallback timer when the window is occluded or minimized) so a standby
- * callout mounted into `el` is composited and painted before heavy synchronous template or
- * DOM work blocks the main thread. Resolves early if either signal aborts.
- */
-function yieldForBrowserPaint(outerSignal: AbortSignal, cycleSignal: AbortSignal): Promise<void> {
-	if (outerSignal.aborted || cycleSignal.aborted) {
-		return Promise.resolve();
-	}
-	return new Promise<void>((resolve) => {
-		let settled = false;
-		let timeoutId: number | null = null;
-		let fallbackTimeoutId: number | null = null;
-		let rafId: number | null = null;
-
-		const finish = (): void => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			if (rafId !== null && typeof window.cancelAnimationFrame === 'function') {
-				window.cancelAnimationFrame(rafId);
-				rafId = null;
-			}
-			if (timeoutId !== null) {
-				window.clearTimeout(timeoutId);
-				timeoutId = null;
-			}
-			if (fallbackTimeoutId !== null) {
-				window.clearTimeout(fallbackTimeoutId);
-				fallbackTimeoutId = null;
-			}
-			outerSignal.removeEventListener('abort', finish);
-			cycleSignal.removeEventListener('abort', finish);
-			resolve();
-		};
-
-		outerSignal.addEventListener('abort', finish, { once: true });
-		cycleSignal.addEventListener('abort', finish, { once: true });
-
-		const scheduleMacrotask = (): void => {
-			rafId = null;
-			if (settled || outerSignal.aborted || cycleSignal.aborted) {
-				finish();
-				return;
-			}
-			timeoutId = window.setTimeout(finish, 0);
-		};
-
-		if (typeof window.requestAnimationFrame === 'function') {
-			rafId = window.requestAnimationFrame(scheduleMacrotask);
-			fallbackTimeoutId = window.setTimeout(finish, PAINT_YIELD_FALLBACK_MS);
-		} else {
-			scheduleMacrotask();
-		}
-	});
+	readonly cacheHit?: 'payload' | undefined;
+	readonly standbyShownOnLeader: boolean;
 }
 
 /**
  * Processes a fenced `rhizome` Markdown codeblock by parsing its template and any
- * referenced partials/layouts in Pass 1, subscribing to reactive query updates (`onUpdate`)
- * and template/partial/layout resets (`onReset`) via `plugin.query(...)`, and rendering
- * the resulting Markdown into `el` via `MarkdownRenderer.render`.
+ * referenced partials/layouts in Pass 1, checking the device-local crash sentinel store,
+ * deferring cold-startup queries until vault metadata is ready, coalescing concurrent
+ * multi-viewport renders, and committing the resulting Markdown via `MarkdownRenderer.render`.
  */
 export async function processRhizomeCodeBlock(
 	source: string,
@@ -279,12 +181,17 @@ export async function processRhizomeCodeBlock(
 
 	let activeRenderChild: MarkdownRenderChild | null = null;
 	let hasCommittedRender = false;
+	let lastCommittedMarkdown: string | null = null;
 	let renderGeneration = 0;
+
 	const renderIntoContainer = async (
 		markdown: string,
 		generation: number,
 		cycleSignal: AbortSignal,
-	): Promise<number | null> => {
+	): Promise<{
+		readonly markdownRenderMs: number;
+		readonly renderChild: MarkdownRenderChild;
+	} | null> => {
 		if (
 			outerAbortController.signal.aborted ||
 			cycleSignal.aborted ||
@@ -312,15 +219,15 @@ export async function processRhizomeCodeBlock(
 		) {
 			return null;
 		}
-		return markdownRenderMs;
+		return { markdownRenderMs, renderChild };
 	};
 
 	const showStandbyCalloutAndYield = async (
-		totalRecords: number,
+		trigger: StandbyTrigger,
 		generation: number,
 		cycleSignal: AbortSignal,
 	): Promise<boolean> => {
-		const standbyMarkdown = formatLargeRenderStandbyCallout(totalRecords);
+		const standbyMarkdown = formatDynamicStandbyCallout(trigger);
 		const rendered = await renderIntoContainer(standbyMarkdown, generation, cycleSignal);
 		if (rendered === null) {
 			return false;
@@ -338,11 +245,12 @@ export async function processRhizomeCodeBlock(
 		options: {
 			readonly generation: number;
 			readonly cycleSignal: AbortSignal;
+			readonly sentinelHash: string;
 			readonly totalRecords: number;
 			readonly parseMs: number;
 			readonly liquidMs: number;
 			readonly standbyAlreadyShown?: boolean | undefined;
-			readonly cacheHit?: 'remount' | 'payload' | undefined;
+			readonly cacheHit?: 'remount' | 'payload' | 'coalesced' | undefined;
 		},
 	): Promise<void> => {
 		const outputMetrics = measureMarkdownOutput(result.markdown);
@@ -354,7 +262,7 @@ export async function processRhizomeCodeBlock(
 			exceedsLargeMarkdownThreshold(outputMetrics)
 		) {
 			const ok = await showStandbyCalloutAndYield(
-				options.totalRecords,
+				{ kind: 'output', metrics: outputMetrics },
 				options.generation,
 				options.cycleSignal,
 			);
@@ -363,19 +271,84 @@ export async function processRhizomeCodeBlock(
 			}
 			standbyShown = true;
 		}
-		const markdownRenderMs = await renderIntoContainer(
-			result.markdown,
-			options.generation,
-			options.cycleSignal,
-		);
-		if (markdownRenderMs === null) {
+
+		if (
+			outerAbortController.signal.aborted ||
+			options.cycleSignal.aborted ||
+			options.generation !== renderGeneration
+		) {
 			return;
 		}
+
+		const sentinelStore = plugin.renderSentinelStore;
+		const shouldTrackSentinel = result.ok && exceedsSentinelThreshold(outputMetrics);
+		const sentinelStats = {
+			records: options.totalRecords,
+			outputChars: outputMetrics.chars,
+			outputLines: outputMetrics.lines,
+		};
+
+		if (sentinelStore && shouldTrackSentinel) {
+			await sentinelStore.markRunning(options.sentinelHash, sentinelStats);
+			if (
+				outerAbortController.signal.aborted ||
+				options.cycleSignal.aborted ||
+				options.generation !== renderGeneration
+			) {
+				void sentinelStore.finishRunning(options.sentinelHash, { committed: false });
+				return;
+			}
+		}
+
+		const paintStartedAt = Date.now();
+		let rendered: Awaited<ReturnType<typeof renderIntoContainer>>;
+		try {
+			rendered = await renderIntoContainer(
+				result.markdown,
+				options.generation,
+				options.cycleSignal,
+			);
+		} catch (err) {
+			if (sentinelStore && shouldTrackSentinel) {
+				void sentinelStore.finishRunning(options.sentinelHash, { committed: false });
+			}
+			throw err;
+		}
+
+		if (sentinelStore && shouldTrackSentinel) {
+			schedulePostRenderPaintCleanup(() => {
+				const stillCurrent =
+					rendered !== null &&
+					!outerAbortController.signal.aborted &&
+					!options.cycleSignal.aborted;
+				if (stillCurrent) {
+					const totalDurationMs =
+						options.parseMs +
+						options.liquidMs +
+						Math.max(0, Date.now() - paintStartedAt);
+					void sentinelStore.finishRunning(options.sentinelHash, {
+						committed: true,
+						durationMs: totalDurationMs,
+						stats: sentinelStats,
+					});
+				} else {
+					void sentinelStore.finishRunning(options.sentinelHash, { committed: false });
+				}
+			}, el);
+		} else if (sentinelStore && rendered !== null) {
+			void sentinelStore.clearProbationIfSubThreshold(options.sentinelHash);
+		}
+
+		if (rendered === null) {
+			return;
+		}
+
 		hasCommittedRender = true;
-		logCodeBlockRenderResult(plugin, currentSourcePath, result, {
+		lastCommittedMarkdown = result.markdown;
+		logCodeBlockRenderResult(plugin.loggerAdapter, currentSourcePath, result, {
 			parseMs: options.parseMs,
 			liquidMs: options.liquidMs,
-			markdownRenderMs,
+			markdownRenderMs: rendered.markdownRenderMs,
 			records: options.totalRecords,
 			outputChars: outputMetrics.chars,
 			outputLines: outputMetrics.lines,
@@ -420,30 +393,50 @@ export async function processRhizomeCodeBlock(
 		);
 		let parsed: Awaited<ReturnType<typeof parseRhizomeTemplatePass1Async>>;
 		let referencesHost: boolean;
+		let hasLoopTag: boolean;
 		let parseDurationMs = 0;
 
 		if (cachedPass1 !== undefined) {
 			parsed = cachedPass1.parsed;
 			referencesHost = cachedPass1.referencesHost;
+			hasLoopTag = cachedPass1.hasLoopTag ?? parsedTemplateHasLoopTag(source, parsed);
 		} else {
-			parsed = await parseRhizomeTemplatePass1Async(
-				source,
-				folderConfig,
-				(vaultRelativePath) => readVaultTemplateNote(plugin, vaultRelativePath),
-			);
-			parseDurationMs = Math.max(0, Date.now() - parseStartedAt);
-			referencesHost = parsedTemplateReferencesHost(source, parsed);
-			if (parsed.env.diagnostics.length === 0 && parsed.templates !== null) {
-				renderCache?.setPass1(
-					currentSourcePath,
+			const runPass1 = async () => {
+				const p = await parseRhizomeTemplatePass1Async(
 					source,
 					folderConfig,
-					templateRevision,
-					parsed,
-					referencesHost,
+					(vaultRelativePath) => readVaultTemplateNote(plugin, vaultRelativePath),
 				);
-			}
+				const refHost = parsedTemplateReferencesHost(source, p);
+				const loopTag = parsedTemplateHasLoopTag(source, p);
+				if (p.env.diagnostics.length === 0 && p.templates !== null) {
+					renderCache?.setPass1(
+						currentSourcePath,
+						source,
+						folderConfig,
+						templateRevision,
+						p,
+						refHost,
+						loopTag,
+					);
+				}
+				return { parsed: p, referencesHost: refHost, hasLoopTag: loopTag };
+			};
+			const pass1Res = renderCache
+				? await renderCache.getOrRunPass1(
+						currentSourcePath,
+						source,
+						folderConfig,
+						templateRevision,
+						runPass1,
+					)
+				: await runPass1();
+			parseDurationMs = Math.max(0, Date.now() - parseStartedAt);
+			parsed = pass1Res.parsed;
+			referencesHost = pass1Res.referencesHost;
+			hasLoopTag = pass1Res.hasLoopTag;
 		}
+
 		if (outerAbortController.signal.aborted || cycleSignal.aborted) {
 			return;
 		}
@@ -487,23 +480,87 @@ export async function processRhizomeCodeBlock(
 			}
 			const liquidMs = Math.max(0, Date.now() - renderStartedAt);
 			const outputMetrics = measureMarkdownOutput(errorResult.markdown);
-			const markdownRenderMs = await renderIntoContainer(
+			const rendered = await renderIntoContainer(
 				errorResult.markdown,
 				generation,
 				cycleSignal,
 			);
-			if (markdownRenderMs === null) {
+			if (rendered === null) {
 				return;
 			}
 			hasCommittedRender = true;
-			logCodeBlockRenderResult(plugin, currentSourcePath, errorResult, {
+			lastCommittedMarkdown = errorResult.markdown;
+			logCodeBlockRenderResult(plugin.loggerAdapter, currentSourcePath, errorResult, {
 				parseMs: parseDurationMs,
 				liquidMs,
-				markdownRenderMs,
+				markdownRenderMs: rendered.markdownRenderMs,
 				records: 0,
 				outputChars: outputMetrics.chars,
 				outputLines: outputMetrics.lines,
 			});
+			return;
+		}
+
+		const sentinelHash = computeCodeBlockSentinelHash(
+			currentSourcePath,
+			source,
+			parsed.env.fileSources,
+		);
+		if (plugin.renderSentinelStore) {
+			await plugin.renderSentinelStore.ensureHydrated();
+			if (outerAbortController.signal.aborted || cycleSignal.aborted) {
+				return;
+			}
+		}
+
+		const quarantinedRecord = plugin.renderSentinelStore?.getQuarantined(sentinelHash);
+		if (quarantinedRecord !== undefined) {
+			const generation = ++renderGeneration;
+			plugin.activeQueryRoster?.register(
+				Object.freeze({}),
+				{
+					referenceTimeMs,
+					signal: cycleSignal,
+					onReset,
+					onSourcePathRename,
+					includeHostInHash: false,
+					...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
+				},
+				Object.freeze({}),
+			);
+			const quarantineMarkdown = formatQuarantinedCalloutMarkdown(quarantinedRecord);
+			const outputMetrics = measureMarkdownOutput(quarantineMarkdown);
+			const rendered = await renderIntoContainer(quarantineMarkdown, generation, cycleSignal);
+			if (rendered === null) {
+				return;
+			}
+			appendQuarantineRetryButton(el, rendered.renderChild, () => {
+				if (outerAbortController.signal.aborted) {
+					return;
+				}
+				void (async () => {
+					await plugin.renderSentinelStore?.promoteToProbation(sentinelHash);
+					if (!outerAbortController.signal.aborted) {
+						cycleController.abort();
+						void runCycle();
+					}
+				})();
+			});
+			hasCommittedRender = true;
+			lastCommittedMarkdown = null;
+			plugin.loggerAdapter?.log(
+				'warn',
+				`Paused quarantined rhizome codeblock in ${markSensitive(currentSourcePath)}`,
+				{
+					source: 'template.render',
+					quarantined: true,
+					hash: sentinelHash,
+					records: quarantinedRecord.records,
+					outputChars: quarantinedRecord.outputChars,
+					outputLines: quarantinedRecord.outputLines,
+					renderedChars: outputMetrics.chars,
+				},
+			);
 			return;
 		}
 
@@ -513,6 +570,15 @@ export async function processRhizomeCodeBlock(
 			queryMap[q.name] = q.query;
 		}
 		const frozenQueryMap = Object.freeze(queryMap);
+		const hasQueries = Object.keys(queryMap).length > 0;
+
+		if ((hasQueries || referencesHost) && typeof plugin.waitForVaultReady === 'function') {
+			await plugin.waitForVaultReady(cycleSignal);
+			if (outerAbortController.signal.aborted || cycleSignal.aborted) {
+				return;
+			}
+		}
+
 		const resolveCurrentHeadingLevel = (): number =>
 			lookupHostHeadingLevel(plugin, currentSourcePath, ctx, el);
 
@@ -556,43 +622,39 @@ export async function processRhizomeCodeBlock(
 			) {
 				return;
 			}
-			if (updatedResult.ok && allExtractedQueriesExecutable(parsed, newPayload)) {
+			const canCacheUpdate =
+				(updatedResult.ok || isRuntimeRenderErrorResult(updatedResult)) &&
+				currentTemplateRev === templateRevision &&
+				allExtractedQueriesExecutable(parsed, newPayload);
+			if (canCacheUpdate) {
 				renderCache?.setRender(
 					currentSourcePath,
 					source,
 					currentHeadingLevel,
 					folderConfig,
-					currentTemplateRev,
+					templateRevision,
 					currentStateRev,
 					payloadHash,
 					newPayload,
 					updatedResult,
 				);
 			}
-			const liquidMs = Math.max(0, Date.now() - updateStartedAt);
-			const totalRecords = countExtractedQueryRecords(parsed, newPayload);
-			const outputMetrics = measureMarkdownOutput(updatedResult.markdown);
-			const markdownRenderMs = await renderIntoContainer(
-				updatedResult.markdown,
-				generation,
-				cycleSignal,
-			);
-			if (markdownRenderMs === null) {
+			if (hasCommittedRender && updatedResult.markdown === lastCommittedMarkdown) {
 				return;
 			}
-			hasCommittedRender = true;
-			logCodeBlockRenderResult(plugin, currentSourcePath, updatedResult, {
+			const liquidMs = Math.max(0, Date.now() - updateStartedAt);
+			const totalRecords = countExtractedQueryRecords(parsed, newPayload);
+			await commitCycleRender(updatedResult, {
+				generation,
+				cycleSignal,
+				sentinelHash,
+				totalRecords,
 				parseMs: 0,
 				liquidMs,
-				markdownRenderMs,
-				records: totalRecords,
-				outputChars: outputMetrics.chars,
-				outputLines: outputMetrics.lines,
 			});
 		};
 
 		const initialGeneration = ++renderGeneration;
-		const hasQueries = Object.keys(queryMap).length > 0;
 		const initialHeadingLevel = resolveCurrentHeadingLevel();
 		const onUnchangedPayload = (stateRev: number, unchangedPayloadHash: string): void => {
 			if (outerAbortController.signal.aborted || cycleSignal.aborted) {
@@ -608,35 +670,40 @@ export async function processRhizomeCodeBlock(
 				stateRev,
 			);
 		};
+		const subscriptionOptions = {
+			referenceTimeMs,
+			signal: cycleSignal,
+			onReset,
+			onSourcePathRename,
+			onUnchangedPayload,
+			includeHostInHash: referencesHost,
+			headingLevel: resolveCurrentHeadingLevel,
+			...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
+		};
+		const mountOnUpdate = hasQueries || currentSourcePath.length > 0 ? onUpdate : undefined;
+
+		const currentTemplateRevAtMount = plugin.activeQueryRoster?.templateRevision ?? 0;
 		const stateRevisionBeforeQuery = plugin.activeQueryRoster?.stateRevision ?? 0;
 		const remountHit = renderCache?.getRemountHit(
 			currentSourcePath,
 			source,
 			initialHeadingLevel,
 			folderConfig,
-			templateRevision,
+			currentTemplateRevAtMount,
 			stateRevisionBeforeQuery,
 		);
 		if (remountHit !== undefined) {
 			plugin.activeQueryRoster?.register(
 				frozenQueryMap,
-				{
-					referenceTimeMs,
-					signal: cycleSignal,
-					onReset,
-					onSourcePathRename,
-					onUnchangedPayload,
-					includeHostInHash: referencesHost,
-					headingLevel: resolveCurrentHeadingLevel,
-					...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
-				},
+				subscriptionOptions,
 				remountHit.payload,
-				hasQueries || currentSourcePath.length > 0 ? onUpdate : undefined,
+				mountOnUpdate,
 			);
 			const totalRecords = countExtractedQueryRecords(parsed, remountHit.payload);
 			await commitCycleRender(remountHit.result, {
 				generation: initialGeneration,
 				cycleSignal,
+				sentinelHash,
 				totalRecords,
 				parseMs: parseDurationMs,
 				liquidMs: 0,
@@ -645,99 +712,170 @@ export async function processRhizomeCodeBlock(
 			return;
 		}
 
-		const initialPayload = await plugin.query(
-			frozenQueryMap,
-			{
+		const executeInitialQueryAndPass2 = async (
+			hasLiveSubscribers: () => boolean,
+		): Promise<CoalescedInitialRender | null> => {
+			if (!hasLiveSubscribers()) {
+				return null;
+			}
+			let initialPayload: VaultQueryResult;
+			if (!hasQueries && !referencesHost) {
+				initialPayload = Object.freeze({});
+				plugin.activeQueryRoster?.register(
+					frozenQueryMap,
+					subscriptionOptions,
+					initialPayload,
+					mountOnUpdate,
+				);
+			} else {
+				initialPayload = await plugin.query(
+					frozenQueryMap,
+					subscriptionOptions,
+					mountOnUpdate,
+				);
+			}
+			if (!hasLiveSubscribers()) {
+				return null;
+			}
+			const totalRecords = countExtractedQueryRecords(parsed, initialPayload);
+			const runtimeCtx = buildRuntimeContext(
+				plugin,
 				referenceTimeMs,
-				signal: cycleSignal,
-				onReset,
-				onSourcePathRename,
-				onUnchangedPayload,
-				includeHostInHash: referencesHost,
-				headingLevel: resolveCurrentHeadingLevel,
-				...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
-			},
-			hasQueries || currentSourcePath.length > 0 ? onUpdate : undefined,
-		);
-		if (
-			outerAbortController.signal.aborted ||
-			cycleSignal.aborted ||
-			initialGeneration !== renderGeneration
-		) {
-			return;
-		}
-
-		const totalRecords = countExtractedQueryRecords(parsed, initialPayload);
-		const runtimeCtx = buildRuntimeContext(plugin, referenceTimeMs, currentSourcePath, ctx, el);
-		const currentHeadingLevel = runtimeCtx.headingLevel ?? 0;
-		const currentTemplateRev = plugin.activeQueryRoster?.templateRevision ?? 0;
-		const currentStateRev = plugin.activeQueryRoster?.stateRevision ?? 0;
-		const allExecutable = allExtractedQueriesExecutable(parsed, initialPayload);
-		const payloadHash = hashVaultQueryResult(initialPayload, {
-			includeHost: referencesHost,
-			headingLevel: currentHeadingLevel,
-		});
-		const cachedByPayload = allExecutable
-			? renderCache?.getRenderByPayloadHash(
+				currentSourcePath,
+				ctx,
+				el,
+			);
+			const currentHeadingLevel = runtimeCtx.headingLevel ?? 0;
+			const liveTemplateRev = plugin.activeQueryRoster?.templateRevision ?? 0;
+			const templateRevStillMatches = liveTemplateRev === templateRevision;
+			const currentStateRev = plugin.activeQueryRoster?.stateRevision ?? 0;
+			const allExecutable = allExtractedQueriesExecutable(parsed, initialPayload);
+			const payloadHash = hashVaultQueryResult(initialPayload, {
+				includeHost: referencesHost,
+				headingLevel: currentHeadingLevel,
+			});
+			const cachedByPayload =
+				allExecutable && templateRevStillMatches
+					? renderCache?.getRenderByPayloadHash(
+							currentSourcePath,
+							source,
+							currentHeadingLevel,
+							folderConfig,
+							templateRevision,
+							payloadHash,
+						)
+					: undefined;
+			if (cachedByPayload !== undefined) {
+				renderCache?.setRender(
 					currentSourcePath,
 					source,
 					currentHeadingLevel,
 					folderConfig,
-					currentTemplateRev,
+					templateRevision,
+					currentStateRev,
 					payloadHash,
-				)
-			: undefined;
-		if (cachedByPayload !== undefined) {
-			renderCache?.setRender(
-				currentSourcePath,
-				source,
-				currentHeadingLevel,
-				folderConfig,
-				currentTemplateRev,
-				currentStateRev,
-				payloadHash,
-				initialPayload,
-				cachedByPayload,
-			);
-			await commitCycleRender(cachedByPayload, {
-				generation: initialGeneration,
-				cycleSignal,
-				totalRecords,
-				parseMs: parseDurationMs,
-				liquidMs: 0,
-				cacheHit: 'payload',
-			});
-			return;
-		}
-
-		let standbyShown = false;
-		if (!hasCommittedRender && totalRecords >= LARGE_QUERY_RECORD_THRESHOLD) {
-			const ok = await showStandbyCalloutAndYield(
-				totalRecords,
-				initialGeneration,
-				cycleSignal,
-			);
-			if (!ok) {
-				return;
+					initialPayload,
+					cachedByPayload,
+				);
+				return {
+					payload: initialPayload,
+					result: cachedByPayload,
+					totalRecords,
+					liquidMs: 0,
+					cacheHit: 'payload',
+					standbyShownOnLeader: false,
+				};
 			}
-			standbyShown = true;
-		}
 
-		const renderStartedAt = Date.now();
-		const initialResult = await renderParsedRhizomeTemplate(
-			source,
-			parsed,
-			initialPayload,
-			(query, heading) =>
-				plugin.explainQuery(query, {
-					referenceTimeMs,
-					heading,
-					...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
-				}),
-			runtimeCtx,
-		);
-		const liquidMs = Math.max(0, Date.now() - renderStartedAt);
+			let standbyShownOnLeader = false;
+			if (
+				!hasCommittedRender &&
+				hasLoopTag &&
+				totalRecords >= LARGE_QUERY_RECORD_THRESHOLD &&
+				!outerAbortController.signal.aborted &&
+				!cycleSignal.aborted &&
+				initialGeneration === renderGeneration
+			) {
+				const ok = await showStandbyCalloutAndYield(
+					{ kind: 'records', totalRecords },
+					initialGeneration,
+					cycleSignal,
+				);
+				if (ok) {
+					standbyShownOnLeader = true;
+				}
+			}
+
+			if (!hasLiveSubscribers()) {
+				return null;
+			}
+
+			const renderStartedAt = Date.now();
+			const initialResult = await renderParsedRhizomeTemplate(
+				source,
+				parsed,
+				initialPayload,
+				(query, heading) =>
+					plugin.explainQuery(query, {
+						referenceTimeMs,
+						heading,
+						...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
+					}),
+				runtimeCtx,
+			);
+			const liquidMs = Math.max(0, Date.now() - renderStartedAt);
+
+			const templateRevAfterPass2 = plugin.activeQueryRoster?.templateRevision ?? 0;
+			if (
+				allExecutable &&
+				templateRevAfterPass2 === templateRevision &&
+				(initialResult.ok || isRuntimeRenderErrorResult(initialResult))
+			) {
+				renderCache?.setRender(
+					currentSourcePath,
+					source,
+					currentHeadingLevel,
+					folderConfig,
+					templateRevision,
+					plugin.activeQueryRoster?.stateRevision ?? currentStateRev,
+					payloadHash,
+					initialPayload,
+					initialResult,
+				);
+			}
+
+			return {
+				payload: initialPayload,
+				result: initialResult,
+				totalRecords,
+				liquidMs,
+				standbyShownOnLeader,
+			};
+		};
+
+		const flight = renderCache
+			? renderCache.getOrRunInFlight(
+					{
+						sourcePath: currentSourcePath,
+						source,
+						headingLevel: initialHeadingLevel,
+						folders: folderConfig,
+						templateRevision: currentTemplateRevAtMount,
+						stateRevision: stateRevisionBeforeQuery,
+					},
+					cycleSignal,
+					executeInitialQueryAndPass2,
+				)
+			: {
+					promise: executeInitialQueryAndPass2(
+						() => !outerAbortController.signal.aborted && !cycleSignal.aborted,
+					),
+					isLeader: true,
+				};
+
+		const shared = await flight.promise;
 		if (
+			shared === null ||
 			outerAbortController.signal.aborted ||
 			cycleSignal.aborted ||
 			initialGeneration !== renderGeneration
@@ -745,27 +883,28 @@ export async function processRhizomeCodeBlock(
 			return;
 		}
 
-		if (initialResult.ok && allExecutable) {
-			renderCache?.setRender(
-				currentSourcePath,
-				source,
-				currentHeadingLevel,
-				folderConfig,
-				currentTemplateRev,
-				currentStateRev,
-				payloadHash,
-				initialPayload,
-				initialResult,
+		if (!flight.isLeader) {
+			if ((plugin.activeQueryRoster?.stateRevision ?? 0) !== stateRevisionBeforeQuery) {
+				await runCycle();
+				return;
+			}
+			plugin.activeQueryRoster?.register(
+				frozenQueryMap,
+				subscriptionOptions,
+				shared.payload,
+				mountOnUpdate,
 			);
 		}
 
-		await commitCycleRender(initialResult, {
+		await commitCycleRender(shared.result, {
 			generation: initialGeneration,
 			cycleSignal,
-			totalRecords,
+			sentinelHash,
+			totalRecords: shared.totalRecords,
 			parseMs: parseDurationMs,
-			liquidMs,
-			standbyAlreadyShown: standbyShown,
+			liquidMs: flight.isLeader ? shared.liquidMs : 0,
+			standbyAlreadyShown: flight.isLeader && shared.standbyShownOnLeader,
+			cacheHit: flight.isLeader ? shared.cacheHit : 'coalesced',
 		});
 	};
 

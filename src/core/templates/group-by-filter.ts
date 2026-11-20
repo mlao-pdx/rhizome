@@ -6,6 +6,7 @@ import {
 	parseSingleTemporalAtom,
 	parseTemporalExpr,
 } from '@core/search';
+import { checkFilterRenderLimit, FILTER_LIMIT_CHECK_STRIDE } from './render-limits';
 import {
 	evaluateSelectorOnItem,
 	isPlainRecord,
@@ -246,6 +247,7 @@ function groupItemsAtLevel(
 	filterThis: LiquidFilterThis | void,
 	timeZone: string,
 	referenceTimeMs: number,
+	stepCounter: { steps: number },
 ): GroupByBucket[] {
 	const selector = selectors[selectorIndex]!;
 	const bucketsInOrder: ActiveGroupBucket[] = [];
@@ -259,6 +261,9 @@ function groupItemsAtLevel(
 	let hasNonYearNumeric = false;
 
 	for (let i = 0; i < items.length; i++) {
+		if ((++stepCounter.steps & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(filterThis);
+		}
 		const item = items[i];
 		const rawVal =
 			!selector.isNullLiteral && selector.segments.length === 0 && selector.filterRaw === null
@@ -287,6 +292,9 @@ function groupItemsAtLevel(
 	const allowBareYearString = hasUnambiguousTemporal || !hasNonYearNumeric;
 
 	for (let i = 0; i < items.length; i++) {
+		if ((++stepCounter.steps & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(filterThis);
+		}
 		const item = items[i];
 		const rawVal = evaluatedValues[i];
 		const entry: IndexedEntry = { item, index: i };
@@ -410,6 +418,7 @@ function groupItemsAtLevel(
 					filterThis,
 					timeZone,
 					referenceTimeMs,
+					stepCounter,
 				),
 			});
 		} else {
@@ -435,6 +444,7 @@ function groupItemsAtLevel(
 					filterThis,
 					timeZone,
 					referenceTimeMs,
+					stepCounter,
 				),
 			});
 		} else {
@@ -472,5 +482,7 @@ export function groupByFilter(
 	const ctx = this && typeof this === 'object' && 'context' in this ? this.context : undefined;
 	const { timeZone, referenceTimeMs } = readContextTemporalMeta(ctx);
 
-	return groupItemsAtLevel(unwrapped, selectors, 0, this, timeZone, referenceTimeMs);
+	return groupItemsAtLevel(unwrapped, selectors, 0, this, timeZone, referenceTimeMs, {
+		steps: 0,
+	});
 }

@@ -12,6 +12,8 @@ import type { BacklinkIndex, BacklinkSnapshot } from '../../src/adapters/backlin
 import {
 	countExtractedQueryRecords,
 	exceedsLargeMarkdownThreshold,
+	exceedsSentinelThreshold,
+	formatDynamicStandbyCallout,
 	formatLargeRenderStandbyCallout,
 	LARGE_MARKDOWN_CHAR_THRESHOLD,
 	LARGE_MARKDOWN_LINE_THRESHOLD,
@@ -19,6 +21,11 @@ import {
 	measureMarkdownOutput,
 	processRhizomeCodeBlock,
 } from '../../src/adapters/rhizome-codeblock';
+import { RenderSentinelIdbStore } from '../../src/adapters/render-sentinel-idb';
+import {
+	computeCodeBlockSentinelHash,
+	RenderSentinelStore,
+} from '../../src/adapters/render-sentinel-store';
 import { runVaultQuery, type VaultQueryResult } from '../../src/adapters/vault-query-runner';
 import {
 	parsedTemplateReferencesHost,
@@ -1447,10 +1454,10 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		renderSpy.mockRestore();
 	});
 
-	it('exposes calibrated large-render thresholds and measures output/record counts accurately', () => {
+	it('exposes calibrated large-render thresholds, dynamic standby formatting, and sentinel thresholds', () => {
 		expect(LARGE_QUERY_RECORD_THRESHOLD).toBe(12_000);
-		expect(LARGE_MARKDOWN_LINE_THRESHOLD).toBe(3_000);
-		expect(LARGE_MARKDOWN_CHAR_THRESHOLD).toBe(250_000);
+		expect(LARGE_MARKDOWN_LINE_THRESHOLD).toBe(5_000);
+		expect(LARGE_MARKDOWN_CHAR_THRESHOLD).toBe(100_000);
 
 		const parsed = parseRhizomeTemplatePass1(
 			'{% query alpha %}#a{% endquery %}{% query beta %}#b{% endquery %}',
@@ -1466,17 +1473,60 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(measureMarkdownOutput('single line')).toEqual({ chars: 11, lines: 1 });
 		expect(measureMarkdownOutput('a\nb\nc')).toEqual({ chars: 5, lines: 3 });
 
-		expect(exceedsLargeMarkdownThreshold({ chars: 100, lines: 2_999 })).toBe(false);
-		expect(exceedsLargeMarkdownThreshold({ chars: 100, lines: 3_000 })).toBe(true);
-		expect(exceedsLargeMarkdownThreshold({ chars: 249_999, lines: 10 })).toBe(false);
-		expect(exceedsLargeMarkdownThreshold({ chars: 250_000, lines: 10 })).toBe(true);
+		expect(exceedsLargeMarkdownThreshold({ chars: 100, lines: 4_999 })).toBe(false);
+		expect(exceedsLargeMarkdownThreshold({ chars: 100, lines: 5_000 })).toBe(true);
+		expect(exceedsLargeMarkdownThreshold({ chars: 99_999, lines: 10 })).toBe(false);
+		expect(exceedsLargeMarkdownThreshold({ chars: 100_000, lines: 10 })).toBe(true);
+
+		expect(exceedsSentinelThreshold({ chars: 65_535, lines: 4_999 })).toBe(false);
+		expect(exceedsSentinelThreshold({ chars: 65_536, lines: 10 })).toBe(true);
+		expect(exceedsSentinelThreshold({ chars: 1_000, lines: 5_000 })).toBe(true);
 
 		expect(formatLargeRenderStandbyCallout(19_951)).toBe(
 			'> [!info]\n> The template needs to render across a large result set (~19,951 records).<br>Please stand-by.',
 		);
+		expect(
+			formatDynamicStandbyCallout({
+				kind: 'output',
+				metrics: { lines: 19_963, chars: 50_000 },
+			}),
+		).toBe(
+			[
+				'> [!info]',
+				'> The generated Markdown output is large (~19,963 lines).<br>Please stand-by.',
+				'>',
+				'> If Obsidian stops responding, force-close and reopen the app to pause this codeblock so you can edit it.',
+			].join('\n'),
+		);
+		expect(
+			formatDynamicStandbyCallout({
+				kind: 'output',
+				metrics: { lines: 400, chars: 565_248 },
+			}),
+		).toBe(
+			[
+				'> [!info]',
+				'> The generated Markdown output is large (~552 KB).<br>Please stand-by.',
+				'>',
+				'> If Obsidian stops responding, force-close and reopen the app to pause this codeblock so you can edit it.',
+			].join('\n'),
+		);
+		expect(
+			formatDynamicStandbyCallout({
+				kind: 'output',
+				metrics: { lines: 19_963, chars: 2_831_155 },
+			}),
+		).toBe(
+			[
+				'> [!info]',
+				'> The generated Markdown output is large (~19,963 lines, ~2.7 MB).<br>Please stand-by.',
+				'>',
+				'> If Obsidian stops responding, force-close and reopen the app to pause this codeblock so you can edit it.',
+			].join('\n'),
+		);
 	});
 
-	it('renders an initial [!info] standby callout at Checkpoint 1 (>= 12,000 records) without double-yielding at Checkpoint 2 and logs full render telemetry', async () => {
+	it('renders an initial [!info] standby callout at Checkpoint 1 (>= 12,000 records with loop tag) while skipping standby for loop-free summary templates', async () => {
 		const harness = createMutableVaultApp([
 			{ path: 'notes/alpha.md', cache: {} },
 			{ path: 'README.md', cache: {} },
@@ -1546,28 +1596,25 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 				(renderLogs[0]?.['markdownRenderMs'] as number),
 		);
 
-		// Remounting when the cached output is < 3,000 lines despite >= 12,000 records skips standby
+		// Loop-free summary template ({{ query.myQuery.size }}) skips Checkpoint 1 on BOTH initial mount AND remount!
 		const summarySource =
 			'{% query myQuery %}#daily{% endquery %}Count={{ query.myQuery.size }}';
 		renderedMarkdowns.length = 0;
 		const elSummary1 = { empty: () => {} } as unknown as HTMLElement;
 		await processRhizomeCodeBlock(summarySource, elSummary1, ctx, plugin);
-		// Initial mount hits Checkpoint 1 (>= 12,000 records)
-		expect(renderedMarkdowns).toHaveLength(2);
-		expect(renderedMarkdowns[1]).toBe('Count=12500');
+		expect(renderedMarkdowns).toEqual(['Count=12500']);
 
 		children[1]?.unload();
 		renderedMarkdowns.length = 0;
 		const elSummaryRemount = { empty: () => {} } as unknown as HTMLElement;
 		await processRhizomeCodeBlock(summarySource, elSummaryRemount, ctx, plugin);
-		// Remount cache hit checks Checkpoint 2 (output size): 'Count=12500' is 1 line, so no standby flash!
 		expect(renderedMarkdowns).toEqual(['Count=12500']);
 
 		for (const c of children) c.unload();
 		renderSpy.mockRestore();
 	});
 
-	it('renders an initial [!info] standby callout at Checkpoint 2 (>= 3,000 lines or >= 250,000 chars) on initial mount and remount, and suppresses standby on reactive onUpdate', async () => {
+	it('renders dynamic [!info] standby callout at Checkpoint 2 (>= 5,000 lines or >= 100,000 chars) on initial mount and remount, and suppresses standby on reactive onUpdate', async () => {
 		const harness = createMutableVaultApp([
 			{ path: 'notes/alpha.md', cache: {} },
 			{ path: 'notes/beta.md', cache: {} },
@@ -1580,10 +1627,10 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		const betaMatch = seed['q']![1]!;
 
 		let capturedOnUpdate: ((payload: VaultQueryResult) => void | Promise<void>) | undefined;
-		const matches3500 = new Array<typeof alphaMatch>(3_500).fill(alphaMatch);
+		const matches5200 = new Array<typeof alphaMatch>(5_200).fill(alphaMatch);
 		vi.spyOn(plugin, 'query').mockImplementation(async (_queries, _opts, onUpdate) => {
 			capturedOnUpdate = onUpdate;
-			return { tasks: matches3500 };
+			return { tasks: matches5200 };
 		});
 
 		const renderedMarkdowns: string[] = [];
@@ -1609,20 +1656,25 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 			'{% for item in query.tasks %}- {{ item.file.basename }}\n{% endfor %}',
 		].join('\n');
 
-		// 1. Initial mount: 3,500 records (< 12,000 Checkpoint 1), > 3,000 lines (>= 3,000 Checkpoint 2)
+		// 1. Initial mount: 5,200 records (< 12,000 Checkpoint 1), 5,202 lines (>= 5,000 Checkpoint 2, < 100,000 chars)
 		const el1 = { empty: () => {} } as unknown as HTMLElement;
 		await processRhizomeCodeBlock(source, el1, ctx, plugin);
 
 		expect(renderedMarkdowns).toHaveLength(2);
 		expect(renderedMarkdowns[0]).toBe(
-			'> [!info]\n> The template needs to render across a large result set (~3,500 records).<br>Please stand-by.',
+			[
+				'> [!info]',
+				'> The generated Markdown output is large (~5,202 lines).<br>Please stand-by.',
+				'>',
+				'> If Obsidian stops responding, force-close and reopen the app to pause this codeblock so you can edit it.',
+			].join('\n'),
 		);
 		expect(renderedMarkdowns[1]).toContain('- alpha\n');
 
 		// 2. Reactive onUpdate on the already-mounted codeblock does NOT flash the standby callout
 		renderedMarkdowns.length = 0;
-		const matches3501 = [...matches3500, betaMatch];
-		await capturedOnUpdate?.({ tasks: matches3501 });
+		const matches5201 = [...matches5200, betaMatch];
+		await capturedOnUpdate?.({ tasks: matches5201 });
 		expect(renderedMarkdowns).toHaveLength(1);
 		expect(renderedMarkdowns[0]).toContain('- beta');
 
@@ -1634,7 +1686,12 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 
 		expect(renderedMarkdowns).toHaveLength(2);
 		expect(renderedMarkdowns[0]).toBe(
-			'> [!info]\n> The template needs to render across a large result set (~3,501 records).<br>Please stand-by.',
+			[
+				'> [!info]',
+				'> The generated Markdown output is large (~5,203 lines).<br>Please stand-by.',
+				'>',
+				'> If Obsidian stops responding, force-close and reopen the app to pause this codeblock so you can edit it.',
+			].join('\n'),
 		);
 		expect(renderedMarkdowns[1]).toContain('- beta');
 
@@ -1645,9 +1702,428 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 			cached: true,
 			cacheHit: 'remount',
 			standbyShown: true,
-			records: 3_501,
-			outputLines: 3_503,
+			records: 5_201,
+			outputLines: 5_203,
 		});
+
+		for (const c of children) c.unload();
+		renderSpy.mockRestore();
+	});
+
+	it('defers query-bearing codeblock execution during cold startup until vault metadata is ready', async () => {
+		let layoutReadyCallback: (() => void) | null = null;
+		const harness = createMutableVaultApp([]);
+		(harness.app.workspace as { onLayoutReady: (cb: () => void) => void }).onLayoutReady = (
+			cb,
+		) => {
+			layoutReadyCallback = cb;
+		};
+
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+		expect(plugin.documentCache.isReady).toBe(false);
+
+		const renderedByEl = new Map<unknown, string[]>();
+		const renderSpy = vi
+			.spyOn(MarkdownRenderer, 'render')
+			.mockImplementation(async (_app, markdown, el) => {
+				const list = renderedByEl.get(el) ?? [];
+				list.push(markdown);
+				renderedByEl.set(el, list);
+			});
+		const querySpy = vi.spyOn(plugin, 'query');
+
+		const children: MarkdownRenderChild[] = [];
+		const makeCtx = () =>
+			({
+				sourcePath: 'dashboard.md',
+				addChild: (c: MarkdownRenderChild) => children.push(c),
+			}) as unknown as MarkdownPostProcessorContext;
+
+		// 1. Static template with neither queries nor `this` renders immediately even before vaultReady
+		const elStatic = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock('Hello Rhizome', elStatic, makeCtx(), plugin);
+		expect(renderedByEl.get(elStatic)).toEqual(['Hello Rhizome']);
+
+		// 2. Query-bearing block waits at waitForVaultReady without running a wasted 0-match query
+		const elQuery = { empty: () => {} } as unknown as HTMLElement;
+		const queryBlockPromise = processRhizomeCodeBlock(
+			'{% query q %}#ready{% endquery %}Count={{ query.q.size }}',
+			elQuery,
+			makeCtx(),
+			plugin,
+		);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(querySpy).not.toHaveBeenCalled();
+		expect(renderedByEl.get(elQuery)).toBeUndefined();
+
+		// Metadata populates and layout becomes ready -> query runs ONCE with ready vault state!
+		harness.setNotes([
+			{
+				path: 'notes/ready.md',
+				cache: { tags: [{ tag: '#ready', position: {} as never }] },
+			},
+			{ path: 'dashboard.md', cache: {} },
+		]);
+		layoutReadyCallback!();
+		await queryBlockPromise;
+
+		expect(querySpy).toHaveBeenCalledTimes(1);
+		expect(renderedByEl.get(elQuery)).toEqual(['Count=1']);
+
+		for (const c of children) c.unload();
+		renderSpy.mockRestore();
+	});
+
+	it('coalesces concurrent Editor + Minimap mounts into 1 query and 1 Liquid render, and skips no-op onUpdate DOM replacement', async () => {
+		const harness = createMutableVaultApp([
+			{
+				path: 'notes/alpha.md',
+				cache: {
+					frontmatter: { priority: 1 },
+					tags: [{ tag: '#task', position: {} as never }],
+				},
+			},
+			{ path: 'dashboard.md', cache: {} },
+		]);
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		const querySpy = vi.spyOn(plugin, 'query');
+		const renderedByEl = new Map<unknown, string[]>();
+		const renderSpy = vi
+			.spyOn(MarkdownRenderer, 'render')
+			.mockImplementation(async (_app, markdown, el) => {
+				const list = renderedByEl.get(el) ?? [];
+				list.push(markdown);
+				renderedByEl.set(el, list);
+			});
+
+		const children: MarkdownRenderChild[] = [];
+		const makeCtx = () =>
+			({
+				sourcePath: 'dashboard.md',
+				addChild: (c: MarkdownRenderChild) => children.push(c),
+			}) as unknown as MarkdownPostProcessorContext;
+
+		const elEditor = { empty: () => {} } as unknown as HTMLElement;
+		const elMinimap = { empty: () => {} } as unknown as HTMLElement;
+		const source = '{% query tasks %}#task{% endquery %}Count={{ query.tasks.size }}';
+
+		// Mount Editor and Minimap concurrently on the exact same tick
+		await Promise.all([
+			processRhizomeCodeBlock(source, elEditor, makeCtx(), plugin),
+			processRhizomeCodeBlock(source, elMinimap, makeCtx(), plugin),
+		]);
+
+		expect(querySpy).toHaveBeenCalledTimes(1);
+		expect(renderedByEl.get(elEditor)).toEqual(['Count=1']);
+		expect(renderedByEl.get(elMinimap)).toEqual(['Count=1']);
+		expect(plugin.activeQueryRoster.size).toBe(2);
+
+		// Property `priority` changes (altering payloadHash so onUpdate runs),
+		// but rendered Markdown (`Count=1`) is byte-for-byte identical -> skips MarkdownRenderer.render!
+		harness.setNotes([
+			{
+				path: 'notes/alpha.md',
+				cache: {
+					frontmatter: { priority: 2 },
+					tags: [{ tag: '#task', position: {} as never }],
+				},
+			},
+			{ path: 'dashboard.md', cache: {} },
+		]);
+		await plugin.activeQueryRoster.nudge();
+		expect(renderedByEl.get(elEditor)).toEqual(['Count=1']);
+		expect(renderedByEl.get(elMinimap)).toEqual(['Count=1']);
+
+		// Adding a second #task note changes rendered Markdown (`Count=2`) -> both containers update!
+		harness.setNotes([
+			{
+				path: 'notes/alpha.md',
+				cache: {
+					frontmatter: { priority: 2 },
+					tags: [{ tag: '#task', position: {} as never }],
+				},
+			},
+			{
+				path: 'notes/beta.md',
+				cache: { tags: [{ tag: '#task', position: {} as never }] },
+			},
+			{ path: 'dashboard.md', cache: {} },
+		]);
+		await plugin.activeQueryRoster.nudge();
+		expect(renderedByEl.get(elEditor)).toEqual(['Count=1', 'Count=2']);
+		expect(renderedByEl.get(elMinimap)).toEqual(['Count=1', 'Count=2']);
+
+		for (const c of children) c.unload();
+		renderSpy.mockRestore();
+	});
+
+	it('short-circuits quarantined codeblocks with a [!danger] callout + Retry button, caches 3.25 MiB failures on remount, clears sentinels post-paint, and resets on rebuildIndex', async () => {
+		const harness = createMutableVaultApp([
+			{
+				path: 'notes/alpha.md',
+				cache: { tags: [{ tag: '#task', position: {} as never }] },
+			},
+			{ path: 'dashboard.md', cache: {} },
+		]);
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		// Seed an in-memory sentinel store with an orphaned 'running' record from a crashed session
+		const sentinelRecords = new Map<string, unknown>();
+		const fakeIdb = {
+			open: () => {
+				const req: Record<string, unknown> = { result: null, onsuccess: null };
+				queueMicrotask(() => {
+					req.result = {
+						objectStoreNames: { contains: () => true },
+						deleteObjectStore: () => {},
+						createObjectStore: () => ({}),
+						transaction: () => {
+							const tx: Record<string, unknown> = { oncomplete: null };
+							tx['objectStore'] = () => ({
+								getAll: () => {
+									const g: Record<string, unknown> = {
+										result: [...sentinelRecords.values()],
+										onsuccess: null,
+									};
+									queueMicrotask(() =>
+										(g['onsuccess'] as (() => void) | null)?.(),
+									);
+									return g;
+								},
+								put: (rec: { hash: string }) => {
+									sentinelRecords.set(rec.hash, { ...rec });
+								},
+								delete: (k: string) => sentinelRecords.delete(k),
+								clear: () => sentinelRecords.clear(),
+							});
+							queueMicrotask(() => (tx['oncomplete'] as (() => void) | null)?.());
+							return tx;
+						},
+						close: () => {},
+					};
+					(req['onsuccess'] as (() => void) | null)?.();
+				});
+				return req as unknown as IDBOpenDBRequest;
+			},
+			deleteDatabase: () => ({}) as unknown as IDBOpenDBRequest,
+		};
+
+		const source = '{% query tasks %}#task{% endquery %}Items={{ query.tasks.size }}';
+		const hash = computeCodeBlockSentinelHash('dashboard.md', source, new Map());
+		sentinelRecords.set(hash, {
+			hash,
+			status: 'running',
+			sessionId: 'crashed-session',
+			records: 19_000,
+			outputChars: 1_500_000,
+			outputLines: 19_000,
+			lastOkDurationMs: null,
+			lastOkChars: null,
+			lastOkLines: null,
+			updatedAt: 1_000,
+		});
+
+		plugin.renderSentinelStore = new RenderSentinelStore(harness.app, plugin.loggerAdapter, {
+			idbStore: new RenderSentinelIdbStore(
+				'rhizome-sentinels-test',
+				fakeIdb as unknown as IDBFactory,
+			),
+			sessionId: 'current-session',
+		});
+		await plugin.renderSentinelStore.hydrate();
+		expect(plugin.renderSentinelStore.getQuarantined(hash)).toBeDefined();
+
+		const renderedMarkdowns: string[] = [];
+		const renderSpy = vi
+			.spyOn(MarkdownRenderer, 'render')
+			.mockImplementation(async (_app, markdown) => {
+				renderedMarkdowns.push(markdown);
+			});
+		const querySpy = vi.spyOn(plugin, 'query');
+
+		// Mock container element supporting Obsidian's createDiv / createEl so the Retry button mounts
+		const listeners = new Map<string, (evt: Event) => void>();
+		const mockButton = {
+			addEventListener: (type: string, fn: (evt: Event) => void) => {
+				listeners.set(type, fn);
+			},
+			removeEventListener: (type: string) => {
+				listeners.delete(type);
+			},
+		};
+		const el = {
+			empty: () => {
+				listeners.clear();
+			},
+			createDiv: () => ({
+				createEl: () => mockButton,
+			}),
+		} as unknown as HTMLElement;
+
+		const children: MarkdownRenderChild[] = [];
+		const ctx = {
+			sourcePath: 'dashboard.md',
+			addChild: (c: MarkdownRenderChild) => children.push(c),
+		} as unknown as MarkdownPostProcessorContext;
+
+		// 1. Quarantined mount renders [!danger] callout + Retry button with 0 plugin.query calls
+		await processRhizomeCodeBlock(source, el, ctx, plugin);
+		expect(querySpy).not.toHaveBeenCalled();
+		expect(renderedMarkdowns).toHaveLength(1);
+		expect(renderedMarkdowns[0]).toContain('[!danger]');
+		expect(renderedMarkdowns[0]).toContain('19,000 records');
+		expect(renderedMarkdowns[0]).toContain('19,000 lines');
+		expect(renderedMarkdowns[0]).toContain('1.4 MB');
+		expect(renderedMarkdowns[0]).toContain(
+			'remove language identifiers (such as `json`) from fenced codeblocks',
+		);
+		expect(listeners.has('mousedown')).toBe(true);
+		expect(listeners.has('click')).toBe(true);
+
+		// 2. Clicking Retry stops propagation, promotes sentinel to 'probation', and re-renders live!
+		let stopped = 0;
+		const makeEvt = () =>
+			({
+				preventDefault: () => {},
+				stopPropagation: () => {
+					stopped++;
+				},
+			}) as unknown as Event;
+		listeners.get('mousedown')!(makeEvt());
+		listeners.get('click')!(makeEvt());
+		expect(stopped).toBe(2);
+
+		await new Promise((r) => window.setTimeout(r, 20));
+		expect(querySpy).toHaveBeenCalledTimes(1);
+		expect(renderedMarkdowns[renderedMarkdowns.length - 1]).toBe('Items=1');
+
+		// 3. Re-quarantine and verify rebuildIndex() clears sentinels and resets open blocks
+		sentinelRecords.set(hash, {
+			hash,
+			status: 'quarantined',
+			sessionId: 'current-session',
+			records: 19_000,
+			outputChars: 1_500_000,
+			outputLines: 19_000,
+			lastOkDurationMs: null,
+			lastOkChars: null,
+			lastOkLines: null,
+			updatedAt: 2_000,
+		});
+		plugin.renderSentinelStore = new RenderSentinelStore(harness.app, plugin.loggerAdapter, {
+			idbStore: new RenderSentinelIdbStore(
+				'rhizome-sentinels-test',
+				fakeIdb as unknown as IDBFactory,
+			),
+			sessionId: 'session-after-quarantine',
+		});
+		await plugin.renderSentinelStore.hydrate();
+		expect(plugin.renderSentinelStore.getQuarantined(hash)).toBeDefined();
+		await plugin.rebuildIndex();
+		await new Promise((r) => window.setTimeout(r, 20));
+		expect(plugin.renderSentinelStore.getQuarantined(hash)).toBeUndefined();
+
+		// 4. Verify 3.25 MiB TEMPLATE_RENDER_ERROR is cached across Live Preview remounts
+		const runawaySource = [
+			'{% query tasks %}#task{% endquery %}',
+			'{% assign big = "x" | append: "x" %}{% for i in (1..22) %}{% assign big = big | append: big %}{% endfor %}{{ big }}',
+		].join('\n');
+		querySpy.mockClear();
+		renderedMarkdowns.length = 0;
+		const elRunaway1 = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(runawaySource, elRunaway1, ctx, plugin);
+		expect(querySpy).toHaveBeenCalledTimes(1);
+		expect(renderedMarkdowns[0]).toContain('TEMPLATE_RENDER_ERROR');
+		expect(renderedMarkdowns[0]).toContain('3.25 MiB');
+
+		children[children.length - 1]?.unload();
+		const elRunaway2 = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(runawaySource, elRunaway2, ctx, plugin);
+		// Remount hits CodeBlockRenderCache without re-running plugin.query or LiquidJS!
+		expect(querySpy).toHaveBeenCalledTimes(1);
+		expect(renderedMarkdowns[1]).toBe(renderedMarkdowns[0]);
+
+		// 5. Verify post-paint sentinel lifecycle holds 'running' across MarkdownRenderer.render until rAF -> setTimeout(0)
+		let pendingRaf: FrameRequestCallback | null = null;
+		const win = window as unknown as {
+			requestAnimationFrame?: (cb: FrameRequestCallback) => number;
+		};
+		const prevRaf = win.requestAnimationFrame;
+		win.requestAnimationFrame = (cb: FrameRequestCallback) => {
+			pendingRaf = cb;
+			return 1;
+		};
+		try {
+			const heavySource =
+				'{% query tasks %}#task{% endquery %}{% assign s = "abcdefghij" %}{% for i in (1..13) %}{% assign s = s | append: s %}{% endfor %}{{ s }}';
+			const heavyHash = computeCodeBlockSentinelHash('dashboard.md', heavySource, new Map());
+			const elHeavy = { empty: () => {} } as unknown as HTMLElement;
+			await processRhizomeCodeBlock(heavySource, elHeavy, ctx, plugin);
+
+			// Immediately after MarkdownRenderer.render resolves (before rAF fires), sentinel is STILL 'running'!
+			expect(plugin.renderSentinelStore.getRecord(heavyHash)?.status).toBe('running');
+			expect(pendingRaf).toBeTypeOf('function');
+
+			// Fire rAF + trailing macrotask -> sentinel transitions to 'ok' with lastOk stats!
+			pendingRaf!(16);
+			await new Promise((r) => window.setTimeout(r, 15));
+			const completed = plugin.renderSentinelStore.getRecord(heavyHash);
+			expect(completed?.status).toBe('ok');
+			expect(completed?.lastOkChars).toBe(81_920);
+
+			// 6. Hidden popout ownerDocument cleans up 'running' via ownerWin.setTimeout without stalling on rAF
+			let popoutRafCalled = false;
+			const popoutWin = {
+				document: { visibilityState: 'hidden' },
+				requestAnimationFrame: () => {
+					popoutRafCalled = true;
+					return 1;
+				},
+				setTimeout: (fn: () => void, ms: number) => window.setTimeout(fn, ms),
+			};
+			const elHiddenPopout = {
+				empty: () => {},
+				ownerDocument: { defaultView: popoutWin },
+			} as unknown as HTMLElement;
+			const ctxPopout = {
+				sourcePath: 'popout.md',
+				addChild: (c: MarkdownRenderChild) => children.push(c),
+			} as unknown as MarkdownPostProcessorContext;
+			const popoutHash = computeCodeBlockSentinelHash('popout.md', heavySource, new Map());
+			await processRhizomeCodeBlock(heavySource, elHiddenPopout, ctxPopout, plugin);
+			await new Promise((r) => window.setTimeout(r, 15));
+			expect(popoutRafCalled).toBe(false);
+			expect(plugin.renderSentinelStore.getRecord(popoutHash)?.status).toBe('ok');
+
+			// 7. If MarkdownRenderer.render rejects after markRunning, catch cleans up activeRuns and sentinel
+			renderSpy.mockRejectedValueOnce(new Error('Renderer boom'));
+			const rejectHash = computeCodeBlockSentinelHash('reject.md', heavySource, new Map());
+			const ctxReject = {
+				sourcePath: 'reject.md',
+				addChild: (c: MarkdownRenderChild) => children.push(c),
+			} as unknown as MarkdownPostProcessorContext;
+			await expect(
+				processRhizomeCodeBlock(
+					heavySource,
+					{ empty: () => {} } as unknown as HTMLElement,
+					ctxReject,
+					plugin,
+				),
+			).rejects.toThrow('Renderer boom');
+			await new Promise((r) => window.setTimeout(r, 15));
+			expect(plugin.renderSentinelStore.getRecord(rejectHash)).toBeUndefined();
+		} finally {
+			if (prevRaf === undefined) {
+				delete win.requestAnimationFrame;
+			} else {
+				win.requestAnimationFrame = prevRaf;
+			}
+		}
 
 		for (const c of children) c.unload();
 		renderSpy.mockRestore();

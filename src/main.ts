@@ -9,6 +9,7 @@ import { createRhizomeEditorExtension } from './adapters/codemirror/rhizome-edit
 import { NormalizedDocumentCache } from './adapters/normalized-document-cache';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
 import { PluginDataStore } from './adapters/plugin-data-store';
+import { RenderSentinelStore } from './adapters/render-sentinel-store';
 import { processRhizomeCodeBlock } from './adapters/rhizome-codeblock';
 import {
 	explainVaultQuery,
@@ -59,9 +60,14 @@ export default class RhizomePlugin extends Plugin {
 	bodyScanCache!: BodyScanCache;
 	documentCache!: NormalizedDocumentCache;
 	codeBlockRenderCache!: CodeBlockRenderCache;
+	renderSentinelStore!: RenderSentinelStore;
+	private vaultReady = false;
+	private readonly vaultReadyWaiters = new Set<() => void>();
 
 	override async onload() {
 		this.settings = { ...DEFAULT_SETTINGS };
+		this.vaultReady = false;
+		this.vaultReadyWaiters.clear();
 
 		// Wired here so it exists before any core/service constructor
 		// needs it injected; reads settings live, so no re-wiring is needed
@@ -98,6 +104,8 @@ export default class RhizomePlugin extends Plugin {
 		);
 		this.documentCache.setReady(false);
 		this.codeBlockRenderCache = new CodeBlockRenderCache();
+		this.renderSentinelStore = new RenderSentinelStore(this.app, this.loggerAdapter);
+		void this.renderSentinelStore.hydrate();
 		this.activeQueryRoster = new ActiveQueryRoster(
 			this.app,
 			this.loggerAdapter,
@@ -109,6 +117,13 @@ export default class RhizomePlugin extends Plugin {
 		this.register(() => this.bodyScanCache.dispose());
 		this.register(() => this.documentCache.clear());
 		this.register(() => this.codeBlockRenderCache.clear());
+		this.register(() => this.renderSentinelStore.dispose());
+		this.register(() => {
+			for (const wake of [...this.vaultReadyWaiters]) {
+				wake();
+			}
+			this.vaultReadyWaiters.clear();
+		});
 
 		let refreshTimer: number | null = null;
 		let resetTimer: number | null = null;
@@ -156,14 +171,17 @@ export default class RhizomePlugin extends Plugin {
 		const isTemplateFolderNote = (path: unknown): boolean =>
 			isMarkdownPath(path) && isPathInTemplateFolders(path, this.getTemplateFolderConfig());
 
-		let vaultReady = false;
 		const startupTasks: Array<Promise<void>> = [];
 		const markVaultReady = (): void => {
-			if (vaultReady) return;
-			vaultReady = true;
+			if (this.vaultReady) return;
+			this.vaultReady = true;
 			this.documentCache.setReady(true);
 			this.backlinkIndex.dispose();
 			this.activeQueryRoster.markVaultDirty();
+			for (const wake of [...this.vaultReadyWaiters]) {
+				wake();
+			}
+			this.vaultReadyWaiters.clear();
 			if (this.activeQueryRoster.size > 0) {
 				scheduleRefresh();
 			}
@@ -340,8 +358,25 @@ export default class RhizomePlugin extends Plugin {
 		}
 	}
 
+	waitForVaultReady(signal?: AbortSignal): Promise<void> {
+		if (this.vaultReady || signal?.aborted) {
+			return Promise.resolve();
+		}
+		return new Promise<void>((resolve) => {
+			const settle = (): void => {
+				this.vaultReadyWaiters.delete(settle);
+				signal?.removeEventListener('abort', settle);
+				resolve();
+			};
+			this.vaultReadyWaiters.add(settle);
+			signal?.addEventListener('abort', settle, { once: true });
+		});
+	}
+
 	async rebuildIndex(): Promise<void> {
 		await this.bodyScanCache.clearAll();
+		await this.renderSentinelStore.clearAll();
+		this.codeBlockRenderCache.clear();
 		this.documentCache.clear();
 		this.backlinkIndex.dispose();
 		this.activeQueryRoster.markVaultDirty();

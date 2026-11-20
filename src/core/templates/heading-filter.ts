@@ -6,10 +6,13 @@ import {
 	type ListRenderEnv,
 	type ListStyleMarker,
 	parseListArguments,
+	recordListRenderLine,
+	recordListRenderStep,
 	renderArrayAtDepth,
 	renderGroupBucketAtDepth,
 	renderKeyValueEntriesAtDepth,
 } from './list-filter';
+import { checkFilterOutputSize } from './render-limits';
 import {
 	isPlainRecord,
 	type LiquidFilterThis,
@@ -182,6 +185,7 @@ function renderGroupBucketAsHeading(
 	env: ListRenderEnv,
 	itemIndex = 0,
 ): string[] {
+	recordListRenderStep(env);
 	if (level > 6) {
 		return renderGroupBucketAtDepth(bucket, 1, itemIndex, env).lines;
 	}
@@ -197,6 +201,7 @@ function renderGroupBucketAsHeading(
 	const lines: string[] = [];
 	const headerLine = formatHeadingEntry(level, headline);
 	if (headerLine !== null) {
+		recordListRenderLine(env, headerLine);
 		lines.push(headerLine);
 	}
 
@@ -206,6 +211,7 @@ function renderGroupBucketAsHeading(
 	if (nestedGroups && nestedGroups.length > 0) {
 		let childIdx = 0;
 		for (const g of nestedGroups) {
+			recordListRenderStep(env);
 			if (!isGroupByBucket(g)) continue;
 			lines.push(...renderGroupBucketAsHeading(g, level + 1, env, childIdx));
 			childIdx++;
@@ -229,6 +235,7 @@ function renderRecordEntriesAsHeading(
 
 	const lines: string[] = [];
 	for (const k of keys) {
+		recordListRenderStep(env);
 		const rawVal = obj[k];
 		if (isVacuousSortOrGroupValue(rawVal)) continue;
 		const v = unwrapLiquidValue(rawVal);
@@ -237,14 +244,20 @@ function renderRecordEntriesAsHeading(
 		if (scalar !== null) {
 			const headerLine = formatHeadingEntry(level, k);
 			if (headerLine !== null) {
-				lines.push(headerLine, scalar.replace(/\r\n|\r/g, '\n'));
+				const scalarLine = scalar.replace(/\r\n|\r/g, '\n');
+				recordListRenderLine(env, headerLine);
+				recordListRenderLine(env, scalarLine);
+				lines.push(headerLine, scalarLine);
 			}
 			continue;
 		}
 
 		if (isGroupByBucket(v)) {
 			const headerLine = formatHeadingEntry(level, k);
-			if (headerLine !== null) lines.push(headerLine);
+			if (headerLine !== null) {
+				recordListRenderLine(env, headerLine);
+				lines.push(headerLine);
+			}
 			lines.push(...renderGroupBucketAsHeading(v, level + 1, env, 0));
 			continue;
 		}
@@ -255,7 +268,10 @@ function renderRecordEntriesAsHeading(
 			const childLines = renderRecordEntriesAsHeading(v, childKeys, level + 1, env);
 			if (childLines.length === 0) continue;
 			const headerLine = formatHeadingEntry(level, k);
-			if (headerLine !== null) lines.push(headerLine);
+			if (headerLine !== null) {
+				recordListRenderLine(env, headerLine);
+				lines.push(headerLine);
+			}
 			lines.push(...childLines);
 			continue;
 		}
@@ -264,7 +280,10 @@ function renderRecordEntriesAsHeading(
 			const childRes = renderArrayAtDepth(v, 1, env, false);
 			if (childRes.lines.length === 0) continue;
 			const headerLine = formatHeadingEntry(level, k);
-			if (headerLine !== null) lines.push(headerLine);
+			if (headerLine !== null) {
+				recordListRenderLine(env, headerLine);
+				lines.push(headerLine);
+			}
 			lines.push(...childRes.lines);
 		}
 	}
@@ -300,6 +319,7 @@ export function headingFilter(
 		selectors,
 		filterThis: this,
 		language,
+		limitTracker: { steps: 0, chars: 1 },
 	};
 
 	let lines: string[] = [];
@@ -309,6 +329,7 @@ export function headingFilter(
 	} else if (Array.isArray(unwrapped)) {
 		let bucketIdx = 0;
 		for (const rawEl of unwrapped) {
+			recordListRenderStep(env);
 			if (isVacuousSortOrGroupValue(rawEl)) continue;
 			const el = unwrapLiquidValue(rawEl);
 
@@ -329,7 +350,10 @@ export function headingFilter(
 					const scalar = formatTableScalar(firstVal);
 					if (scalar !== null) {
 						const hLine = formatHeadingEntry(clampedLevel, scalar);
-						if (hLine !== null) lines.push(hLine);
+						if (hLine !== null) {
+							recordListRenderLine(env, hLine);
+							lines.push(hLine);
+						}
 					} else if (isGroupByBucket(firstVal)) {
 						lines.push(
 							...renderGroupBucketAsHeading(
@@ -349,7 +373,10 @@ export function headingFilter(
 				const firstScalar = formatTableScalar(firstVal);
 				if (firstScalar !== null) {
 					const hLine = formatHeadingEntry(clampedLevel, firstScalar);
-					if (hLine !== null) lines.push(hLine);
+					if (hLine !== null) {
+						recordListRenderLine(env, hLine);
+						lines.push(hLine);
+					}
 					lines.push(
 						...renderRecordEntriesAsHeading(obj, keys.slice(1), clampedLevel + 1, env),
 					);
@@ -364,7 +391,10 @@ export function headingFilter(
 			const scalar = formatTableScalar(el);
 			if (scalar !== null) {
 				const hLine = formatHeadingEntry(clampedLevel, scalar);
-				if (hLine !== null) lines.push(hLine);
+				if (hLine !== null) {
+					recordListRenderLine(env, hLine);
+					lines.push(hLine);
+				}
 				continue;
 			}
 
@@ -374,7 +404,10 @@ export function headingFilter(
 				const headAtom = formatHorizonAtom(nonVacuous[0]);
 				if (headAtom === null) continue;
 				const hLine = formatHeadingEntry(clampedLevel, headAtom);
-				if (hLine !== null) lines.push(hLine);
+				if (hLine !== null) {
+					recordListRenderLine(env, hLine);
+					lines.push(hLine);
+				}
 				if (nonVacuous.length > 1) {
 					lines.push(...renderArrayAtDepth(nonVacuous.slice(1), 1, env, false).lines);
 				}
@@ -390,9 +423,17 @@ export function headingFilter(
 		const scalar = formatTableScalar(unwrapped);
 		if (scalar !== null) {
 			const hLine = formatHeadingEntry(clampedLevel, scalar);
-			if (hLine !== null) lines = [hLine];
+			if (hLine !== null) {
+				recordListRenderLine(env, hLine);
+				lines = [hLine];
+			}
 		}
 	}
 
-	return lines.length > 0 ? `\n${lines.join('\n')}\n` : '';
+	if (lines.length === 0) {
+		return '';
+	}
+	const rendered = `\n${lines.join('\n')}\n`;
+	checkFilterOutputSize(rendered.length);
+	return rendered;
 }

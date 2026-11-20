@@ -1,4 +1,5 @@
 import { isVacuousOccurrence } from '@core/search';
+import { checkFilterRenderLimit, FILTER_LIMIT_CHECK_STRIDE } from './render-limits';
 import {
 	evaluateSelectorOnItem,
 	type LiquidFilterThis,
@@ -350,6 +351,9 @@ export function aggregateFilter(
 
 	// Pass 1: Single scan across all rows, folding all selectors per grouped outputKey
 	for (let i = 0; i < totalIndexCount; i++) {
+		if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(this);
+		}
 		const row = rows[i];
 		const indexCount = i + 1;
 		const rowSteps: AggregateStepMetrics[] = [];
@@ -406,6 +410,9 @@ export function aggregateFilter(
 	const isSingleAttr = accumulators.length === 1;
 
 	for (let i = 0; i < totalIndexCount; i++) {
+		if ((i & (FILTER_LIMIT_CHECK_STRIDE - 1)) === 0) {
+			checkFilterRenderLimit(this);
+		}
 		const indexCount = i + 1;
 		const stepObj: Record<string, unknown> = {};
 		const rowSteps = stepsByRow[i]!;
