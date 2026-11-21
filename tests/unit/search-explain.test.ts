@@ -457,4 +457,48 @@ describe('explainQuery', () => {
 		);
 		expect(md).toContain('> [!warning] Warning 1: `WARN_MISSING_THIS_VALUE`');
 	});
+
+	it('renders the - **Cutoff**: header bullet immediately after - **Status**: when cutoff metadata is provided and omits it when undefined', () => {
+		const cfg = makeConfig();
+
+		const standalone = explainQuery('#task', cfg, REF_TIME_MS);
+		expect(standalone).not.toContain('- **Cutoff**:');
+
+		const defaultCutoffMd = explainQuery(
+			'#task',
+			cfg,
+			REF_TIME_MS,
+			'Query Explain Plan',
+			null,
+			{
+				value: 5_000,
+				explicit: false,
+			},
+		);
+		expect(defaultCutoffMd).toContain(
+			[
+				'- **Status**: *Executable* with 0 errors, 0 warnings, 0 hints.',
+				'- **Cutoff**: `5,000` records (default)',
+				'- **Context**:',
+			].join('\n'),
+		);
+
+		const singularMd = explainQuery('#task', cfg, REF_TIME_MS, 'Query Explain Plan', null, {
+			value: 1,
+			explicit: true,
+		});
+		expect(singularMd).toContain('- **Cutoff**: `1` record\n- **Context**:');
+
+		const pluralMd = explainQuery('#task', cfg, REF_TIME_MS, 'Query Explain Plan', null, {
+			value: 1_250,
+			explicit: true,
+		});
+		expect(pluralMd).toContain('- **Cutoff**: `1,250` records\n- **Context**:');
+
+		const unlimitedMd = explainQuery('#task', cfg, REF_TIME_MS, 'Query Explain Plan', null, {
+			value: 0,
+			explicit: true,
+		});
+		expect(unlimitedMd).toContain('- **Cutoff**: Unlimited (`cutoff: 0`)\n- **Context**:');
+	});
 });

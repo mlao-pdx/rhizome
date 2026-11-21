@@ -1,8 +1,10 @@
-import { formatSourceCaretSnippet, type SourceSpan } from '@core/search';
+import { formatSourceCaretSnippet, type QueryExplainCutoff, type SourceSpan } from '@core/search';
 import { Liquid, LiquidError, Tag, type Template, toPromise } from 'liquidjs';
 import { registerHeadingTag } from './heading-filter';
 import { registerPayloadLiquidFilters } from './payload-filters';
+import { applyQueryCutoffs } from './query-cutoff';
 import {
+	checkFilterOutputSize,
 	installBoundedTemplateRenderer,
 	TEMPLATE_MEMORY_LIMIT,
 	TEMPLATE_MEMORY_LIMIT_HINT,
@@ -721,7 +723,7 @@ export async function renderParsedRhizomeTemplate(
 	source: string,
 	parsed: ParsedRhizomeTemplate,
 	payload: Readonly<Record<string, unknown[]>>,
-	explainQuery: (query: string, heading: string) => Promise<string>,
+	explainQuery: (query: string, heading: string, cutoff?: QueryExplainCutoff) => Promise<string>,
 	runtimeContext?: TemplateRuntimeContext,
 ): Promise<TemplateRenderResult> {
 	const queries: readonly ExtractedQueryBlock[] = Object.freeze([...parsed.env.queries]);
@@ -747,20 +749,32 @@ export async function renderParsedRhizomeTemplate(
 		try {
 			const safePayload: Readonly<Record<string, unknown[]>> =
 				payload && typeof payload === 'object' ? payload : Object.freeze({});
-			parsed.env.payload = extractUserQueryMap(safePayload);
+			const { effectivePayload, calloutsMarkdown } = applyQueryCutoffs(
+				queries,
+				safePayload,
+				runtimeContext,
+			);
+			parsed.env.payload = extractUserQueryMap(effectivePayload);
 			parsed.env.explainQuery = explainQuery;
 
-			const rootScope = buildRhizomeTemplateContext(safePayload, runtimeContext);
+			const rootScope = buildRhizomeTemplateContext(effectivePayload, runtimeContext);
 			const renderedRaw: unknown = await parsed.liquid.render(templates, rootScope, {
 				globals: rootScope,
 				renderLimit: TEMPLATE_RENDER_LIMIT_MS,
 				memoryLimit: TEMPLATE_MEMORY_LIMIT,
 			});
-			const markdown = typeof renderedRaw === 'string' ? renderedRaw : '';
+			const renderedMarkdown = typeof renderedRaw === 'string' ? renderedRaw : '';
+			const finalMarkdown =
+				calloutsMarkdown.length === 0
+					? renderedMarkdown
+					: renderedMarkdown.trim().length === 0
+						? calloutsMarkdown
+						: `${calloutsMarkdown}\n\n${renderedMarkdown}`;
+			checkFilterOutputSize(finalMarkdown.length);
 
 			return Object.freeze({
 				ok: true,
-				markdown,
+				markdown: finalMarkdown,
 				queries,
 				diagnostics: Object.freeze([]),
 			});
@@ -845,7 +859,7 @@ export async function renderRhizomeTemplate(
 			source,
 			parsed,
 			payload,
-			(q, heading) => callbacks.explainQuery(q, heading),
+			(q, heading, cutoff) => callbacks.explainQuery(q, heading, cutoff),
 			callbacks.runtimeContext,
 		);
 	} catch (err: unknown) {

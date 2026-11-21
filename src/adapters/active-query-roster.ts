@@ -259,7 +259,7 @@ interface ActiveSubscription {
 	readonly includeHostInHash: boolean;
 	readonly headingLevel: number | (() => number) | undefined;
 	sourcePath: string | undefined;
-	lastPayloadHash: string;
+	lastPayloadHash: string | null;
 }
 
 function buildConfigGroupKey(
@@ -522,6 +522,7 @@ export class ActiveQueryRoster {
 			this.vaultRevision++;
 		}
 		const normOld = normalizePath(oldPath);
+		const normNew = normalizePath(newPath);
 		for (const sub of this.subscriptions.values()) {
 			if (sub.signal?.aborted) {
 				continue;
@@ -531,6 +532,9 @@ export class ActiveQueryRoster {
 				(sub.sourcePath === oldPath || normalizePath(sub.sourcePath) === normOld)
 			) {
 				sub.sourcePath = newPath;
+				if (normOld !== normNew) {
+					sub.lastPayloadHash = null;
+				}
 				this.renamePending = true;
 				try {
 					sub.onSourcePathRename?.(newPath);
@@ -728,10 +732,12 @@ export class ActiveQueryRoster {
 						continue;
 					}
 					if (sub.entries.length > 0) {
-						try {
-							sub.onUnchangedPayload?.(this.vaultRevision, sub.lastPayloadHash);
-						} catch {
-							// Ignore callback error
+						if (sub.lastPayloadHash !== null) {
+							try {
+								sub.onUnchangedPayload?.(this.vaultRevision, sub.lastPayloadHash);
+							} catch {
+								// Ignore callback error
+							}
 						}
 						continue;
 					}

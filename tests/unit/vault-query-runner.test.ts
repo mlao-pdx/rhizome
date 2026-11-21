@@ -1121,6 +1121,15 @@ describe('runVaultQuery', () => {
 			);
 			// Only the 2 matched notes (Apollo, LandModule) project backlinks; unmatched Q4Goal is untouched
 			expect(backlinkGetCalls).toBe(2);
+
+			const explainWithoutCutoff = await explainVaultQuery(app, '#goal', { timeZone: 'UTC' });
+			expect(explainWithoutCutoff).not.toContain('- **Cutoff**:');
+
+			const explainWithCutoff = await explainVaultQuery(app, '#goal', {
+				timeZone: 'UTC',
+				cutoff: { value: 250, explicit: true },
+			});
+			expect(explainWithCutoff).toContain('- **Cutoff**: `250` records\n- **Context**:');
 		});
 	});
 });

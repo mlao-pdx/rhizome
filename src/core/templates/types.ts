@@ -1,13 +1,15 @@
-import type { SourceSpan } from '@core/search';
+import type { QueryExplainCutoff, SourceSpan } from '@core/search';
 
 /**
- * Metadata and source spans for a single `{% query <name> [explain] %} ... {% endquery %}`
+ * Metadata and source spans for a single `{% query <name> [explain] [cutoff: <int>] %} ... {% endquery %}`
  * block extracted during Pass 1 of template compilation.
  */
 export interface ExtractedQueryBlock {
 	readonly name: string;
 	readonly query: string;
 	readonly explain: boolean;
+	readonly cutoff: number;
+	readonly explicitCutoff: boolean;
 	readonly headerSpan: SourceSpan;
 	readonly bodySpan: SourceSpan;
 	readonly fullSpan: SourceSpan;
@@ -88,7 +90,7 @@ export interface TemplateRuntimeContext {
  */
 export interface TemplateExecutionCallbacks {
 	runQueries(queries: Readonly<Record<string, string>>): Promise<Record<string, unknown[]>>;
-	explainQuery(query: string, heading: string): Promise<string>;
+	explainQuery(query: string, heading: string, cutoff?: QueryExplainCutoff): Promise<string>;
 	readTemplateFile?: (vaultRelativePath: string) => Promise<string | null>;
 	folders?: TemplateFolderConfig;
 	runtimeContext?: TemplateRuntimeContext;

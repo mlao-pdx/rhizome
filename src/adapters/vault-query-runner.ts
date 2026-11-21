@@ -26,6 +26,7 @@ import {
 	normalizeObsidianMetadata,
 	type PreparedQuery,
 	type PropertyTypeRegistry,
+	type QueryExplainCutoff,
 	type ResolvedEngineConfig,
 	type ResolveLinkPathFn,
 	VaultGraphSnapshot,
@@ -68,6 +69,11 @@ export interface VaultQueryOptions {
 	readonly referenceTimeMs?: number | undefined;
 	/** Optional alternate level-1 Markdown heading for `explainQuery` / `explainVaultQuery` (defaults to `'Query Explain Plan'`). */
 	readonly heading?: string | undefined;
+	/**
+	 * Optional Pass 2 record cutoff metadata displayed in the `# Query Explain Plan` header
+	 * when `explainVaultQuery` is invoked from a `{% query %}` template block.
+	 */
+	readonly cutoff?: QueryExplainCutoff | undefined;
 	/** Optional AbortSignal to unregister a reactive `onUpdate` callback when the caller unloads. */
 	readonly signal?: AbortSignal | undefined;
 	/**
@@ -1107,6 +1113,7 @@ export async function explainVaultQuery(
 		referenceTimeMs,
 		options?.heading,
 		hostDoc,
+		options?.cutoff,
 	);
 
 	logger?.log('debug', 'Generated query explanation', {

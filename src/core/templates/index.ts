@@ -1,5 +1,6 @@
 export * from './types';
 export * from './vault-liquid-fs';
+export * from './query-cutoff';
 export * from './query-tag';
 export * from './temporal-drop';
 export * from './moment-date-formatter';

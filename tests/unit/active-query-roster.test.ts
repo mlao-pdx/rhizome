@@ -1463,7 +1463,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(LARGE_MARKDOWN_CHAR_THRESHOLD).toBe(100_000);
 
 		const parsed = parseRhizomeTemplatePass1(
-			'{% query alpha %}#a{% endquery %}{% query beta %}#b{% endquery %}',
+			'{% query alpha cutoff: 0 %}#a{% endquery %}{% query beta cutoff: 0 %}#b{% endquery %}',
 		);
 		const fakePayload = {
 			alpha: new Array(7_500).fill({}),
@@ -1471,6 +1471,11 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 			'◊host': [{}],
 		} as unknown as VaultQueryResult;
 		expect(countExtractedQueryRecords(parsed, fakePayload)).toBe(12_000);
+
+		const clampedParsed = parseRhizomeTemplatePass1(
+			'{% query alpha %}#a{% endquery %}{% query beta cutoff: 1000 %}#b{% endquery %}',
+		);
+		expect(countExtractedQueryRecords(clampedParsed, fakePayload)).toBe(6_000);
 
 		expect(measureMarkdownOutput('')).toEqual({ chars: 0, lines: 0 });
 		expect(measureMarkdownOutput('single line')).toEqual({ chars: 11, lines: 1 });
@@ -1568,7 +1573,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		// Produces 12,500 lines (exceeding both Checkpoint 1 and Checkpoint 2),
 		// but standby callout must only be rendered once before the final output.
 		const source = [
-			'{% query myQuery %}#daily{% endquery %}',
+			'{% query myQuery cutoff: 0 %}#daily{% endquery %}',
 			'{% for item in query.myQuery %}- {{ item.file.basename }}\n{% endfor %}',
 		].join('\n');
 
@@ -1601,7 +1606,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 
 		// Loop-free summary template ({{ query.myQuery.size }}) skips Checkpoint 1 on BOTH initial mount AND remount!
 		const summarySource =
-			'{% query myQuery %}#daily{% endquery %}Count={{ query.myQuery.size }}';
+			'{% query myQuery cutoff: 0 %}#daily{% endquery %}Count={{ query.myQuery.size }}';
 		renderedMarkdowns.length = 0;
 		const elSummary1 = { empty: () => {} } as unknown as HTMLElement;
 		await processRhizomeCodeBlock(summarySource, elSummary1, ctx, plugin);
@@ -1655,7 +1660,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		} as unknown as MarkdownPostProcessorContext;
 
 		const source = [
-			'{% query tasks %}#task{% endquery %}',
+			'{% query tasks cutoff: 0 %}#task{% endquery %}',
 			'{% for item in query.tasks %}- {{ item.file.basename }}\n{% endfor %}',
 		].join('\n');
 
@@ -2670,5 +2675,133 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(group2Updates).toHaveLength(1);
 		expect(group2Updates[0]?.['shipped']?.map((m) => m.file.path)).toEqual(['notes/a.md']);
 		roster.clear();
+	});
+
+	it('clamps default-cutoff 14,000-match queries to 5,000 records (skipping Checkpoint 1 standby), emits [!warning]- callouts, preserves full @query.<name> sibling waves, and threads cutoff into explain plans', async () => {
+		const harness = createMutableVaultApp([
+			{ path: 'goals/G1.md', cache: { tags: [{ tag: '#goal', position: {} as never }] } },
+			{ path: 'goals/G2.md', cache: { tags: [{ tag: '#goal', position: {} as never }] } },
+			{ path: 'goals/G3.md', cache: { tags: [{ tag: '#goal', position: {} as never }] } },
+			{
+				path: 'tasks/T3.md',
+				cache: {
+					tags: [{ tag: '#task', position: {} as never }],
+					frontmatter: { up: '[[goals/G3.md]]' },
+					frontmatterLinks: [
+						{ key: 'up', link: 'goals/G3.md', original: '[[goals/G3.md]]' },
+					],
+				},
+			},
+			{ path: 'Dashboard.md', cache: {} },
+		]);
+		(
+			harness.app.metadataCache as unknown as {
+				getFirstLinkpathDest: (linkpath: string) => unknown;
+			}
+		).getFirstLinkpathDest = (linkpath: string) => harness.app.vault.getFileByPath(linkpath);
+		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
+		await plugin.onload();
+
+		const renderedMarkdowns: string[] = [];
+		const renderSpy = vi
+			.spyOn(MarkdownRenderer, 'render')
+			.mockImplementation(async (_app, markdown) => {
+				renderedMarkdowns.push(markdown);
+			});
+
+		const logCalls: Array<{ source: string; [key: string]: unknown }> = [];
+		vi.spyOn(plugin.loggerAdapter, 'log').mockImplementation((_level, _msg, meta) => {
+			logCalls.push(meta);
+		});
+
+		const children: MarkdownRenderChild[] = [];
+		const ctx = {
+			sourcePath: 'Dashboard.md',
+			addChild: (c: MarkdownRenderChild) => children.push(c),
+		} as unknown as MarkdownPostProcessorContext;
+
+		// 1. Sibling @query.goals wave sees all 3 goals even when {% query goals cutoff: 1 %} truncates Pass 2 to 1 goal
+		const waveSource = [
+			'{% query goals cutoff: 1 %}#goal{% endquery %}',
+			'{% query tasks explain cutoff: 25 %}#task AND [up -> @query.goals]{% endquery %}',
+			'Goals={{ query.goals.size }} Tasks={{ query.tasks | map: "file.basename" | join: "," }}',
+		].join('\n');
+		const elWave = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(waveSource, elWave, ctx, plugin);
+
+		expect(renderedMarkdowns).toHaveLength(1);
+		expect(renderedMarkdowns[0]).toContain(
+			'> [!warning]- Query `goals` 3 matches; cut-off at 1',
+		);
+		expect(renderedMarkdowns[0]).toContain(
+			'> Defined inline in this codeblock in [[Dashboard.md]] (line 1).',
+		);
+		expect(renderedMarkdowns[0]).toContain('- **Cutoff**: `25` records');
+		expect(renderedMarkdowns[0]).toContain('Goals=1 Tasks=T3');
+
+		// 2. Default-cutoff query matching 14,000 notes clamps countExtractedQueryRecords to 5,000,
+		// skipping Checkpoint 1's 12,000-record standby banner (with < 5,000 output lines so Checkpoint 2 also stays off)
+		const seed = await runVaultQuery(harness.app, { q: '#goal' }, { timeZone: 'UTC' });
+		const baseMatch = seed['q']![0]!;
+		const matches14000 = new Array<typeof baseMatch>(14_000).fill(baseMatch);
+		const querySpy = vi.spyOn(plugin, 'query').mockResolvedValue({
+			big: matches14000,
+		});
+
+		renderedMarkdowns.length = 0;
+		logCalls.length = 0;
+		const bigLoopSource = [
+			'{% query big %}#goal{% endquery %}',
+			'{% for item in query.big limit: 10 %}{{ item.file.basename }},{% endfor %}|Total={{ query.big.size }}',
+		].join('\n');
+		const elBig = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(bigLoopSource, elBig, ctx, plugin);
+
+		// Standby callout was NOT shown because post-cutoff record count is 5,000 (< 12,000)
+		expect(renderedMarkdowns).toHaveLength(1);
+		expect(renderedMarkdowns[0]).toContain(
+			'> [!warning]- Query `big` 14,000 matches; cut-off at 5,000',
+		);
+		expect(renderedMarkdowns[0]).toContain('|Total=5000');
+
+		const renderLog = logCalls.find((c) => c.source === 'template.render');
+		expect(renderLog).toMatchObject({
+			source: 'template.render',
+			records: 5_000,
+		});
+		expect(renderLog?.['standbyShown']).toBeUndefined();
+
+		querySpy.mockRestore();
+		for (const c of children) c.unload();
+		children.length = 0;
+
+		// 3. Renaming the hosting note on a non-`this` codeblock refreshes the inline [!warning]- provenance wikilink
+		renderedMarkdowns.length = 0;
+		const renameSource =
+			'{% query goals cutoff: 1 %}#goal{% endquery %}Count={{ query.goals.size }}';
+		const elRename = { empty: () => {} } as unknown as HTMLElement;
+		await processRhizomeCodeBlock(renameSource, elRename, ctx, plugin);
+		expect(renderedMarkdowns).toHaveLength(1);
+		expect(renderedMarkdowns[0]).toContain(
+			'> Defined inline in this codeblock in [[Dashboard.md]] (line 1).',
+		);
+
+		renderedMarkdowns.length = 0;
+		harness.setNotes([
+			{ path: 'goals/G1.md', cache: { tags: [{ tag: '#goal', position: {} as never }] } },
+			{ path: 'goals/G2.md', cache: { tags: [{ tag: '#goal', position: {} as never }] } },
+			{ path: 'goals/G3.md', cache: { tags: [{ tag: '#goal', position: {} as never }] } },
+			{ path: 'Overview.md', cache: {} },
+		]);
+		plugin.activeQueryRoster.handleFileRename('Dashboard.md', 'Overview.md');
+		await plugin.activeQueryRoster.nudge(1_700_000_100_000, { onlyIfChanged: true });
+
+		expect(renderedMarkdowns).toHaveLength(1);
+		expect(renderedMarkdowns[0]).toContain(
+			'> Defined inline in this codeblock in [[Overview.md]] (line 1).',
+		);
+
+		for (const c of children) c.unload();
+		renderSpy.mockRestore();
 	});
 });

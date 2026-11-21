@@ -271,4 +271,60 @@ describe('analyzeRhizomeCodeBlock & findRhizomeCodeBlocks', () => {
 		expect(cycDiags.length).toBeGreaterThanOrEqual(2);
 		expect(cycDiags[0]?.issue).toContain('alpha -> beta -> alpha');
 	});
+
+	it('highlights cutoff as liquid-keyword and <int> as liquid-number for spaced and compact forms, preserves dotted cutoff variables, and recovers cutoff metadata on outer syntax errors', () => {
+		const source = [
+			'{% query a cutoff: 500 %}#a{% endquery %}',
+			'{% query b explain cutoff:0 %}#b{% endquery %}',
+			'{{ item.properties.cutoff }}',
+		].join('\n');
+
+		const analysis = analyzeRhizomeCodeBlock(source, config, PINNED_REF_MS);
+		const tokensWithText = analysis.tokens.map((t) => ({
+			kind: t.kind,
+			text: source.slice(t.startOffset, t.endOffset),
+		}));
+
+		expect(
+			tokensWithText.filter((t) => t.kind === 'liquid-keyword' && t.text === 'cutoff'),
+		).toHaveLength(2);
+		expect(tokensWithText).toContainEqual({ kind: 'liquid-number', text: '500' });
+		expect(tokensWithText).toContainEqual({ kind: 'liquid-number', text: '0' });
+		expect(tokensWithText).toContainEqual({
+			kind: 'liquid-variable',
+			text: 'item.properties.cutoff',
+		});
+
+		expect(analysis.queries).toHaveLength(2);
+		expect(analysis.queries[0]).toMatchObject({
+			name: 'a',
+			cutoff: 500,
+			explicitCutoff: true,
+		});
+		expect(analysis.queries[1]).toMatchObject({
+			name: 'b',
+			explain: true,
+			cutoff: 0,
+			explicitCutoff: true,
+		});
+
+		// Fallback recovery when outer Liquid fails tokenization ({{ unclosed)
+		const brokenOuter = [
+			'{{ unclosed',
+			'{% query recovered cutoff: 42 %}#work{% endquery %}',
+			'{% query defaultRecovered %}#home{% endquery %}',
+		].join('\n');
+		const recovered = analyzeRhizomeCodeBlock(brokenOuter, config, PINNED_REF_MS);
+		expect(recovered.queries).toHaveLength(2);
+		expect(recovered.queries[0]).toMatchObject({
+			name: 'recovered',
+			cutoff: 42,
+			explicitCutoff: true,
+		});
+		expect(recovered.queries[1]).toMatchObject({
+			name: 'defaultRecovered',
+			cutoff: 5_000,
+			explicitCutoff: false,
+		});
+	});
 });

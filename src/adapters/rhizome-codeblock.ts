@@ -463,10 +463,11 @@ export async function processRhizomeCodeBlock(
 				source,
 				parsed,
 				Object.freeze({}),
-				(query, heading) =>
+				(query, heading, cutoff) =>
 					plugin.explainQuery(query, {
 						referenceTimeMs,
 						heading,
+						...(cutoff !== undefined ? { cutoff } : {}),
 						...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
 					}),
 				buildRuntimeContext(plugin, referenceTimeMs, currentSourcePath, ctx, el),
@@ -607,10 +608,11 @@ export async function processRhizomeCodeBlock(
 				source,
 				parsed,
 				newPayload,
-				(query, heading) =>
+				(query, heading, cutoff) =>
 					plugin.explainQuery(query, {
 						referenceTimeMs: updateStartedAt,
 						heading,
+						...(cutoff !== undefined ? { cutoff } : {}),
 						...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
 					}),
 				runtimeCtx,
@@ -815,10 +817,11 @@ export async function processRhizomeCodeBlock(
 				source,
 				parsed,
 				initialPayload,
-				(query, heading) =>
+				(query, heading, cutoff) =>
 					plugin.explainQuery(query, {
 						referenceTimeMs,
 						heading,
+						...(cutoff !== undefined ? { cutoff } : {}),
 						...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
 					}),
 				runtimeCtx,

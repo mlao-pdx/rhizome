@@ -307,6 +307,29 @@ function describePropertyLeaf(
 	}
 }
 
+const EXPLAIN_NUMBER_FORMAT = new Intl.NumberFormat('en-US');
+
+/**
+ * Post-query Pass 2 record cutoff metadata displayed in the `# Query Explain Plan` header
+ * when `explainQuery` is invoked from a `{% query %}` template block.
+ */
+export interface QueryExplainCutoff {
+	readonly value: number;
+	readonly explicit: boolean;
+}
+
+function formatExplainCutoffLine(cutoff: QueryExplainCutoff): string {
+	if (cutoff.value <= 0) {
+		return '- **Cutoff**: Unlimited (`cutoff: 0`)';
+	}
+	const formatted = EXPLAIN_NUMBER_FORMAT.format(cutoff.value);
+	const noun = cutoff.value === 1 ? 'record' : 'records';
+	if (!cutoff.explicit) {
+		return `- **Cutoff**: \`${formatted}\` ${noun} (default)`;
+	}
+	return `- **Cutoff**: \`${formatted}\` ${noun}`;
+}
+
 /**
  * Generates a progressive-shrinking Markdown explanation plan with inline footnotes and a
  * `## Concept Reference` section for a search query without scanning vault notes.
@@ -317,6 +340,7 @@ export function explainQuery(
 	referenceTimeMs: number,
 	heading = 'Query Explain Plan',
 	hostDoc?: NormalizedDocument | null,
+	cutoff?: QueryExplainCutoff,
 ): string {
 	const configDiagnostics: SearchDiagnostic[] = [];
 	let resolvedConfig: ResolvedEngineConfig | null = null;
@@ -533,6 +557,9 @@ export function explainQuery(
 	lines.push(
 		`- **Status**: ${statusBadge} with ${errorCount} error${errorCount === 1 ? '' : 's'}, ${warningCount} warning${warningCount === 1 ? '' : 's'}, ${hintCount} hint${hintCount === 1 ? '' : 's'}.`,
 	);
+	if (cutoff !== undefined) {
+		lines.push(formatExplainCutoffLine(cutoff));
+	}
 	lines.push('- **Context**:');
 	if (validRefTime) {
 		const nowLocalIso = formatLocalIsoWithOffset(referenceTimeMs, effectiveConfig.timeZone);

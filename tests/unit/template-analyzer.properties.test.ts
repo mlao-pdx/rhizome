@@ -22,6 +22,10 @@ describe('Codeblock Analyzer Property Invariants', () => {
 		const fragmentArb = fc.constantFrom(
 			'{% query q1 %}',
 			'{%- query q2 explain -%}',
+			'{% query q3 cutoff: 500 %}',
+			'{% query q4 cutoff:0 explain %}',
+			'{% query cutoff %}',
+			'{% query q1 cutoff: -5 %}',
 			'{% query %}',
 			'{% query 9bad %}',
 			'{% endquery %}',

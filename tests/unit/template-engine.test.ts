@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-import { pickFilter, renderRhizomeTemplate } from '../../src/core/templates';
+import type { QueryExplainCutoff } from '../../src/core/search';
+import {
+	DEFAULT_QUERY_CUTOFF,
+	MAX_TEMPLATE_OUTPUT_CHARS,
+	parseQueryTagArgs,
+	parseRhizomeTemplatePass1,
+	pickFilter,
+	renderParsedRhizomeTemplate,
+	renderRhizomeTemplate,
+} from '../../src/core/templates';
 
 describe('renderRhizomeTemplate & {% query %} tag', () => {
 	it('batches multiple {% query %} blocks into a single runQueries call and binds results in root Liquid scope', async () => {
@@ -1119,5 +1128,256 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		expect(directPicked.strftimeDate).toBe('2026-10-31');
 		expect(typeof directPicked.strDate).toBe('string');
 		expect(String(directPicked.strDate)).toContain('2026');
+	});
+
+	it('parses valid {% query %} cutoff permutations and rejects reserved, malformed, duplicate, or overflowing options', () => {
+		const dummySpan = { startOffset: 0, endOffset: 10, startLine: 1, startColumn: 1 };
+
+		expect(DEFAULT_QUERY_CUTOFF).toBe(5_000);
+
+		expect(parseQueryTagArgs('tasks', dummySpan)).toEqual({
+			ok: true,
+			name: 'tasks',
+			explain: false,
+			cutoff: 5_000,
+			explicitCutoff: false,
+		});
+		expect(parseQueryTagArgs('tasks explain', dummySpan)).toEqual({
+			ok: true,
+			name: 'tasks',
+			explain: true,
+			cutoff: 5_000,
+			explicitCutoff: false,
+		});
+		expect(parseQueryTagArgs('tasks cutoff: 500', dummySpan)).toEqual({
+			ok: true,
+			name: 'tasks',
+			explain: false,
+			cutoff: 500,
+			explicitCutoff: true,
+		});
+		expect(parseQueryTagArgs('tasks cutoff:500', dummySpan)).toEqual({
+			ok: true,
+			name: 'tasks',
+			explain: false,
+			cutoff: 500,
+			explicitCutoff: true,
+		});
+		expect(parseQueryTagArgs('tasks explain cutoff: 0', dummySpan)).toEqual({
+			ok: true,
+			name: 'tasks',
+			explain: true,
+			cutoff: 0,
+			explicitCutoff: true,
+		});
+		expect(parseQueryTagArgs('tasks cutoff:0 explain', dummySpan)).toEqual({
+			ok: true,
+			name: 'tasks',
+			explain: true,
+			cutoff: 0,
+			explicitCutoff: true,
+		});
+		expect(parseQueryTagArgs('tasks cutoff: 1', dummySpan)).toEqual({
+			ok: true,
+			name: 'tasks',
+			explain: false,
+			cutoff: 1,
+			explicitCutoff: true,
+		});
+		expect(parseQueryTagArgs('tasks cutoff: 9007199254740991', dummySpan)).toEqual({
+			ok: true,
+			name: 'tasks',
+			explain: false,
+			cutoff: Number.MAX_SAFE_INTEGER,
+			explicitCutoff: true,
+		});
+
+		const invalidInputs = [
+			'cutoff',
+			'cutoff: 10',
+			'cutoff=10',
+			'tasks cutoff',
+			'tasks cutoff 10',
+			'tasks cutoff:',
+			'tasks cutoff : 10',
+			'tasks cutoff :10',
+			'tasks cutoff=10',
+			'tasks cutoff: -1',
+			'tasks cutoff: +10',
+			'tasks cutoff: 1.5',
+			'tasks cutoff: 5_000',
+			'tasks cutoff: "10"',
+			'tasks cutoff: abc',
+			'tasks cutoff: 9007199254740992',
+			'tasks cutoff: 10 cutoff: 20',
+			'tasks cutoff:10 cutoff:20',
+			'tasks explain explain',
+			'tasks explain cutoff: 10 extra',
+		];
+
+		for (const raw of invalidInputs) {
+			const res = parseQueryTagArgs(raw, dummySpan);
+			expect(res.ok, `expected "${raw}" to fail`).toBe(false);
+			if (!res.ok) {
+				expect(res.diagnostic.code).toBe('INVALID_QUERY_TAG_ARGS');
+				expect(res.diagnostic.hint).toBeTruthy();
+			}
+		}
+	});
+
+	it('truncates Pass 2 payloads at default (5,000) and custom cutoffs without mutating input arrays, bypasses cutoff: 0, and stacks alphabetical [!warning]- callouts', async () => {
+		const raw5001 = Array.from({ length: 5_001 }, (_, idx) => ({ id: idx + 1 }));
+		const payload5001 = { items: raw5001 };
+
+		// 1. Default cutoff (5,000) truncates 5,001 -> 5,000, leaves caller array untouched, and prepends warning callout
+		const defaultSource =
+			'\n{% query items %}#item{% endquery %}\nCount={{ query.items.size }} First={{ query.items[0].id }} Last={{ query.items[4999].id }}';
+		const defaultParsed = parseRhizomeTemplatePass1(defaultSource);
+		const defaultRes = await renderParsedRhizomeTemplate(
+			defaultSource,
+			defaultParsed,
+			payload5001,
+			async () => '',
+			{ sourcePath: 'Dashboards/Overview.md' },
+		);
+		expect(defaultRes.ok).toBe(true);
+		expect(raw5001).toHaveLength(5_001);
+		expect(payload5001.items).toBe(raw5001);
+		expect(defaultRes.markdown).toBe(
+			[
+				'> [!warning]- Query `items` 5,001 matches; cut-off at 5,000',
+				'> Defined inline in this codeblock in [[Dashboards/Overview.md]] (line 2). Results are truncated in vault scan order before Liquid filters run:',
+				'> - Narrow the query filters to match fewer notes.',
+				'> - Set `cutoff: 0` and pipe through `| sort: ... | slice: 0, N` to take the top `N` across all matches.',
+				'> - Raise `cutoff: <number>` (or `cutoff: 0` for no limit) in `{% query items %}` if the template needs every match.',
+				'',
+				'\n\nCount=5000 First=1 Last=5000',
+			].join('\n'),
+		);
+
+		// Exact 5,000 boundary does NOT emit a warning callout
+		const exact5000 = raw5001.slice(0, 5_000);
+		const exactRes = await renderParsedRhizomeTemplate(
+			defaultSource,
+			defaultParsed,
+			{ items: exact5000 },
+			async () => '',
+		);
+		expect(exactRes.ok).toBe(true);
+		expect(exactRes.markdown).not.toContain('[!warning]-');
+		expect(exactRes.markdown).toContain('Count=5000');
+
+		// 2. cutoff: 0 bypasses truncation completely
+		const unlimitedSource =
+			'{% query items cutoff: 0 %}#item{% endquery %}Count={{ query.items.size }}';
+		const unlimitedRes = await renderRhizomeTemplate(unlimitedSource, {
+			runQueries: async () => ({ items: raw5001 }),
+			explainQuery: async () => '',
+		});
+		expect(unlimitedRes.ok).toBe(true);
+		expect(unlimitedRes.markdown).toBe('Count=5001');
+
+		// 3. Multi-query alphabetical stacking (case-insensitive ASCII with code-point tie-break), inline without sourcePath, and empty-body template (no trailing \n\n)
+		const multiEmptyBodySource = [
+			'{% query zebra cutoff: 2 %}#z{% endquery %}',
+			'{% query beta cutoff: 1 %}#b{% endquery %}',
+			'{% query Alpha cutoff: 3 %}#a{% endquery %}',
+		].join('\n');
+		const multiRes = await renderRhizomeTemplate(multiEmptyBodySource, {
+			runQueries: async () => ({
+				zebra: [{}, {}, {}],
+				beta: Array.from({ length: 1_234 }, () => ({})),
+				Alpha: [{}, {}, {}, {}],
+			}),
+			explainQuery: async () => '',
+		});
+		expect(multiRes.ok).toBe(true);
+		expect(multiRes.markdown.endsWith('\n\n')).toBe(false);
+		const alphaIdx = multiRes.markdown.indexOf('Query `Alpha` 4 matches; cut-off at 3');
+		const betaIdx = multiRes.markdown.indexOf('Query `beta` 1,234 matches; cut-off at 1');
+		const zebraIdx = multiRes.markdown.indexOf('Query `zebra` 3 matches; cut-off at 2');
+		expect(alphaIdx).toBeGreaterThanOrEqual(0);
+		expect(betaIdx).toBeGreaterThan(alphaIdx);
+		expect(zebraIdx).toBeGreaterThan(betaIdx);
+		expect(multiRes.markdown).toContain('Defined inline in this codeblock (line 3).');
+		expect(multiRes.markdown).toContain('Defined inline in this codeblock (line 2).');
+		expect(multiRes.markdown).toContain('Defined inline in this codeblock (line 1).');
+
+		// 4. Partial provenance & unsafe sourcePath fallback to single-line inline code
+		const partialSource = "{% render 'row-query' %}{{ query.shared.size }}";
+		const partialRes = await renderRhizomeTemplate(partialSource, {
+			runQueries: async () => ({ shared: [1, 2, 3] }),
+			explainQuery: async () => '',
+			readTemplateFile: async (path) =>
+				path === '◊Rhizome/partials/row-query.md'
+					? '\n\n{% query shared cutoff: 2 %}#s{% endquery %}'
+					: null,
+			runtimeContext: { sourcePath: 'Host.md' },
+		});
+		expect(partialRes.ok).toBe(true);
+		expect(partialRes.markdown).toContain(
+			'> Defined in [[◊Rhizome/partials/row-query.md]] (line 3). Results are truncated in vault scan order before Liquid filters run:',
+		);
+		expect(partialRes.markdown).toMatch(/\n\n2$/);
+
+		const unsafePathRes = await renderRhizomeTemplate(
+			'{% query q cutoff: 1 %}#x{% endquery %}',
+			{
+				runQueries: async () => ({ q: [1, 2] }),
+				explainQuery: async () => '',
+				runtimeContext: { sourcePath: 'Notes/Bad[1]#2|x.md' },
+			},
+		);
+		expect(unsafePathRes.ok).toBe(true);
+		expect(unsafePathRes.markdown).toContain(
+			'> Defined inline in this codeblock in `Notes/Bad[1]#2|x.md` (line 1).',
+		);
+
+		// 5. Explain Plan receives QueryExplainCutoff for both explicit explain and failed-query auto-explain
+		const capturedCutoffs: Array<{ heading: string; cutoff: QueryExplainCutoff | undefined }> =
+			[];
+		const explainSource = [
+			'{% query defExplain explain %}#a{% endquery %}',
+			'{% query customExplain explain cutoff: 25 %}#b{% endquery %}',
+			'{% query failedAuto cutoff: 0 %}[bad{% endquery %}',
+		].join('\n');
+		const explainRes = await renderRhizomeTemplate(explainSource, {
+			runQueries: async () => ({
+				defExplain: [],
+				customExplain: [],
+				// failedAuto omitted -> auto-explain
+			}),
+			explainQuery: async (_q, heading, cutoff) => {
+				capturedCutoffs.push({ heading, cutoff });
+				return `EXPLAIN(${heading})`;
+			},
+		});
+		expect(explainRes.ok).toBe(true);
+		expect(explainRes.markdown).not.toContain('[!warning]-');
+		expect(capturedCutoffs).toEqual([
+			{
+				heading: 'Query Explain Plan: defExplain',
+				cutoff: { value: 5_000, explicit: false },
+			},
+			{
+				heading: 'Query Explain Plan: customExplain',
+				cutoff: { value: 25, explicit: true },
+			},
+			{
+				heading: 'Query Explain Plan: failedAuto',
+				cutoff: { value: 0, explicit: true },
+			},
+		]);
+
+		// 6. Combined callout + rendered body respects MAX_TEMPLATE_OUTPUT_CHARS (3.25 MiB)
+		const nearLimitBody = 'a'.repeat(MAX_TEMPLATE_OUTPUT_CHARS - 50);
+		const nearLimitSource = '{% query q cutoff: 1 %}#x{% endquery %}{{ query.q[0] }}';
+		const overCapRes = await renderRhizomeTemplate(nearLimitSource, {
+			runQueries: async () => ({ q: [nearLimitBody, 'second'] }),
+			explainQuery: async () => '',
+		});
+		expect(overCapRes.ok).toBe(false);
+		expect(overCapRes.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
+		expect(overCapRes.diagnostics[0]?.issue).toContain('3.25 MiB');
 	});
 });

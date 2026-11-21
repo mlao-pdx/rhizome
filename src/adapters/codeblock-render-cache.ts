@@ -36,8 +36,10 @@ export interface MarkdownOutputMetrics {
 }
 
 /**
- * Sums the matched record counts across all extracted user `{% query %}` blocks in `parsed`
- * (excluding internal keys such as `◊host`).
+ * Sums the post-cutoff matched record counts across all extracted user `{% query %}` blocks
+ * in `parsed` (excluding internal keys such as `◊host`), clamping each query's count to its
+ * active `cutoff` (`> 0`) so Checkpoint 1 (`LARGE_QUERY_RECORD_THRESHOLD`), crash-sentinel
+ * `records`, and `template.render` telemetry reflect the record volume entering Pass 2.
  */
 export function countExtractedQueryRecords(
 	parsed: ParsedRhizomeTemplate,
@@ -47,7 +49,7 @@ export function countExtractedQueryRecords(
 	for (const q of parsed.env.queries) {
 		const matches = payload[q.name];
 		if (Array.isArray(matches)) {
-			total += matches.length;
+			total += q.cutoff > 0 ? Math.min(matches.length, q.cutoff) : matches.length;
 		}
 	}
 	return total;

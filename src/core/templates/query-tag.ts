@@ -2,6 +2,7 @@ import {
 	FORBIDDEN_KEYS,
 	LIQUID_BLOCK_COMMENT_PATTERN,
 	LIQUID_INLINE_COMMENT_PATTERN,
+	type QueryExplainCutoff,
 	type SourceSpan,
 } from '@core/search';
 import {
@@ -13,12 +14,15 @@ import {
 	type TopLevelToken,
 	TypeGuards,
 } from 'liquidjs';
+import { DEFAULT_QUERY_CUTOFF } from './query-cutoff';
 import type { ExtractedQueryBlock, TemplateDiagnostic } from './types';
 
 /**
- * Valid `<name>` identifier pattern for `{% query <name> [explain] %}`.
+ * Valid `<name>` identifier pattern for `{% query <name> [explain] [cutoff: <int>] %}`.
  */
 export const VALID_QUERY_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_-]*$/;
+
+const CUTOFF_DIGITS_RE = /^\d+$/;
 
 /**
  * Computes a 1-based `SourceSpan` from 0-based `[startOffset, endOffset)` character offsets in `source`.
@@ -66,91 +70,159 @@ export function parseQueryTagArgs(
 	headerSpan: SourceSpan,
 	file: string | null = null,
 ):
-	| { readonly ok: true; readonly name: string; readonly explain: boolean }
+	| {
+			readonly ok: true;
+			readonly name: string;
+			readonly explain: boolean;
+			readonly cutoff: number;
+			readonly explicitCutoff: boolean;
+	  }
 	| { readonly ok: false; readonly diagnostic: TemplateDiagnostic } {
+	const fail = (
+		issue: string,
+		hint: string,
+	): { readonly ok: false; readonly diagnostic: TemplateDiagnostic } => ({
+		ok: false,
+		diagnostic: Object.freeze({
+			code: 'INVALID_QUERY_TAG_ARGS',
+			severity: 'error',
+			issue,
+			hint,
+			span: headerSpan,
+			file,
+		}),
+	});
+
 	const trimmed = rawArgs.trim();
 	if (trimmed.length === 0) {
-		return {
-			ok: false,
-			diagnostic: Object.freeze({
-				code: 'INVALID_QUERY_TAG_ARGS',
-				severity: 'error',
-				issue: "Missing query variable name in '{% query %}' tag.",
-				hint: "Provide a variable name after 'query', e.g., '{% query tasks %}' or '{% query tasks explain %}'.",
-				span: headerSpan,
-				file,
-			}),
-		};
+		return fail(
+			"Missing query variable name in '{% query %}' tag.",
+			"Provide a variable name after 'query', e.g., '{% query tasks %}', '{% query tasks explain %}', or '{% query tasks cutoff: 500 %}'.",
+		);
 	}
 
 	const parts = trimmed.split(/\s+/);
 	const rawName = parts[0] ?? '';
 
 	if (rawName === 'explain') {
-		return {
-			ok: false,
-			diagnostic: Object.freeze({
-				code: 'INVALID_QUERY_TAG_ARGS',
-				severity: 'error',
-				issue: "Reserved keyword 'explain' cannot be used as a query variable name.",
-				hint: "Place the variable name before 'explain', e.g., '{% query tasks explain %}'.",
-				span: headerSpan,
-				file,
-			}),
-		};
+		return fail(
+			"Reserved keyword 'explain' cannot be used as a query variable name.",
+			"Place the variable name before 'explain', e.g., '{% query tasks explain %}'.",
+		);
+	}
+
+	if (rawName === 'cutoff') {
+		return fail(
+			"Reserved keyword 'cutoff' cannot be used as a query variable name.",
+			"Place the variable name before 'cutoff:', e.g., '{% query tasks cutoff: 500 %}'.",
+		);
+	}
+
+	if (rawName.startsWith('cutoff:') || rawName.startsWith('cutoff=')) {
+		return fail(
+			`Missing query variable name before '${rawName}' in '{% query ${trimmed} %}' tag.`,
+			"Place a query variable name before 'cutoff:', e.g., '{% query tasks cutoff: 500 %}'.",
+		);
 	}
 
 	if (FORBIDDEN_KEYS.has(rawName) || !VALID_QUERY_NAME_RE.test(rawName)) {
-		return {
-			ok: false,
-			diagnostic: Object.freeze({
-				code: 'INVALID_QUERY_TAG_ARGS',
-				severity: 'error',
-				issue: `Invalid query variable name '${rawName}'.`,
-				hint: "Query variable names must start with a letter or '_' and contain only letters, digits, '_', or '-'.",
-				span: headerSpan,
-				file,
-			}),
-		};
-	}
-
-	if (parts.length > 2) {
-		return {
-			ok: false,
-			diagnostic: Object.freeze({
-				code: 'INVALID_QUERY_TAG_ARGS',
-				severity: 'error',
-				issue: `Too many arguments in '{% query ${trimmed} %}' tag.`,
-				hint: "Expected '{% query <name> %}' or '{% query <name> explain %}'; put filter expressions inside the tag body before '{% endquery %}'.",
-				span: headerSpan,
-				file,
-			}),
-		};
+		return fail(
+			`Invalid query variable name '${rawName}'.`,
+			"Query variable names must start with a letter or '_' and contain only letters, digits, '_', or '-'.",
+		);
 	}
 
 	let explain = false;
-	if (parts.length === 2) {
-		const secondArg = parts[1] ?? '';
-		if (secondArg !== 'explain') {
-			return {
-				ok: false,
-				diagnostic: Object.freeze({
-					code: 'INVALID_QUERY_TAG_ARGS',
-					severity: 'error',
-					issue: `Unrecognized option '${secondArg}' in '{% query ${trimmed} %}' tag.`,
-					hint:
-						"Only the optional 'explain' flag is supported after the query variable name, e.g., '{% query " +
-						rawName +
-						" explain %}'.",
-					span: headerSpan,
-					file,
-				}),
-			};
+	let cutoff = DEFAULT_QUERY_CUTOFF;
+	let explicitCutoff = false;
+	let i = 1;
+
+	while (i < parts.length) {
+		const token = parts[i]!;
+
+		if (token === 'explain') {
+			if (explain) {
+				return fail(
+					`Duplicate 'explain' option in '{% query ${trimmed} %}' tag.`,
+					`Specify 'explain' at most once, e.g., '{% query ${rawName} explain %}'.`,
+				);
+			}
+			explain = true;
+			i++;
+			continue;
 		}
-		explain = true;
+
+		if (token === 'cutoff') {
+			const next = parts[i + 1];
+			if (next !== undefined && next.startsWith(':')) {
+				return fail(
+					`Unexpected space before ':' in 'cutoff' option in '{% query ${trimmed} %}' tag.`,
+					`Write 'cutoff:' with no space before the colon, e.g., '{% query ${rawName} cutoff: 500 %}'.`,
+				);
+			}
+			return fail(
+				`Missing ':' after 'cutoff' in '{% query ${trimmed} %}' tag.`,
+				`Pass a non-negative integer after 'cutoff:', e.g., '{% query ${rawName} cutoff: 500 %}' or '{% query ${rawName} cutoff: 0 %}'.`,
+			);
+		}
+
+		if (token.startsWith('cutoff=')) {
+			return fail(
+				`Invalid 'cutoff' syntax '${token}' in '{% query ${trimmed} %}' tag.`,
+				`Use ':' instead of '=', e.g., '{% query ${rawName} cutoff: 500 %}'.`,
+			);
+		}
+
+		if (token.startsWith('cutoff:')) {
+			let rawVal: string;
+			if (token === 'cutoff:') {
+				if (i + 1 >= parts.length) {
+					return fail(
+						`Missing integer value after 'cutoff:' in '{% query ${trimmed} %}' tag.`,
+						`Provide a non-negative integer (0 for unlimited), e.g., '{% query ${rawName} cutoff: 500 %}' or '{% query ${rawName} cutoff: 0 %}'.`,
+					);
+				}
+				rawVal = parts[i + 1]!;
+				i += 2;
+			} else {
+				rawVal = token.slice('cutoff:'.length);
+				i += 1;
+			}
+
+			if (explicitCutoff) {
+				return fail(
+					`Duplicate 'cutoff:' option in '{% query ${trimmed} %}' tag.`,
+					`Specify 'cutoff:' at most once, e.g., '{% query ${rawName} cutoff: 500 %}'.`,
+				);
+			}
+
+			if (!CUTOFF_DIGITS_RE.test(rawVal)) {
+				return fail(
+					`Invalid cutoff value '${rawVal}' in '{% query ${trimmed} %}' tag.`,
+					`'cutoff:' requires a base-10 non-negative integer (0 for unlimited), e.g., '{% query ${rawName} cutoff: 500 %}' or '{% query ${rawName} cutoff: 0 %}'.`,
+				);
+			}
+
+			const parsedCutoff = Number(rawVal);
+			if (!Number.isSafeInteger(parsedCutoff)) {
+				return fail(
+					`Cutoff value '${rawVal}' exceeds the maximum safe integer (${Number.MAX_SAFE_INTEGER}) in '{% query ${trimmed} %}' tag.`,
+					`Choose a cutoff between 0 and ${Number.MAX_SAFE_INTEGER} (use 'cutoff: 0' for no limit).`,
+				);
+			}
+
+			cutoff = parsedCutoff;
+			explicitCutoff = true;
+			continue;
+		}
+
+		return fail(
+			`Unrecognized option '${token}' in '{% query ${trimmed} %}' tag.`,
+			`Supported options after '${rawName}' are 'explain' and 'cutoff: <int>', e.g., '{% query ${rawName} explain cutoff: 500 %}'; put filter expressions inside the tag body before '{% endquery %}'.`,
+		);
 	}
 
-	return { ok: true, name: rawName, explain };
+	return { ok: true, name: rawName, explain, cutoff, explicitCutoff };
 }
 
 /**
@@ -364,7 +436,8 @@ export interface QueryTagEnvironment {
 	readonly diagnostics: TemplateDiagnostic[];
 	pass1Complete: boolean;
 	payload: Readonly<Record<string, unknown[]>>;
-	explainQuery: ((query: string, heading: string) => Promise<string>) | null;
+	explainQuery:
+		((query: string, heading: string, cutoff?: QueryExplainCutoff) => Promise<string>) | null;
 }
 
 /**
@@ -433,7 +506,7 @@ export interface QueryTagBinding {
 }
 
 /**
- * Registers the `{% query <name> [explain] %} ... {% endquery %}` block tag and disables
+ * Registers the `{% query <name> [explain] [cutoff: <int>] %} ... {% endquery %}` block tag and disables
  * the deprecated `{% include %}` tag on `liquid`. The binding provider is invoked once per
  * tag construction, allowing `liquid` to be reused across parse cycles.
  */
@@ -443,6 +516,8 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 		private readonly queryName: string | null;
 		private readonly queryText: string;
 		private readonly explainFlag: boolean;
+		private readonly cutoff: number;
+		private readonly explicitCutoff: boolean;
 
 		public constructor(
 			tagToken: TagToken,
@@ -499,6 +574,8 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 				this.queryName = null;
 				this.queryText = '';
 				this.explainFlag = false;
+				this.cutoff = DEFAULT_QUERY_CUTOFF;
+				this.explicitCutoff = false;
 				env.diagnostics.push(
 					unclosedQueryDiagnostic(tagToken.getText(), headerSpan, externalFile),
 				);
@@ -527,14 +604,18 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 				this.queryName = null;
 				this.queryText = rawQuery;
 				this.explainFlag = false;
+				this.cutoff = DEFAULT_QUERY_CUTOFF;
+				this.explicitCutoff = false;
 				env.diagnostics.push(parsedArgs.diagnostic);
 				return;
 			}
 
-			const { name, explain } = parsedArgs;
+			const { name, explain, cutoff, explicitCutoff } = parsedArgs;
 			this.queryName = name;
 			this.queryText = rawQuery;
 			this.explainFlag = explain;
+			this.cutoff = cutoff;
+			this.explicitCutoff = explicitCutoff;
 
 			const previousDef = env.seenNames.get(name);
 			if (previousDef) {
@@ -563,6 +644,8 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 					name,
 					query: rawQuery,
 					explain,
+					cutoff,
+					explicitCutoff,
 					headerSpan,
 					bodySpan,
 					fullSpan,
@@ -581,6 +664,7 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 				const markdown = await env.explainQuery(
 					this.queryText,
 					`Query Explain Plan: ${this.queryName}`,
+					Object.freeze({ value: this.cutoff, explicit: this.explicitCutoff }),
 				);
 				const trimmed = markdown.trim();
 				if (trimmed.length > 0) {

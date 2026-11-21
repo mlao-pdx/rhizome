@@ -15,6 +15,7 @@ const validQueryNameArb = fc
 	.filter(
 		(name) =>
 			name !== 'explain' &&
+			name !== 'cutoff' &&
 			name !== '__proto__' &&
 			name !== 'prototype' &&
 			name !== 'constructor',
@@ -164,6 +165,11 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 		const fragmentArb = fc.constantFrom(
 			'{% query a %}',
 			'{% query a explain %}',
+			'{% query a cutoff: 5 %}',
+			'{% query a cutoff:0 explain %}',
+			'{% query cutoff %}',
+			'{% query a cutoff: -1 %}',
+			'{% query a cutoff : 10 %}',
 			'{% query %}',
 			'{% query 123bad %}',
 			'{% endquery %}',
@@ -382,6 +388,108 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 				expect(res.ok).toBe(true);
 				const expectedVal = formatMomentDate(ms, momentFmt, 'UTC', 'UTC');
 				expect(res.markdown).toBe(`M=${expectedVal}\nS=${expectedVal}\n`);
+			}),
+		);
+	});
+
+	it('Cutoff Truncation, Immutability & Callout Quote Integrity Invariant: Pass 2 slices above active cutoff without mutating input arrays and keeps callout blockquotes intact on arbitrary sourcePath strings', async () => {
+		const queryCutoffSpecArb = fc.record({
+			name: validQueryNameArb,
+			cutoffOpt: fc.oneof(
+				fc.constant<number | null>(null),
+				fc.constant(0),
+				fc.integer({ min: 1, max: 15 }),
+			),
+			compactColon: fc.boolean(),
+			explainFirst: fc.boolean(),
+			explain: fc.boolean(),
+			matchCount: fc.integer({ min: 0, max: 25 }),
+		});
+		const uniqueSpecsArb = fc.uniqueArray(queryCutoffSpecArb, {
+			selector: (s) => s.name,
+			minLength: 1,
+			maxLength: 4,
+		});
+		const arbitrarySourcePathArb = fc.oneof(
+			fc.constant<string | undefined>(undefined),
+			fc.constant(''),
+			fc.constant('Notes/Clean.md'),
+			fc.string({ maxLength: 40 }),
+		);
+
+		await assertProperty(
+			'templates/engine__cutoff-truncation-immutability-and-callout-integrity',
+			fc.asyncProperty(uniqueSpecsArb, arbitrarySourcePathArb, async (specs, sourcePath) => {
+				const templateBody = specs
+					.map((s) => {
+						const cutoffArg =
+							s.cutoffOpt === null
+								? ''
+								: s.compactColon
+									? `cutoff:${s.cutoffOpt}`
+									: `cutoff: ${s.cutoffOpt}`;
+						const explainArg = s.explain ? 'explain' : '';
+						const opts = s.explainFirst
+							? [explainArg, cutoffArg].filter(Boolean).join(' ')
+							: [cutoffArg, explainArg].filter(Boolean).join(' ');
+						const headerArgs = opts.length > 0 ? `${s.name} ${opts}` : s.name;
+						return `{% query ${headerArgs} %}#tag{% endquery %}\nSIZE_${s.name}={{ query.${s.name}.size }}`;
+					})
+					.join('\n');
+				const template = `BODY_START\n${templateBody}`;
+
+				const inputArrays = new Map<string, unknown[]>();
+				const rawPayload: Record<string, unknown[]> = {};
+				for (const s of specs) {
+					const arr = Array.from({ length: s.matchCount }, (_, idx) => ({ idx }));
+					inputArrays.set(s.name, arr);
+					rawPayload[s.name] = arr;
+				}
+
+				const res = await renderRhizomeTemplate(template, {
+					runQueries: async () => rawPayload,
+					explainQuery: async (_q, heading, cutoff) =>
+						`EXPLAIN(${heading}:${cutoff?.value}:${cutoff?.explicit})`,
+					...(sourcePath !== undefined ? { runtimeContext: { sourcePath } } : {}),
+				});
+
+				expect(res.ok).toBe(true);
+				let anyWarn = false;
+				for (const s of specs) {
+					expect(inputArrays.get(s.name)).toHaveLength(s.matchCount);
+					const effectiveCutoff = s.cutoffOpt === null ? 5_000 : s.cutoffOpt;
+					const expectedSize =
+						effectiveCutoff === 0
+							? s.matchCount
+							: Math.min(s.matchCount, effectiveCutoff);
+					expect(res.markdown).toContain(`SIZE_${s.name}=${expectedSize}`);
+
+					const shouldWarn = effectiveCutoff > 0 && s.matchCount > effectiveCutoff;
+					if (shouldWarn) {
+						anyWarn = true;
+						expect(res.markdown).toContain(
+							`> [!warning]- Query \`${s.name}\` ${s.matchCount} matches; cut-off at ${effectiveCutoff}`,
+						);
+					} else {
+						expect(res.markdown).not.toContain(`Query \`${s.name}\``);
+					}
+				}
+
+				const bodyMarkerIdx = res.markdown.indexOf('BODY_START\n');
+				expect(bodyMarkerIdx).toBeGreaterThanOrEqual(0);
+				if (anyWarn) {
+					expect(res.markdown.startsWith('> [!warning]-')).toBe(true);
+					const calloutsPrefix = res.markdown.slice(0, bodyMarkerIdx);
+					expect(calloutsPrefix.endsWith('\n\n')).toBe(true);
+					const trimmedPrefix = calloutsPrefix.slice(0, -2);
+					for (const block of trimmedPrefix.split('\n\n')) {
+						for (const line of block.split('\n')) {
+							expect(line.startsWith('>')).toBe(true);
+						}
+					}
+				} else {
+					expect(bodyMarkerIdx).toBe(0);
+				}
 			}),
 		);
 	});
