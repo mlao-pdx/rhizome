@@ -360,6 +360,7 @@ describe('Vault Query Runner Property Invariants', () => {
 									'links',
 									'embeds',
 									'blocks',
+									'tasks',
 									'properties',
 									'propertyLocations',
 									'backlinks',

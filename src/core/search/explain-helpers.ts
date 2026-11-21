@@ -12,10 +12,14 @@ import {
 	isVirtualFileKey,
 	type DateGrain,
 	type DateInterval,
+	type GraphTargetAST,
+	type HopBounds,
 	type ObsidianPropertyType,
 	type PropertyFilterNode,
+	type PropertyGraphFilterNode,
 	type PropertyOperator,
 	type PropertyTypeRegistry,
+	type ScopeGraphFilterNode,
 	type ScopedFilterNode,
 	type ScopeOperator,
 	type SearchAST,
@@ -220,10 +224,50 @@ export function buildRegex101Url(pattern: string, flags: string): string {
 	return `https://regex101.com/?flavor=javascript&regex=${encodeURIComponent(pattern)}&flags=${encodeURIComponent(flags)}`;
 }
 
+function formatGraphTargetDisplay(target: GraphTargetAST): string {
+	switch (target.kind) {
+		case 'this_ref':
+			return target.raw;
+		case 'query_ref':
+			return target.raw;
+		case 'subquery': {
+			const inner = extractAstSlice('', target.ast);
+			return inner.length > 0 ? `{ ${inner} }` : '{}';
+		}
+	}
+}
+
+/**
+ * Formats a human-readable hop-bound phrase for `explainQuery`.
+ */
+export function describeHopBounds(hops: HopBounds): string {
+	if (hops.unbounded) {
+		if (hops.minHops === 0) {
+			return `in 0 or more hops (reflexive self-match or cycle-free simple path, up to ${hops.maxHops} hops)`;
+		}
+		if (hops.minHops === 1) {
+			return `in 1 or more hops (cycle-free simple path, up to ${hops.maxHops} hops)`;
+		}
+		return `in ${hops.minHops} or more hops (cycle-free simple path, up to ${hops.maxHops} hops)`;
+	}
+	if (hops.minHops === 1 && hops.maxHops === 1) {
+		return 'in 1 hop';
+	}
+	if (hops.minHops === 0) {
+		return `in 0 to ${hops.maxHops} hops (reflexive self-match or cycle-free simple path)`;
+	}
+	if (hops.minHops === hops.maxHops) {
+		return `in ${hops.minHops} hops (cycle-free simple path)`;
+	}
+	return `in ${hops.minHops} to ${hops.maxHops} hops (cycle-free simple path)`;
+}
+
 /**
  * Formats the authored filter representation of a leaf AST node.
  */
-export function formatAuthoredFilter(node: ScopedFilterNode | PropertyFilterNode): string {
+export function formatAuthoredFilter(
+	node: ScopedFilterNode | ScopeGraphFilterNode | PropertyFilterNode | PropertyGraphFilterNode,
+): string {
 	switch (node.type) {
 		case 'SCOPED_FILTER': {
 			const rhs = formatScopeRhsDisplay(node.expr);
@@ -235,6 +279,13 @@ export function formatAuthoredFilter(node: ScopedFilterNode | PropertyFilterNode
 				return `${node.rawScope}:${rhs}`;
 			}
 			return `${node.rawScope}:${op}${rhs}`;
+		}
+		case 'SCOPE_GRAPH_FILTER': {
+			const rhs = formatGraphTargetDisplay(node.target);
+			if (node.hops.raw === ':') {
+				return `${node.rawScope}: ${rhs}`;
+			}
+			return `${node.rawScope} ${node.hops.raw} ${rhs}`;
 		}
 		case 'PROPERTY_FILTER': {
 			if (node.operator === 'EXISTS') {
@@ -248,6 +299,10 @@ export function formatAuthoredFilter(node: ScopedFilterNode | PropertyFilterNode
 				return `[${node.rawKey}:${rhs}]`;
 			}
 			return `[${node.rawKey}:${node.operator}${rhs}]`;
+		}
+		case 'PROPERTY_GRAPH_FILTER': {
+			const rhs = formatGraphTargetDisplay(node.target);
+			return `[${node.rawKey} ${node.hops.raw} ${rhs}]`;
 		}
 	}
 }
@@ -484,7 +539,9 @@ export function extractAstSlice(input: string, node: SearchAST): string {
 	}
 	switch (node.type) {
 		case 'SCOPED_FILTER':
+		case 'SCOPE_GRAPH_FILTER':
 		case 'PROPERTY_FILTER':
+		case 'PROPERTY_GRAPH_FILTER':
 			return formatAuthoredFilter(node);
 		case 'NOT': {
 			const childSlice = extractAstSlice(input, node.child);

@@ -205,14 +205,24 @@ const RULE_METADATA = {
 			'Groups a document-level boolean expression inside `(...)`. Increments syntactic nesting depth by `+1`.',
 	},
 	propertyFilter: {
-		ebnf: 'PropertyFilter ::= "[" PropertyKey ( ":" ( CompOp ValueLeaf | ValueNotExpr )? )? "]"',
+		ebnf: 'PropertyFilter ::= "[" PropertyKey ( GraphArrow GraphTarget | ":" ( CompOp ValueLeaf | ValueNotExpr )? )? "]"',
 		description:
-			'Bracketed frontmatter or virtual file property filter (`[key]` key-presence check, `[key:]` empty/no-value check, `[key: value]` colon match, or `[key: >= value]` comparison).',
+			'Bracketed frontmatter/inline/virtual property filter (`[key]` key-presence check, `[key:]` empty/no-value check, `[key: value]` colon match, `[key: >= value]` comparison, or `[key ->* target]` property-attributed link graph traversal).',
 	},
 	scopedOperator: {
-		ebnf: 'ScopedOperator ::= ScopeName ":" ( CompOp ValueLeaf | ValueNotExpr )',
+		ebnf: 'ScopedOperator ::= ScopeName ( GraphArrow GraphTarget | ":" ( Subquery | CompOp ValueLeaf | ValueNotExpr ) )',
 		description:
-			'Scoped filter operator (`tag:`, `file:`, `path:`, `ext:`, `aliases:`, `cssclasses:`, `headings:`, `links:`, `embeds:`, `blocks:`, or registered custom scopes), supporting default colon matching (`scope: expr`) and comparison operators (`scope: = leaf`, `scope: != leaf`, etc.).',
+			'Scoped filter operator (`tag:`, `file:`, `path:`, `ext:`, `aliases:`, `cssclasses:`, `headings:`, `links:`, `embeds:`, `blocks:`, `backlinks:`, `tasks:`, or registered custom scopes), supporting colon matching (`scope: expr`), comparison operators (`scope: = leaf`), and graph traversal (`links ->* target`, `links: { ... }`, `links: @query.<name>`, `links: @this`).',
+	},
+	subquery: {
+		ebnf: 'Subquery ::= "{" OrExpression? "}"',
+		description:
+			'Inline brace-delimited subquery target for graph traversal. An empty `{}` lowers to `MATCH_ALL`. Each `{ ... }` group increments syntactic nesting depth by `+1`.',
+	},
+	graphTarget: {
+		ebnf: 'GraphTarget ::= Subquery | QueryReference | ThisReference',
+		description:
+			'Target node set for a graph traversal arrow: an inline `{ ... }` subquery, a sibling `@query.<name>` result set, or the hosting note `@this`.',
 	},
 	valueOrExpr: {
 		ebnf: 'ValueOrExpr ::= ValueAndExpr ( "OR" ValueAndExpr )*',
@@ -245,9 +255,9 @@ const RULE_METADATA = {
 			'Top-level `#tag` shorthand (e.g. `#work/urgent`), lowered identically to `tag:#work/urgent`.',
 	},
 	valueLeaf: {
-		ebnf: 'ValueLeaf ::= QuotedString | RegexLiteral | ThisReference | DateTimeLiteral | TagLiteral | Identifier',
+		ebnf: 'ValueLeaf ::= QuotedString | RegexLiteral | ThisReference | QueryReference | DateTimeLiteral | TagLiteral | Identifier',
 		description:
-			'Leaf value on the right-hand side of `:`, comparison operators (`=`, `!=`, `<`, `<=`, `>`, `>=`), or inside value-level boolean expressions (`ValueNotExpr`), including `@this.<path>` host references, negative numbers (`-10.5`), and hyphen-prefixed identifiers (`-draft`).',
+			'Leaf value on the right-hand side of `:`, comparison operators (`=`, `!=`, `<`, `<=`, `>`, `>=`), or inside value-level boolean expressions (`ValueNotExpr`), including `@this.<path>` host references, `@query.<name>.<path>` scalar query projections, negative numbers (`-10.5`), and hyphen-prefixed identifiers (`-draft`).',
 	},
 };
 
@@ -265,9 +275,9 @@ const SECTIONS = [
 		],
 	},
 	{
-		title: '2. Property Filters & Scoped Operators',
-		intro: 'Bracketed property filters (`[key]`, `[key:]`, `[key: value]`, `[key: op value]`) and `scope:value` operators delegate colon right-hand sides to `valueNotExpr` and comparison right-hand sides to `valueLeaf`.',
-		rules: ['propertyFilter', 'scopedOperator'],
+		title: '2. Property Filters, Scoped Operators & Graph Traversal',
+		intro: 'Bracketed property filters (`[key]`, `[key:]`, `[key: value]`, `[key: op value]`, `[key -> target]`) and `scope` operators delegate colon right-hand sides to `valueNotExpr`, comparison right-hand sides to `valueLeaf`, and graph traversal arrows (`->`, `<-`, `*`, `..N`, `M..N`) to `graphTarget`.',
+		rules: ['propertyFilter', 'scopedOperator', 'graphTarget', 'subquery'],
 	},
 	{
 		title: '3. Value-Level Boolean Expressions',

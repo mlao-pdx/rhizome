@@ -12,6 +12,9 @@ import { compareDateIntervals, parseTemporalExpr } from './temporal';
 import {
 	isVirtualFileKey,
 	type DocumentDiagnostic,
+	type GraphDirection,
+	type GraphTargetAST,
+	type HopBounds,
 	type NormalizedDocument,
 	type ObsidianPropertyType,
 	type PreparedQuery,
@@ -23,6 +26,12 @@ import {
 	type ValueExprAST,
 	type VaultEvaluationReport,
 } from './types';
+
+interface OracleGraphState {
+	readonly docsByPath: ReadonlyMap<string, NormalizedDocument>;
+	readonly allDocs: readonly NormalizedDocument[];
+	readonly priorQueryDocs?: ReadonlyMap<string, readonly NormalizedDocument[]> | undefined;
+}
 
 function resolveDocTimeZone(normalizationFingerprint: string): string {
 	try {
@@ -114,14 +123,19 @@ function evalValueExprOnTarget(
 	expr: ValueExprAST,
 	scopeDef: Pick<ScopeDefinition, 'matchString'>,
 	hostDoc: NormalizedDocument | null | undefined,
+	oracleState?: OracleGraphState,
 ): boolean {
 	switch (expr.type) {
 		case 'VALUE_LOGICAL':
 			return expr.operator === 'AND'
-				? expr.children.every((c) => evalValueExprOnTarget(target, c, scopeDef, hostDoc))
-				: expr.children.some((c) => evalValueExprOnTarget(target, c, scopeDef, hostDoc));
+				? expr.children.every((c) =>
+						evalValueExprOnTarget(target, c, scopeDef, hostDoc, oracleState),
+					)
+				: expr.children.some((c) =>
+						evalValueExprOnTarget(target, c, scopeDef, hostDoc, oracleState),
+					);
 		case 'VALUE_NOT':
-			return !evalValueExprOnTarget(target, expr.child, scopeDef, hostDoc);
+			return !evalValueExprOnTarget(target, expr.child, scopeDef, hostDoc, oracleState);
 		case 'VALUE_LEAF': {
 			if (expr.matcher.kind === 'regex') {
 				return testRegex(target, expr.matcher);
@@ -129,6 +143,15 @@ function evalValueExprOnTarget(
 			if (expr.matcher.kind === 'this') {
 				const res = resolveThisReference(hostDoc, expr.matcher.segments);
 				return res.values.some((v) => scopeDef.matchString(target, String(v), true));
+			}
+			if (expr.matcher.kind === 'query') {
+				const queryMatcher = expr.matcher;
+				const qDocs = oracleState?.priorQueryDocs?.get(queryMatcher.queryName) ?? [];
+				return qDocs.some((qDoc) =>
+					resolveThisReference(qDoc, queryMatcher.segments).values.some((v) =>
+						scopeDef.matchString(target, String(v), true),
+					),
+				);
 			}
 			return scopeDef.matchString(target, expr.matcher.value, expr.matcher.quoted);
 		}
@@ -142,6 +165,7 @@ function evalColonExprOnEntry(
 	timeZone: string,
 	referenceTimeMs: number,
 	hostDoc: NormalizedDocument | null | undefined,
+	oracleState?: OracleGraphState,
 ): boolean {
 	switch (expr.type) {
 		case 'VALUE_LOGICAL':
@@ -154,6 +178,7 @@ function evalColonExprOnEntry(
 							timeZone,
 							referenceTimeMs,
 							hostDoc,
+							oracleState,
 						),
 					)
 				: expr.children.some((c) =>
@@ -164,6 +189,7 @@ function evalColonExprOnEntry(
 							timeZone,
 							referenceTimeMs,
 							hostDoc,
+							oracleState,
 						),
 					);
 		case 'VALUE_NOT':
@@ -174,6 +200,7 @@ function evalColonExprOnEntry(
 				timeZone,
 				referenceTimeMs,
 				hostDoc,
+				oracleState,
 			);
 		case 'VALUE_LEAF': {
 			if (expr.matcher.kind === 'regex') {
@@ -181,9 +208,15 @@ function evalColonExprOnEntry(
 				const target = entry.kind === 'text' ? entry.value : entry.raw;
 				return testRegex(target, expr.matcher);
 			}
-			if (expr.matcher.kind === 'this') {
-				const res = resolveThisReference(hostDoc, expr.matcher.segments);
-				return res.values.some((val) => {
+			if (expr.matcher.kind === 'this' || expr.matcher.kind === 'query') {
+				const leafMatcher = expr.matcher;
+				const rawVals =
+					leafMatcher.kind === 'this'
+						? resolveThisReference(hostDoc, leafMatcher.segments).values
+						: (oracleState?.priorQueryDocs?.get(leafMatcher.queryName) ?? []).flatMap(
+								(qDoc) => resolveThisReference(qDoc, leafMatcher.segments).values,
+							);
+				return rawVals.some((val) => {
 					const coerced = coerceHostScalarForProperty(
 						val,
 						propType,
@@ -258,15 +291,30 @@ function evalPropertyEntry(
 	timeZone: string,
 	referenceTimeMs: number,
 	hostDoc: NormalizedDocument | null | undefined,
+	oracleState?: OracleGraphState,
 ): boolean {
 	if (entry.kind === 'null' || entry.kind === 'invalid') return false;
 	if (op === ':') {
-		return evalColonExprOnEntry(entry, propType, expr, timeZone, referenceTimeMs, hostDoc);
+		return evalColonExprOnEntry(
+			entry,
+			propType,
+			expr,
+			timeZone,
+			referenceTimeMs,
+			hostDoc,
+			oracleState,
+		);
 	}
 	if (expr.type !== 'VALUE_LEAF' || expr.matcher.kind === 'regex') return false;
-	if (expr.matcher.kind === 'this') {
-		const res = resolveThisReference(hostDoc, expr.matcher.segments);
-		return res.values.some((val) => {
+	if (expr.matcher.kind === 'this' || expr.matcher.kind === 'query') {
+		const leafMatcher = expr.matcher;
+		const rawVals =
+			leafMatcher.kind === 'this'
+				? resolveThisReference(hostDoc, leafMatcher.segments).values
+				: (oracleState?.priorQueryDocs?.get(leafMatcher.queryName) ?? []).flatMap(
+						(qDoc) => resolveThisReference(qDoc, leafMatcher.segments).values,
+					);
+		return rawVals.some((val) => {
 			const coerced = coerceHostScalarForProperty(val, propType, timeZone, referenceTimeMs);
 			if (!coerced.ok) return false;
 			switch (coerced.kind) {
@@ -393,12 +441,165 @@ function evalPropertyEntry(
 	}
 }
 
+function oracleGetNeighbors(
+	currPath: string,
+	edge: { kind: 'scope'; scope: string } | { kind: 'property'; lowerKey: string },
+	direction: GraphDirection,
+	oracleState: OracleGraphState,
+): string[] {
+	const currDoc = oracleState.docsByPath.get(currPath);
+	if (!currDoc) return [];
+	const out = new Set<string>();
+
+	const collectScopeOutgoing = (doc: NormalizedDocument, scope: string): string[] => {
+		const targets: string[] = [];
+		if (scope === 'links') {
+			for (const l of doc.links) {
+				if (l.resolvedPath !== null && oracleState.docsByPath.has(l.resolvedPath)) {
+					targets.push(l.resolvedPath);
+				}
+			}
+		} else if (scope === 'embeds') {
+			for (const e of doc.embeds) {
+				if (e.resolvedPath !== null && oracleState.docsByPath.has(e.resolvedPath)) {
+					targets.push(e.resolvedPath);
+				}
+			}
+		} else if (scope === 'backlinks') {
+			if (doc.backlinks !== undefined) {
+				for (const b of doc.backlinks) {
+					if (oracleState.docsByPath.has(b.path)) {
+						targets.push(b.path);
+					}
+				}
+			} else {
+				for (const other of oracleState.allDocs) {
+					if (
+						other.links.some((l) => l.resolvedPath === doc.file.path) ||
+						other.embeds.some((e) => e.resolvedPath === doc.file.path)
+					) {
+						targets.push(other.file.path);
+					}
+				}
+			}
+		}
+		return targets;
+	};
+
+	if (edge.kind === 'scope') {
+		if (direction === 'outgoing') {
+			for (const t of collectScopeOutgoing(currDoc, edge.scope)) out.add(t);
+		} else {
+			for (const other of oracleState.allDocs) {
+				if (collectScopeOutgoing(other, edge.scope).includes(currPath)) {
+					out.add(other.file.path);
+				}
+			}
+		}
+	} else {
+		if (direction === 'outgoing') {
+			for (const l of currDoc.links) {
+				if (
+					l.property !== null &&
+					l.resolvedPath !== null &&
+					l.property.toLowerCase() === edge.lowerKey &&
+					oracleState.docsByPath.has(l.resolvedPath)
+				) {
+					out.add(l.resolvedPath);
+				}
+			}
+		} else {
+			for (const other of oracleState.allDocs) {
+				if (
+					other.links.some(
+						(l) =>
+							l.property !== null &&
+							l.resolvedPath === currPath &&
+							l.property.toLowerCase() === edge.lowerKey,
+					)
+				) {
+					out.add(other.file.path);
+				}
+			}
+		}
+	}
+
+	return [...out];
+}
+
+function oracleEvalGraphNode(
+	startPath: string,
+	edge: { kind: 'scope'; scope: string } | { kind: 'property'; lowerKey: string },
+	direction: GraphDirection,
+	hops: HopBounds,
+	target: GraphTargetAST,
+	resolvedConfig: ResolvedEngineConfig,
+	referenceTimeMs: number,
+	hostDoc: NormalizedDocument | null | undefined,
+	oracleState: OracleGraphState,
+): boolean {
+	const targetPaths = new Set<string>();
+	switch (target.kind) {
+		case 'this_ref':
+			if (hostDoc && oracleState.docsByPath.has(hostDoc.file.path)) {
+				targetPaths.add(hostDoc.file.path);
+			}
+			break;
+		case 'query_ref':
+			for (const qDoc of oracleState.priorQueryDocs?.get(target.queryName) ?? []) {
+				if (oracleState.docsByPath.has(qDoc.file.path)) {
+					targetPaths.add(qDoc.file.path);
+				}
+			}
+			break;
+		case 'subquery':
+			for (const d of oracleState.allDocs) {
+				if (
+					evalAstNode(
+						d,
+						target.ast,
+						resolvedConfig,
+						referenceTimeMs,
+						hostDoc,
+						oracleState,
+					)
+				) {
+					targetPaths.add(d.file.path);
+				}
+			}
+			break;
+	}
+	if (targetPaths.size === 0) return false;
+	if (hops.minHops === 0 && targetPaths.has(startPath)) return true;
+
+	// Independent reference implementation: textbook forward simple-path DFS
+	const visited = new Set<string>([startPath]);
+	const dfs = (curr: string, depth: number): boolean => {
+		const nextDepth = depth + 1;
+		for (const next of oracleGetNeighbors(curr, edge, direction, oracleState)) {
+			if (visited.has(next)) continue;
+			if (nextDepth >= hops.minHops && targetPaths.has(next)) {
+				return true;
+			}
+			if (nextDepth < hops.maxHops) {
+				visited.add(next);
+				const found = dfs(next, nextDepth);
+				visited.delete(next);
+				if (found) return true;
+			}
+		}
+		return false;
+	};
+	return dfs(startPath, 0);
+}
+
 function evalAstNode(
 	doc: NormalizedDocument,
 	ast: SearchAST,
 	resolvedConfig: ResolvedEngineConfig,
 	referenceTimeMs: number,
 	hostDoc: NormalizedDocument | null | undefined,
+	oracleState?: OracleGraphState,
 ): boolean {
 	switch (ast.type) {
 		case 'MATCH_ALL':
@@ -406,13 +607,20 @@ function evalAstNode(
 		case 'LOGICAL':
 			return ast.operator === 'AND'
 				? ast.children.every((c) =>
-						evalAstNode(doc, c, resolvedConfig, referenceTimeMs, hostDoc),
+						evalAstNode(doc, c, resolvedConfig, referenceTimeMs, hostDoc, oracleState),
 					)
 				: ast.children.some((c) =>
-						evalAstNode(doc, c, resolvedConfig, referenceTimeMs, hostDoc),
+						evalAstNode(doc, c, resolvedConfig, referenceTimeMs, hostDoc, oracleState),
 					);
 		case 'NOT':
-			return !evalAstNode(doc, ast.child, resolvedConfig, referenceTimeMs, hostDoc);
+			return !evalAstNode(
+				doc,
+				ast.child,
+				resolvedConfig,
+				referenceTimeMs,
+				hostDoc,
+				oracleState,
+			);
 		case 'SCOPED_FILTER': {
 			const def =
 				ast.rawScope === '#'
@@ -423,20 +631,54 @@ function evalAstNode(
 			const op = ast.operator ?? ':';
 			if (op === ':') {
 				return targets.some((target) =>
-					evalValueExprOnTarget(target, ast.expr, def, hostDoc),
+					evalValueExprOnTarget(target, ast.expr, def, hostDoc, oracleState),
 				);
 			}
 			if (ast.expr.type !== 'VALUE_LEAF' || ast.expr.matcher.kind === 'regex') return false;
 			const canonical = def.canonicalName;
+			const matcher = ast.expr.matcher;
 			const rawValues =
-				ast.expr.matcher.kind === 'this'
-					? resolveThisReference(hostDoc, ast.expr.matcher.segments).values.map(String)
-					: [ast.expr.matcher.value];
+				matcher.kind === 'this'
+					? resolveThisReference(hostDoc, matcher.segments).values.map(String)
+					: matcher.kind === 'query'
+						? (oracleState?.priorQueryDocs?.get(matcher.queryName) ?? []).flatMap(
+								(qDoc) =>
+									resolveThisReference(qDoc, matcher.segments).values.map(String),
+							)
+						: [matcher.value];
 			return scopeTargetsMatchComparison(
 				canonical,
 				targets,
 				op,
 				normalizeScopeComparisonOperands(canonical, rawValues),
+			);
+		}
+		case 'SCOPE_GRAPH_FILTER': {
+			const state = oracleState ?? buildSingleDocOracleState(doc, hostDoc);
+			return oracleEvalGraphNode(
+				doc.file.path,
+				{ kind: 'scope', scope: ast.scope },
+				ast.direction,
+				ast.hops,
+				ast.target,
+				resolvedConfig,
+				referenceTimeMs,
+				hostDoc,
+				state,
+			);
+		}
+		case 'PROPERTY_GRAPH_FILTER': {
+			const state = oracleState ?? buildSingleDocOracleState(doc, hostDoc);
+			return oracleEvalGraphNode(
+				doc.file.path,
+				{ kind: 'property', lowerKey: ast.key.trim().toLowerCase() },
+				ast.direction,
+				ast.hops,
+				ast.target,
+				resolvedConfig,
+				referenceTimeMs,
+				hostDoc,
+				state,
 			);
 		}
 		case 'PROPERTY_FILTER': {
@@ -464,10 +706,21 @@ function evalAstNode(
 					resolvedConfig.timeZone,
 					referenceTimeMs,
 					hostDoc,
+					oracleState,
 				),
 			);
 		}
 	}
+}
+
+function buildSingleDocOracleState(
+	doc: NormalizedDocument,
+	hostDoc: NormalizedDocument | null | undefined,
+): OracleGraphState {
+	const allDocs = hostDoc && hostDoc.file.path !== doc.file.path ? [doc, hostDoc] : [doc];
+	const docsByPath = new Map<string, NormalizedDocument>();
+	for (const d of allDocs) docsByPath.set(d.file.path, d);
+	return { docsByPath, allDocs };
 }
 
 export function oracleEvaluateDoc(doc: NormalizedDocument, prepared: PreparedQuery): boolean {
@@ -486,6 +739,7 @@ export function oracleEvaluateDoc(doc: NormalizedDocument, prepared: PreparedQue
 export function oracleEvaluateVault(
 	docs: readonly NormalizedDocument[],
 	prepared: PreparedQuery,
+	priorQueryDocs?: ReadonlyMap<string, readonly NormalizedDocument[]>,
 ): VaultEvaluationReport {
 	const { ast, resolvedConfig } = prepared;
 	const expectedFp = resolvedConfig.normalizationFingerprint;
@@ -493,13 +747,32 @@ export function oracleEvaluateVault(
 	const matches: NormalizedDocument[] = [];
 	const propertyDiagnostics: DocumentDiagnostic[] = [];
 
+	const docsByPath = new Map<string, NormalizedDocument>();
 	for (const doc of docs) {
 		if (doc.normalizationFingerprint !== expectedFp) {
 			throw new Error(
 				`Document "${doc.file.path}" normalizationFingerprint mismatch: expected ${expectedFp}, got ${doc.normalizationFingerprint}`,
 			);
 		}
-		if (oracleEvaluateDoc(doc, prepared)) {
+		docsByPath.set(doc.file.path, doc);
+	}
+	const oracleState: OracleGraphState = {
+		docsByPath,
+		allDocs: docs,
+		priorQueryDocs,
+	};
+
+	for (const doc of docs) {
+		if (
+			evalAstNode(
+				doc,
+				ast,
+				resolvedConfig,
+				prepared.referenceTimeMs,
+				prepared.hostDoc,
+				oracleState,
+			)
+		) {
 			matches.push(doc);
 		}
 		if (queriedKeys.size > 0 && doc.diagnostics.length > 0) {

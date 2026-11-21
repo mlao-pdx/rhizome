@@ -15,7 +15,7 @@ function encodeDoubleQuoted(value: string): string {
 
 function printLeafMatcher(matcher: LeafMatcher): string {
 	if (matcher.kind === 'regex') return `/${matcher.pattern}/${matcher.flags}`;
-	if (matcher.kind === 'this') return matcher.raw;
+	if (matcher.kind === 'this' || matcher.kind === 'query') return matcher.raw;
 	return matcher.quoted ? encodeDoubleQuoted(matcher.value) : matcher.value;
 }
 
@@ -95,6 +95,24 @@ function printSearchAST(ast: SearchAST, parentOp?: 'AND' | 'OR' | 'NOT'): string
 			}
 			return `[${key}:${ast.operator}${printValueExpr(value)}]`;
 		}
+		case 'SCOPE_GRAPH_FILTER': {
+			const targetStr =
+				ast.target.kind === 'subquery'
+					? `{ ${printSearchAST(ast.target.ast)} }`
+					: ast.target.raw;
+			if (ast.hops.raw === ':') {
+				return `${ast.scope}: ${targetStr}`;
+			}
+			return `${ast.scope} ${ast.hops.raw} ${targetStr}`;
+		}
+		case 'PROPERTY_GRAPH_FILTER': {
+			const key = printPropertyKey(ast.rawKey);
+			const targetStr =
+				ast.target.kind === 'subquery'
+					? `{ ${printSearchAST(ast.target.ast)} }`
+					: ast.target.raw;
+			return `[${key} ${ast.hops.raw} ${targetStr}]`;
+		}
 		case 'LOGICAL': {
 			const joined = ast.children
 				.map((child) => printSearchAST(child, ast.operator))
@@ -162,6 +180,9 @@ export function computeSyntacticDepth(ast: SearchAST, parentOp?: 'AND' | 'OR' | 
 				? (ast.operator === ':' && ast.valueExpr.type !== 'VALUE_LEAF' ? 1 : 0) +
 						computeSyntacticDepthValueExpr(ast.valueExpr)
 				: 0;
+		case 'SCOPE_GRAPH_FILTER':
+		case 'PROPERTY_GRAPH_FILTER':
+			return ast.target.kind === 'subquery' ? 1 + computeSyntacticDepth(ast.target.ast) : 0;
 		case 'LOGICAL': {
 			const needsParens = Boolean(
 				ast.parenthesized || (parentOp && parentOp !== ast.operator),

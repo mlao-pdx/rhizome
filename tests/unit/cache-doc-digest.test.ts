@@ -59,4 +59,22 @@ describe('digestNormalizedDocument', () => {
 		expect(first).not.toBe(second);
 		expect(digestNormalizedDocument(first)).toBe(digestNormalizedDocument(second));
 	});
+
+	it('changes when a frontmatter link property attribution changes', () => {
+		const upDoc = makeDoc({
+			frontmatter: { up: '[[Roadmap]]', related: '[[Roadmap]]' },
+			frontmatterLinks: [{ link: 'Roadmap', key: 'up' }],
+		});
+		const relatedDoc = makeDoc({
+			frontmatter: { up: '[[Roadmap]]', related: '[[Roadmap]]' },
+			frontmatterLinks: [{ link: 'Roadmap', key: 'related' }],
+		});
+		const unattributedDoc = makeDoc({
+			frontmatter: { up: '[[Roadmap]]', related: '[[Roadmap]]' },
+			frontmatterLinks: [{ link: 'Roadmap' }],
+		});
+
+		expect(digestNormalizedDocument(upDoc)).not.toBe(digestNormalizedDocument(relatedDoc));
+		expect(digestNormalizedDocument(upDoc)).not.toBe(digestNormalizedDocument(unattributedDoc));
+	});
 });

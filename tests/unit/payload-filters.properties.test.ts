@@ -421,7 +421,7 @@ describe('Payload-Shaping & Aggregation Filter Property Invariants', () => {
 			fc.constant(''),
 			fc.integer({ min: -500, max: 500 }),
 			fc.boolean(),
-			fc.stringMatching(/^[a-zA-Z0-9 _-]{1,12}$/),
+			fc.stringMatching(/^[a-zA-Z0-9 _-]{1,12}$/).filter((s) => !s.includes('__proto__')),
 		);
 		const nestedRowArb = fc.dictionary(safeKeyArb, singleLineScalarArb, {
 			minKeys: 1,

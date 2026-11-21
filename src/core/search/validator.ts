@@ -1,11 +1,14 @@
 import { containsRegexLeaf } from './ast-utils';
+import { isGraphScopeCanonicalName, suggestQueryNameHint } from './graph-dag';
 import { coerceHostScalarForProperty, resolveThisReference } from './host-reference';
 import { formatScopeRhsDisplay } from './linter';
 import { validateRegexLiteral } from './literals';
 import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
+import { BUILT_IN_SCOPES } from './scopes';
 import { parseTemporalExpr } from './temporal';
 import {
 	getSystemScopeForPropertyKey,
+	isVirtualFileKey,
 	type LeafMatcher,
 	type NormalizedDocument,
 	type ObsidianPropertyType,
@@ -17,6 +20,17 @@ import {
 	type SourceSpan,
 	type ValueExprAST,
 } from './types';
+
+const BUILT_IN_SCOPE_LOWER_NAMES: ReadonlySet<string> = (() => {
+	const set = new Set<string>();
+	for (const s of BUILT_IN_SCOPES) {
+		set.add(s.canonicalName.trim().toLowerCase());
+		for (const alias of s.aliases) {
+			set.add(alias.trim().toLowerCase());
+		}
+	}
+	return set;
+})();
 
 export interface ValidationResult {
 	readonly ast: SearchAST;
@@ -221,11 +235,28 @@ export function validateQueryAST(
 	referenceTimeMs: number,
 	initialInvalidPropertyNodes?: ReadonlySet<PropertyFilterNode>,
 	hostDoc?: NormalizedDocument | null,
+	knownQueryNames?: ReadonlySet<string>,
 ): ValidationResult {
 	const diagnostics: SearchDiagnostic[] = [];
 	const invalidRegexPropNodes = new Set<PropertyFilterNode>(initialInvalidPropertyNodes);
 	const invalidRegexScopedNodes = new Set<ScopedFilterNode>();
 	const invalidPropertyNodes = new Set<PropertyFilterNode>(initialInvalidPropertyNodes);
+
+	function checkQueryRefName(queryName: string, span: SourceSpan | null): void {
+		if (
+			knownQueryNames !== undefined &&
+			queryName.length > 0 &&
+			!knownQueryNames.has(queryName)
+		) {
+			diagnostics.push({
+				code: 'ERROR_UNKNOWN_QUERY_REF',
+				severity: 'error',
+				issue: `Unknown query reference "@query.${queryName}".`,
+				hint: suggestQueryNameHint(queryName, knownQueryNames),
+				span,
+			});
+		}
+	}
 
 	// Step 2: Validate every RegexLiteral leaf first (short-circuiting Step 4 on invalid regex in PropertyFilterNode)
 	function step2Traverse(node: SearchAST): void {
@@ -243,6 +274,12 @@ export function validateQueryAST(
 				}
 				return;
 			}
+			case 'SCOPE_GRAPH_FILTER':
+			case 'PROPERTY_GRAPH_FILTER':
+				if (node.target.kind === 'subquery') {
+					step2Traverse(node.target.ast);
+				}
+				return;
 			case 'PROPERTY_FILTER':
 				if (node.valueExpr) {
 					const hadInvalid = validateRegexLeavesInValueExpr(
@@ -294,9 +331,10 @@ export function validateQueryAST(
 							hint: null,
 							span: node.span ?? null,
 						});
-					} else if (hostDoc !== undefined) {
+					} else {
 						for (const leafNode of collectValueExprLeaves(node.expr)) {
 							if (
+								hostDoc !== undefined &&
 								leafNode.matcher.kind === 'this' &&
 								leafNode.matcher.segments.length > 0
 							) {
@@ -313,6 +351,11 @@ export function validateQueryAST(
 										span: leafNode.span ?? node.span ?? null,
 									});
 								}
+							} else if (leafNode.matcher.kind === 'query') {
+								checkQueryRefName(
+									leafNode.matcher.queryName,
+									leafNode.span ?? node.span ?? null,
+								);
 							}
 						}
 					}
@@ -324,6 +367,75 @@ export function validateQueryAST(
 							...(node.operator !== undefined ? { operator: node.operator } : {}),
 							expr: node.expr,
 							...(node.span ? { span: node.span } : {}),
+						};
+					}
+				}
+				return node;
+			}
+			case 'SCOPE_GRAPH_FILTER': {
+				const scopeDef = resolvedConfig.getScope(node.rawScope);
+				if (!scopeDef) {
+					diagnostics.push({
+						code: 'ERROR_UNKNOWN_SCOPE',
+						severity: 'error',
+						issue: `Unknown search scope "${node.rawScope}".`,
+						hint: suggestScopeHint(node.rawScope, resolvedConfig),
+						span: node.span ?? null,
+					});
+					return node;
+				}
+				if (
+					!isGraphScopeCanonicalName(scopeDef.canonicalName) &&
+					!BUILT_IN_SCOPE_LOWER_NAMES.has(node.rawScope.trim().toLowerCase())
+				) {
+					diagnostics.push({
+						code: 'SYNTAX_ERROR',
+						severity: 'error',
+						issue: `Scope "${scopeDef.canonicalName}" does not support graph traversal.`,
+						hint: 'Only "links", "embeds", and "backlinks" support graph arrows and subqueries.',
+						span: node.span ?? null,
+					});
+				}
+				if (node.target.kind === 'this_ref' && hostDoc === null) {
+					diagnostics.push({
+						code: 'WARN_MISSING_THIS_VALUE',
+						severity: 'warning',
+						issue: 'Host note "@this" is unavailable; this graph filter evaluates to false.',
+						hint: 'Run this query from a hosting note so "@this" resolves.',
+						span: node.target.span ?? node.span ?? null,
+					});
+				} else if (node.target.kind === 'query_ref') {
+					checkQueryRefName(node.target.queryName, node.target.span ?? node.span ?? null);
+				}
+				let nextTarget = node.target;
+				if (node.target.kind === 'subquery') {
+					const nextSubAst = step3Traverse(node.target.ast);
+					if (nextSubAst !== node.target.ast) {
+						nextTarget = {
+							...node.target,
+							ast: nextSubAst,
+						};
+					}
+				}
+				if (node.scope !== scopeDef.canonicalName || nextTarget !== node.target) {
+					return {
+						...node,
+						scope: scopeDef.canonicalName,
+						target: nextTarget,
+					};
+				}
+				return node;
+			}
+			case 'PROPERTY_GRAPH_FILTER': {
+				if (node.target.kind === 'subquery') {
+					const nextSubAst = step3Traverse(node.target.ast);
+					if (nextSubAst !== node.target.ast) {
+						return {
+							...node,
+							target: {
+								...node.target,
+								ast: nextSubAst,
+							},
 						};
 					}
 				}
@@ -481,7 +593,48 @@ export function validateQueryAST(
 								}
 							}
 						}
+					} else if (matcher.kind === 'query') {
+						checkQueryRefName(matcher.queryName, leafNode.span ?? node.span ?? null);
 					}
+				}
+				return;
+			}
+			case 'SCOPE_GRAPH_FILTER':
+				if (node.target.kind === 'subquery') {
+					step4Traverse(node.target.ast);
+				}
+				return;
+			case 'PROPERTY_GRAPH_FILTER': {
+				const systemScope = getSystemScopeForPropertyKey(node.key);
+				if (systemScope !== undefined) {
+					diagnostics.push({
+						code: 'SYNTAX_ERROR',
+						severity: 'error',
+						issue: `"${node.key}" is a built-in note scope, not a link property.`,
+						hint: 'Use a frontmatter or inline link property key (e.g. "[up -> ...]"), or "links -> ..." for whole-note links.',
+						span: node.span ?? null,
+					});
+				} else if (isVirtualFileKey(node.key)) {
+					diagnostics.push({
+						code: 'SYNTAX_ERROR',
+						severity: 'error',
+						issue: `"${node.key}" is a virtual file field, not a link property.`,
+						hint: 'Use a frontmatter or inline link property key (e.g. "[up -> ...]"), or "links -> ..." for whole-note links.',
+						span: node.span ?? null,
+					});
+				}
+				if (node.target.kind === 'this_ref' && hostDoc === null) {
+					diagnostics.push({
+						code: 'WARN_MISSING_THIS_VALUE',
+						severity: 'warning',
+						issue: 'Host note "@this" is unavailable; this graph filter evaluates to false.',
+						hint: 'Run this query from a hosting note so "@this" resolves.',
+						span: node.target.span ?? node.span ?? null,
+					});
+				} else if (node.target.kind === 'query_ref') {
+					checkQueryRefName(node.target.queryName, node.target.span ?? node.span ?? null);
+				} else if (node.target.kind === 'subquery') {
+					step4Traverse(node.target.ast);
 				}
 				return;
 			}

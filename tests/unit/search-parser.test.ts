@@ -54,11 +54,15 @@ describe('Invariant 1a: Lexer & SearchParser self-analysis smoke test', () => {
 			RParen: ')',
 			LBracket: '[',
 			RBracket: ']',
+			LBrace: '{',
+			RBrace: '}',
 			Or: 'OR',
 			And: 'AND',
 			Not: 'NOT',
 			BangNot: '!',
+			GraphArrow: 'graph arrow',
 			ThisReference: '@this.path',
+			QueryReference: '@query.name',
 			DateTimeLiteral: 'date literal',
 			Colon: ':',
 			CompOp: 'comparison operator',
@@ -846,5 +850,167 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 			expect(res.ast).toBeNull();
 			expect(res.diagnostics.some((d) => d.code === 'SYNTAX_ERROR')).toBe(true);
 		}
+	});
+
+	it('parses scope and property graph filters, unspaced arrows, hop quantifiers, empty {}, @this, and @query.* references', () => {
+		const unspaced = parseQuery('[up->{tag:goal}] AND [parent<-@this] AND [score:<-5]');
+		expect(unspaced.diagnostics).toEqual([]);
+		expect(unspaced.ast).toMatchObject({
+			type: 'LOGICAL',
+			operator: 'AND',
+			children: [
+				{
+					type: 'PROPERTY_GRAPH_FILTER',
+					key: 'up',
+					direction: 'outgoing',
+					hops: { minHops: 1, maxHops: 1, unbounded: false, raw: '->' },
+					target: {
+						kind: 'subquery',
+						ast: { type: 'SCOPED_FILTER', scope: 'tag' },
+					},
+				},
+				{
+					type: 'PROPERTY_GRAPH_FILTER',
+					key: 'parent',
+					direction: 'incoming',
+					hops: { minHops: 1, maxHops: 1, unbounded: false, raw: '<-' },
+					target: { kind: 'this_ref', raw: '@this' },
+				},
+				{
+					type: 'PROPERTY_FILTER',
+					key: 'score',
+					operator: '<',
+					valueExpr: {
+						type: 'VALUE_LEAF',
+						matcher: { kind: 'string', value: '-5', quoted: false },
+					},
+				},
+			],
+		});
+
+		const quantifiers = parseQuery(
+			'links ->* {} AND embeds ->..3 @query.media AND backlinks <-0..* @this AND links: { #project } AND links: @query.tasks AND backlinks: @this',
+		);
+		expect(quantifiers.diagnostics).toEqual([]);
+		expect(quantifiers.ast).toMatchObject({
+			type: 'LOGICAL',
+			operator: 'AND',
+			children: [
+				{
+					type: 'SCOPE_GRAPH_FILTER',
+					scope: 'links',
+					direction: 'outgoing',
+					hops: { minHops: 1, maxHops: 64, unbounded: true, raw: '->*' },
+					target: { kind: 'subquery', ast: { type: 'MATCH_ALL' } },
+				},
+				{
+					type: 'SCOPE_GRAPH_FILTER',
+					scope: 'embeds',
+					direction: 'outgoing',
+					hops: { minHops: 1, maxHops: 3, unbounded: false, raw: '->..3' },
+					target: { kind: 'query_ref', queryName: 'media' },
+				},
+				{
+					type: 'SCOPE_GRAPH_FILTER',
+					scope: 'backlinks',
+					direction: 'incoming',
+					hops: { minHops: 0, maxHops: 64, unbounded: true, raw: '<-0..*' },
+					target: { kind: 'this_ref', raw: '@this' },
+				},
+				{
+					type: 'SCOPE_GRAPH_FILTER',
+					scope: 'links',
+					direction: 'outgoing',
+					hops: { minHops: 1, maxHops: 1, unbounded: false, raw: ':' },
+					target: { kind: 'subquery' },
+				},
+				{
+					type: 'SCOPE_GRAPH_FILTER',
+					scope: 'links',
+					direction: 'outgoing',
+					hops: { minHops: 1, maxHops: 1, unbounded: false, raw: ':' },
+					target: { kind: 'query_ref', queryName: 'tasks' },
+				},
+				{
+					type: 'SCOPE_GRAPH_FILTER',
+					scope: 'backlinks',
+					direction: 'outgoing',
+					hops: { minHops: 1, maxHops: 1, unbounded: false, raw: ':' },
+					target: { kind: 'this_ref', raw: '@this' },
+				},
+			],
+		});
+
+		const scalarQueryRef = parseQuery(
+			'[project: = @query.active_projects.file.basename] AND tag:@query.active_projects.properties."Focus Tags"',
+		);
+		expect(scalarQueryRef.diagnostics).toEqual([]);
+		expect(scalarQueryRef.ast).toMatchObject({
+			type: 'LOGICAL',
+			operator: 'AND',
+			children: [
+				{
+					type: 'PROPERTY_FILTER',
+					key: 'project',
+					operator: '=',
+					valueExpr: {
+						type: 'VALUE_LEAF',
+						matcher: {
+							kind: 'query',
+							queryName: 'active_projects',
+							segments: ['file', 'basename'],
+						},
+					},
+				},
+				{
+					type: 'SCOPED_FILTER',
+					scope: 'tag',
+					expr: {
+						type: 'VALUE_LEAF',
+						matcher: {
+							kind: 'query',
+							queryName: 'active_projects',
+							segments: ['properties', 'Focus Tags'],
+						},
+					},
+				},
+			],
+		});
+	});
+
+	it('rejects invalid hop quantifiers, non-graph scopes with graph targets, malformed @query references, and excessive { ... } subquery nesting', () => {
+		const invalidCases = [
+			'links ->0..0 @this',
+			'links ->5..2 @this',
+			'links ->1..65 @this',
+			'[up ->100..200 @this]',
+			'[up ->2 @this]',
+			'tag -> @this',
+			'headings: { #work }',
+			'tag: @query.tasks',
+			'[status: @query.tasks]',
+			'links -> @this.file.basename',
+			'links -> @query.tasks.file.basename',
+			'tag:@query',
+			'tag:@query.',
+			'tag:@query.123.tags',
+			'tag:@query.tasks..basename',
+			'tag:@query.tasks.properties.__proto__',
+		];
+
+		for (const q of invalidCases) {
+			const res = parseQuery(q);
+			expect(res.ast, `Expected null AST for: ${q}`).toBeNull();
+			expect(
+				res.diagnostics.some((d) => d.code === 'SYNTAX_ERROR' && Boolean(d.hint)),
+				`Expected SYNTAX_ERROR with actionable hint for: ${q}`,
+			).toBe(true);
+		}
+
+		// 33 nested `{ links: ... }` exceeds MAX_SYNTACTIC_DEPTH = 32
+		const deepSubquery = `${'links: { '.repeat(33)}#work${' }'.repeat(33)}`;
+		const deepRes = parseQuery(deepSubquery);
+		expect(deepRes.ast).toBeNull();
+		expect(deepRes.diagnostics[0]?.issue).toContain('32');
 	});
 });

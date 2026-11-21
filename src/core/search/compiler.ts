@@ -18,6 +18,7 @@ export function compileQuery(
 	resolvedConfig: ResolvedEngineConfig,
 	referenceTimeMs: number,
 	hostDoc?: NormalizedDocument | null,
+	knownQueryNames?: ReadonlySet<string>,
 ): CompileResult {
 	// Step 0: Validate referenceTimeMs
 	if (!isValidReferenceTimeMs(referenceTimeMs)) {
@@ -59,6 +60,7 @@ export function compileQuery(
 		referenceTimeMs,
 		parsed.invalidPropertyNodes,
 		hostDoc,
+		knownQueryNames,
 	);
 
 	// Step 5: Non-blocking linter pass

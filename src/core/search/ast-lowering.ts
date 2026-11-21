@@ -1,6 +1,8 @@
 import type { CstElement, CstNode, IToken } from 'chevrotain';
+import { isGraphScopeCanonicalName, parseGraphArrow } from './graph-dag';
 import { createWikilinkBracketsHint } from './linter';
 import {
+	decodeQueryReference,
 	decodeQuotedString,
 	decodeRegexLiteral,
 	decodeThisReference,
@@ -8,6 +10,7 @@ import {
 } from './literals';
 import { BUILT_IN_SCOPES } from './scopes';
 import type {
+	GraphTargetAST,
 	LeafMatcher,
 	PropertyFilterNode,
 	PropertyOperator,
@@ -181,6 +184,51 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 				span,
 			};
 		}
+		const queryRef = asTokens(ch.QueryReference)[0];
+		if (queryRef) {
+			const span = tokenToSpan(queryRef);
+			const decoded = decodeQueryReference(queryRef.image);
+			if (!decoded.ok) {
+				diagnostics.push({
+					code: 'SYNTAX_ERROR',
+					severity: 'error',
+					issue: decoded.issue,
+					hint: decoded.hint,
+					span,
+				});
+				return {
+					matcher: { kind: 'query', raw: queryRef.image, queryName: '', segments: [] },
+					span,
+				};
+			}
+			if (decoded.segments.length === 0) {
+				diagnostics.push({
+					code: 'SYNTAX_ERROR',
+					severity: 'error',
+					issue: `Query reference "${queryRef.image}" requires a field path when used as a scalar value (e.g. "${queryRef.image}.file.basename").`,
+					hint: `Specify a field path such as "${queryRef.image}.file.basename", or use a graph filter (e.g. "links -> ${queryRef.image}" or "[prop -> ${queryRef.image}]").`,
+					span,
+				});
+				return {
+					matcher: {
+						kind: 'query',
+						raw: queryRef.image,
+						queryName: decoded.queryName,
+						segments: [],
+					},
+					span,
+				};
+			}
+			return {
+				matcher: {
+					kind: 'query',
+					raw: queryRef.image,
+					queryName: decoded.queryName,
+					segments: decoded.segments,
+				},
+				span,
+			};
+		}
 		const tok =
 			asTokens(ch.DateTimeLiteral)[0] ??
 			asTokens(ch.TagLiteral)[0] ??
@@ -189,6 +237,113 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 			matcher: { kind: 'string', value: tok.image, quoted: false },
 			span: tokenToSpan(tok),
 		};
+	}
+
+	function lowerSubqueryNode(subNode: CstNode): { ast: SearchAST; span: SourceSpan } {
+		const lbrace = asTokens(subNode.children.LBrace)[0]!;
+		const rbrace = asTokens(subNode.children.RBrace)[0]!;
+		const span = mergeSpans(tokenToSpan(lbrace), tokenToSpan(rbrace));
+		const innerOr = asNodes(subNode.children.orExpression)[0];
+		const ast: SearchAST = innerOr ? lowerOrExpression(innerOr) : { type: 'MATCH_ALL' };
+		return { ast, span };
+	}
+
+	function lowerGraphTarget(gtNode: CstNode): { target: GraphTargetAST; span: SourceSpan } {
+		const subNode = asNodes(gtNode.children.subquery)[0];
+		if (subNode) {
+			const lowered = lowerSubqueryNode(subNode);
+			return {
+				target: { kind: 'subquery', ast: lowered.ast, span: lowered.span },
+				span: lowered.span,
+			};
+		}
+
+		const queryTok = asTokens(gtNode.children.QueryReference)[0];
+		if (queryTok) {
+			const span = tokenToSpan(queryTok);
+			const decoded = decodeQueryReference(queryTok.image);
+			if (!decoded.ok) {
+				diagnostics.push({
+					code: 'SYNTAX_ERROR',
+					severity: 'error',
+					issue: decoded.issue,
+					hint: decoded.hint,
+					span,
+				});
+				return {
+					target: { kind: 'query_ref', raw: queryTok.image, queryName: '', span },
+					span,
+				};
+			}
+			if (decoded.segments.length > 0) {
+				diagnostics.push({
+					code: 'SYNTAX_ERROR',
+					severity: 'error',
+					issue: `Graph target "${queryTok.image}" must reference a query name ("@query.${decoded.queryName}") without a field path.`,
+					hint: `Use "@query.${decoded.queryName}" to traverse links to matched notes.`,
+					span,
+				});
+			}
+			return {
+				target: {
+					kind: 'query_ref',
+					raw: queryTok.image,
+					queryName: decoded.queryName,
+					span,
+				},
+				span,
+			};
+		}
+
+		const thisTok = asTokens(gtNode.children.ThisReference)[0]!;
+		const span = tokenToSpan(thisTok);
+		if (thisTok.image !== '@this') {
+			diagnostics.push({
+				code: 'SYNTAX_ERROR',
+				severity: 'error',
+				issue: `Graph target "${thisTok.image}" must be bare "@this" without a field path.`,
+				hint: 'Use "@this" to traverse links to the hosting note, or use ":" to match field values.',
+				span,
+			});
+		}
+		return {
+			target: { kind: 'this_ref', raw: thisTok.image, span },
+			span,
+		};
+	}
+
+	function extractBareColonGraphTarget(node: CstNode): GraphTargetAST | null {
+		const ch = node.children;
+		if (
+			asTokens(ch.Not).length > 0 ||
+			asTokens(ch.BangNot).length > 0 ||
+			asTokens(ch.LParen).length > 0
+		) {
+			return null;
+		}
+		const leafNode = asNodes(ch.valueLeaf)[0];
+		if (!leafNode) {
+			return null;
+		}
+		const thisTok = asTokens(leafNode.children.ThisReference)[0];
+		if (thisTok && thisTok.image === '@this') {
+			const span = tokenToSpan(thisTok);
+			return { kind: 'this_ref', raw: '@this', span };
+		}
+		const queryTok = asTokens(leafNode.children.QueryReference)[0];
+		if (queryTok) {
+			const decoded = decodeQueryReference(queryTok.image);
+			if (decoded.ok && decoded.segments.length === 0) {
+				const span = tokenToSpan(queryTok);
+				return {
+					kind: 'query_ref',
+					raw: queryTok.image,
+					queryName: decoded.queryName,
+					span,
+				};
+			}
+		}
+		return null;
 	}
 
 	function lowerWikiLinkToken(tok: IToken): LoweredValueExpr {
@@ -338,6 +493,30 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 					span: tokenToSpan(quotedKey ?? idKey),
 				});
 			}
+			const graphArrowTok = asTokens(prop.children.GraphArrow)[0];
+			if (graphArrowTok) {
+				const parsedArrow = parseGraphArrow(graphArrowTok.image);
+				if (!parsedArrow.ok) {
+					diagnostics.push({
+						code: 'SYNTAX_ERROR',
+						severity: 'error',
+						issue: parsedArrow.issue,
+						hint: parsedArrow.hint,
+						span: tokenToSpan(graphArrowTok),
+					});
+				}
+				const gt = lowerGraphTarget(asNodes(prop.children.graphTarget)[0]!);
+				return {
+					type: 'PROPERTY_GRAPH_FILTER',
+					key,
+					rawKey,
+					direction: parsedArrow.direction,
+					hops: parsedArrow.hops,
+					target: gt.target,
+					span,
+				};
+			}
+
 			const colon = asTokens(prop.children.Colon)[0];
 			const compOp = asTokens(prop.children.CompOp)[0];
 			const valueNotExprNode = asNodes(prop.children.valueNotExpr)[0];
@@ -408,6 +587,66 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 			const scopeTok = asTokens(scopeNameNode.children.Identifier)[0]!;
 			const rawScope = scopeTok.image;
 			const scope = resolveBuiltInScopeCanonicalName(rawScope);
+			const isKnownBuiltIn = BUILT_IN_SCOPE_MAP.has(rawScope.trim().toLowerCase());
+
+			const graphArrowTok = asTokens(scoped.children.GraphArrow)[0];
+			if (graphArrowTok) {
+				const parsedArrow = parseGraphArrow(graphArrowTok.image);
+				if (!parsedArrow.ok) {
+					diagnostics.push({
+						code: 'SYNTAX_ERROR',
+						severity: 'error',
+						issue: parsedArrow.issue,
+						hint: parsedArrow.hint,
+						span: tokenToSpan(graphArrowTok),
+					});
+				}
+				const gt = lowerGraphTarget(asNodes(scoped.children.graphTarget)[0]!);
+				const fullSpan = mergeSpans(tokenToSpan(scopeTok), gt.span);
+				if (isKnownBuiltIn && !isGraphScopeCanonicalName(scope)) {
+					diagnostics.push({
+						code: 'SYNTAX_ERROR',
+						severity: 'error',
+						issue: `Scope "${scope}" does not support graph traversal ("${graphArrowTok.image}").`,
+						hint: 'Only "links", "embeds", and "backlinks" support graph arrows, or use "[prop -> ...]" for property links.',
+						span: fullSpan,
+					});
+				}
+				return {
+					type: 'SCOPE_GRAPH_FILTER',
+					scope,
+					rawScope,
+					direction: parsedArrow.direction,
+					hops: parsedArrow.hops,
+					target: gt.target,
+					span: fullSpan,
+				};
+			}
+
+			const subNode = asNodes(scoped.children.subquery)[0];
+			if (subNode) {
+				const sub = lowerSubqueryNode(subNode);
+				const fullSpan = mergeSpans(tokenToSpan(scopeTok), sub.span);
+				if (isKnownBuiltIn && !isGraphScopeCanonicalName(scope)) {
+					diagnostics.push({
+						code: 'SYNTAX_ERROR',
+						severity: 'error',
+						issue: `Scope "${scope}:" does not support "{ ... }" graph subqueries.`,
+						hint: 'Only "links:", "embeds:", and "backlinks:" support "{ ... }" subqueries.',
+						span: fullSpan,
+					});
+				}
+				return {
+					type: 'SCOPE_GRAPH_FILTER',
+					scope,
+					rawScope,
+					direction: 'outgoing',
+					hops: { minHops: 1, maxHops: 1, unbounded: false, raw: ':' },
+					target: { kind: 'subquery', ast: sub.ast, span: sub.span },
+					span: fullSpan,
+				};
+			}
+
 			const compOp = asTokens(scoped.children.CompOp)[0];
 			if (compOp) {
 				const rhs = lowerValueLeaf(asNodes(scoped.children.valueLeaf)[0]!);
@@ -420,7 +659,25 @@ export function lowerQueryCst(cst: CstNode): LoweredQueryResult {
 					span: mergeSpans(tokenToSpan(scopeTok), rhs.span),
 				};
 			}
-			const rhs = lowerValueNotExpr(asNodes(scoped.children.valueNotExpr)[0]!);
+
+			const valNotNode = asNodes(scoped.children.valueNotExpr)[0]!;
+			if (isGraphScopeCanonicalName(scope)) {
+				const bareTarget = extractBareColonGraphTarget(valNotNode);
+				if (bareTarget !== null) {
+					const targetSpan = bareTarget.span ?? tokenToSpan(scopeTok);
+					return {
+						type: 'SCOPE_GRAPH_FILTER',
+						scope,
+						rawScope,
+						direction: 'outgoing',
+						hops: { minHops: 1, maxHops: 1, unbounded: false, raw: ':' },
+						target: bareTarget,
+						span: mergeSpans(tokenToSpan(scopeTok), targetSpan),
+					};
+				}
+			}
+
+			const rhs = lowerValueNotExpr(valNotNode);
 			return {
 				type: 'SCOPED_FILTER',
 				scope,

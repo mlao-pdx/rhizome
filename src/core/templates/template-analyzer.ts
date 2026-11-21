@@ -1,4 +1,5 @@
 import {
+	analyzeQueryDependencyDag,
 	And,
 	BangNot,
 	Colon,
@@ -6,7 +7,9 @@ import {
 	CompOp,
 	DateTimeLiteral,
 	type DiagnosticCode,
+	GraphArrow,
 	Identifier,
+	LBrace,
 	LBracket,
 	LIQUID_BLOCK_COMMENT_PATTERN,
 	LIQUID_INLINE_COMMENT_PATTERN,
@@ -14,18 +17,23 @@ import {
 	type NormalizedDocument,
 	Not,
 	Or,
+	QueryReference,
 	QuotedString,
+	RBrace,
 	RBracket,
 	RegexLiteral,
 	type ResolvedEngineConfig,
 	RParen,
+	type SearchAST,
 	SearchLexer,
 	type SourceSpan,
 	TagLiteral,
 	ThisReference,
 	WikiLinkValue,
 } from '@core/search';
+import { Tag, type Template } from 'liquidjs';
 import {
+	maskQueryBlockBodies,
 	offsetRangeToSourceSpan,
 	parseQueryTagArgs,
 	scanQueryBlockSpans,
@@ -353,7 +361,7 @@ function analyzeQueryBody(
 	tokensOut: CodeBlockTokenSpan[],
 	diagsOut: CodeBlockDiagnosticSpan[],
 	hostDoc?: NormalizedDocument | null,
-): void {
+): SearchAST | null {
 	const body = block.query;
 	const baseOffset = block.bodySpan.startOffset;
 
@@ -371,7 +379,7 @@ function analyzeQueryBody(
 
 	const lexResult = SearchLexer.tokenize(body);
 	const lexTokens = lexResult.tokens;
-	let bracketDepth = 0;
+	const containerStack: Array<'[' | '{'> = [];
 
 	for (let i = 0; i < lexTokens.length; i++) {
 		const tok = lexTokens[i]!;
@@ -380,20 +388,32 @@ function analyzeQueryBody(
 		const startOffset = baseOffset + tok.startOffset;
 		const endOffset = startOffset + tok.image.length;
 		const type = tok.tokenType;
+		const inBracket =
+			containerStack.length > 0 && containerStack[containerStack.length - 1] === '[';
 
 		if (type === LBracket) {
-			bracketDepth++;
+			containerStack.push('[');
 			tokensOut.push({ startOffset, endOffset, kind: 'query-property' });
 		} else if (type === RBracket) {
-			bracketDepth = Math.max(0, bracketDepth - 1);
+			if (containerStack[containerStack.length - 1] === '[') {
+				containerStack.pop();
+			}
 			tokensOut.push({ startOffset, endOffset, kind: 'query-property' });
+		} else if (type === LBrace) {
+			containerStack.push('{');
+			tokensOut.push({ startOffset, endOffset, kind: 'query-paren' });
+		} else if (type === RBrace) {
+			if (containerStack[containerStack.length - 1] === '{') {
+				containerStack.pop();
+			}
+			tokensOut.push({ startOffset, endOffset, kind: 'query-paren' });
 		} else if (type === LParen || type === RParen) {
 			tokensOut.push({ startOffset, endOffset, kind: 'query-paren' });
 		} else if (type === Or || type === And || type === Not || type === BangNot) {
 			tokensOut.push({ startOffset, endOffset, kind: 'query-keyword' });
-		} else if (type === CompOp || type === Colon) {
+		} else if (type === CompOp || type === Colon || type === GraphArrow) {
 			tokensOut.push({ startOffset, endOffset, kind: 'query-operator' });
-		} else if (type === DateTimeLiteral || type === ThisReference) {
+		} else if (type === DateTimeLiteral || type === ThisReference || type === QueryReference) {
 			tokensOut.push({ startOffset, endOffset, kind: 'query-date' });
 		} else if (type === RegexLiteral) {
 			tokensOut.push({ startOffset, endOffset, kind: 'query-regex' });
@@ -411,7 +431,10 @@ function analyzeQueryBody(
 		} else if (type === Identifier) {
 			if (prevTok?.tokenType === LBracket) {
 				tokensOut.push({ startOffset, endOffset, kind: 'query-property' });
-			} else if (bracketDepth === 0 && nextTok?.tokenType === Colon) {
+			} else if (
+				!inBracket &&
+				(nextTok?.tokenType === Colon || nextTok?.tokenType === GraphArrow)
+			) {
 				tokensOut.push({ startOffset, endOffset, kind: 'query-scope' });
 			} else {
 				tokensOut.push({ startOffset, endOffset, kind: 'query-identifier' });
@@ -443,6 +466,56 @@ function analyzeQueryBody(
 			}),
 		);
 	}
+	return compileRes.ast;
+}
+
+const EXTERNAL_TEMPLATE_TAG_RE = /\{%-?\s*(?:render\b|layout\s+(?!none\s*-?%\}))/;
+
+function templatesContainExternalInclude(templates: readonly Template[]): boolean {
+	for (const tpl of templates) {
+		if (!(tpl instanceof Tag)) {
+			continue;
+		}
+		const tag = tpl as unknown as {
+			readonly name: string;
+			readonly file?: unknown;
+			readonly templates?: Template[];
+			readonly branches?: unknown;
+			readonly elseTemplates?: Template[];
+		};
+		if (tag.name === 'render') {
+			return true;
+		}
+		if (tag.name === 'layout') {
+			if (tag.file !== undefined) {
+				return true;
+			}
+			if (Array.isArray(tag.templates) && templatesContainExternalInclude(tag.templates)) {
+				return true;
+			}
+			continue;
+		}
+		if (Array.isArray(tag.templates) && templatesContainExternalInclude(tag.templates)) {
+			return true;
+		}
+		if (Array.isArray(tag.branches)) {
+			for (const b of tag.branches as unknown[]) {
+				if (b && typeof b === 'object') {
+					const bt = (b as { templates?: unknown }).templates;
+					if (Array.isArray(bt) && templatesContainExternalInclude(bt as Template[])) {
+						return true;
+					}
+				}
+			}
+		}
+		if (
+			Array.isArray(tag.elseTemplates) &&
+			templatesContainExternalInclude(tag.elseTemplates)
+		) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /**
@@ -455,7 +528,7 @@ export function analyzeRhizomeCodeBlock(
 	referenceTimeMs: number,
 	hostDoc?: NormalizedDocument | null,
 ): CodeBlockAnalysis {
-	const { env } = parseRhizomeTemplatePass1ForAnalysis(source);
+	const { env, templates } = parseRhizomeTemplatePass1ForAnalysis(source);
 	const queries: ExtractedQueryBlock[] = [...env.queries];
 	const rawTokens: CodeBlockTokenSpan[] = [];
 	const rawDiags: CodeBlockDiagnosticSpan[] = [];
@@ -525,16 +598,89 @@ export function analyzeRhizomeCodeBlock(
 	}
 
 	let outerCursor = 0;
+	const dagInputs: Array<{
+		readonly name: string;
+		readonly ast: SearchAST | null;
+		readonly block: ExtractedQueryBlock;
+	}> = [];
+
 	for (const q of queries) {
 		if (q.fullSpan.startOffset > outerCursor) {
 			scanOuterLiquidRegion(source, outerCursor, q.fullSpan.startOffset, rawTokens);
 		}
 		scanHeaderAndFooterTokens(source, q, rawTokens);
-		analyzeQueryBody(source, q, config, referenceTimeMs, rawTokens, rawDiags, hostDoc);
+		const ast = analyzeQueryBody(
+			source,
+			q,
+			config,
+			referenceTimeMs,
+			rawTokens,
+			rawDiags,
+			hostDoc,
+		);
+		if (q.name !== '__invalid__') {
+			dagInputs.push({ name: q.name, ast, block: q });
+		}
 		outerCursor = Math.max(outerCursor, q.fullSpan.endOffset);
 	}
 	if (outerCursor < source.length) {
 		scanOuterLiquidRegion(source, outerCursor, source.length, rawTokens);
+	}
+
+	if (dagInputs.length > 0) {
+		const hasExternalTemplates =
+			templates !== null
+				? templatesContainExternalInclude(templates)
+				: EXTERNAL_TEMPLATE_TAG_RE.test(maskQueryBlockBodies(source));
+		const dagAnalysis = analyzeQueryDependencyDag(dagInputs, {
+			checkUnknownRefs: !hasExternalTemplates,
+		});
+		const blocksByName = new Map<string, ExtractedQueryBlock>();
+		for (const item of dagInputs) {
+			if (!blocksByName.has(item.name)) {
+				blocksByName.set(item.name, item.block);
+			}
+		}
+		const pushShiftedDiags = (
+			map: ReadonlyMap<
+				string,
+				ReadonlyArray<{
+					readonly code: DiagnosticCode;
+					readonly severity: 'error' | 'warning' | 'hint';
+					readonly issue: string;
+					readonly hint: string | null;
+					readonly span: SourceSpan | null;
+				}>
+			>,
+		): void => {
+			for (const [qName, diags] of map) {
+				const block = blocksByName.get(qName);
+				if (!block) continue;
+				const baseOffset = block.bodySpan.startOffset;
+				for (const d of diags) {
+					const startOffset = d.span
+						? baseOffset + d.span.startOffset
+						: block.headerSpan.startOffset;
+					const endOffset = d.span
+						? baseOffset + Math.max(d.span.startOffset + 1, d.span.endOffset)
+						: block.headerSpan.endOffset;
+					const span = offsetRangeToSourceSpan(source, startOffset, endOffset);
+					rawDiags.push(
+						Object.freeze({
+							startOffset: span.startOffset,
+							endOffset: span.endOffset,
+							code: d.code,
+							severity: d.severity,
+							issue: d.issue,
+							hint: d.hint,
+							span,
+						}),
+					);
+				}
+			}
+		};
+		pushShiftedDiags(dagAnalysis.unknownRefDiagnosticsByQuery);
+		pushShiftedDiags(dagAnalysis.cycleDiagnosticsByQuery);
 	}
 
 	rawTokens.sort((a, b) => a.startOffset - b.startOffset || a.endOffset - b.endOffset);

@@ -12,6 +12,7 @@ import {
 	whereFilter,
 } from './collection-filters';
 import { headingFilter } from './heading-filter';
+import { linkPathsFilter, lookupFilter } from './graph-filters';
 import { listFilter, sentenceFilter } from './list-filter';
 import { checkFilterRenderLimit, FILTER_LIMIT_CHECK_STRIDE } from './render-limits';
 import {
@@ -36,6 +37,7 @@ import {
 	rhizomeDateFilter,
 	unwrapLiquidValue,
 } from './temporal-drop';
+import { treeFilter } from './tree-filter';
 
 /**
  * Parses variadic filter arguments for `prune` into an array of case-sensitive `<deep.path>`
@@ -282,6 +284,9 @@ function seedFallbackFilters(): void {
 		['heading', headingFilter],
 		['sentence', sentenceFilter],
 		['array_to_sentence_string', sentenceFilter],
+		['link_paths', linkPathsFilter],
+		['lookup', lookupFilter],
+		['tree', treeFilter],
 	];
 	for (const [name, fn] of entries) {
 		registerFallbackFilter(name, fn as FilterImplOptions);
@@ -336,4 +341,7 @@ export function registerPayloadLiquidFilters(liquid: Liquid): void {
 	liquid.registerFilter('heading', bindContextFilter(headingFilter));
 	liquid.registerFilter('sentence', bindContextFilter(sentenceFilter));
 	liquid.registerFilter('array_to_sentence_string', bindContextFilter(sentenceFilter));
+	liquid.registerFilter('link_paths', bindContextFilter(linkPathsFilter));
+	liquid.registerFilter('lookup', bindContextFilter(lookupFilter));
+	liquid.registerFilter('tree', bindContextFilter(treeFilter));
 }

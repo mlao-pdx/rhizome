@@ -12,6 +12,7 @@ import {
 } from './explain-concepts';
 import {
 	buildRegex101Url,
+	describeHopBounds,
 	describeScopeSemantics,
 	extractAstSlice,
 	extractValueExprSlice,
@@ -23,6 +24,7 @@ import {
 	formatSourceCaretSnippet,
 	resolvePropertyTypeWithOrigin,
 } from './explain-helpers';
+import { isGraphScopeCanonicalName } from './graph-dag';
 import { lintQueryAST } from './linter';
 import { coerceHostScalarForProperty, resolveThisReference } from './host-reference';
 import { validateRegexLiteral } from './literals';
@@ -40,7 +42,6 @@ import {
 	type PropertyOperator,
 	type PropertyTypeRegistry,
 	type ResolvedEngineConfig,
-	type ScopedFilterNode,
 	type SearchAST,
 	type SearchDiagnostic,
 	type SourceSpan,
@@ -199,6 +200,17 @@ function describePropertyLeaf(
 		return `(${validDescs.join(' OR ')}) (from ${rawCode})`;
 	}
 
+	if (matcher.kind === 'query') {
+		const rawCode = formatInlineCode(matcher.raw);
+		if (
+			propType === 'checkbox' &&
+			(operator === '<' || operator === '>' || operator === '<=' || operator === '>=')
+		) {
+			return `❌ ${rawCode} (ordering comparison is not supported on \`checkbox\` properties)`;
+		}
+		return `compares against scalar values projected from ${rawCode} (sibling query ${formatInlineCode(`@query.${matcher.queryName}`)})`;
+	}
+
 	const rawLit = formatInlineCode(formatLeafMatcher(matcher));
 	switch (propType) {
 		case 'number': {
@@ -349,11 +361,8 @@ export function explainQuery(
 	let resolvedAst: SearchAST | null = null;
 	let valDiagnostics: SearchDiagnostic[] = [];
 	let lintDiagnostics: SearchDiagnostic[] = [];
-	let invalidPropertyNodes: ReadonlySet<PropertyFilterNode> = parsed.invalidPropertyNodes;
-	const unknownScopeNodes = new Set<ScopedFilterNode>();
-	const invalidRegexNodes = new Set<SearchAST>();
-
-	if (parsed.ast !== null) {
+	const invalidPropertyNodes: ReadonlySet<PropertyFilterNode> = (() => {
+		if (parsed.ast === null) return parsed.invalidPropertyNodes;
 		const valRes = validateQueryAST(
 			parsed.ast,
 			effectiveConfig,
@@ -363,9 +372,11 @@ export function explainQuery(
 		);
 		resolvedAst = valRes.ast;
 		valDiagnostics = valRes.diagnostics;
-		invalidPropertyNodes = valRes.invalidPropertyNodes;
-		lintDiagnostics = lintQueryAST(resolvedAst, invalidPropertyNodes, effectiveConfig);
-	}
+		lintDiagnostics = lintQueryAST(resolvedAst, valRes.invalidPropertyNodes, effectiveConfig);
+		return valRes.invalidPropertyNodes;
+	})();
+	const unknownScopeNodes = new Set<SearchAST>();
+	const invalidRegexNodes = new Set<SearchAST>();
 
 	function collectAstFlags(node: SearchAST): void {
 		switch (node.type) {
@@ -415,6 +426,21 @@ export function explainQuery(
 					}
 				};
 				visitExpr(node.valueExpr);
+				return;
+			}
+			case 'SCOPE_GRAPH_FILTER': {
+				if (!effectiveConfig.getScope(node.rawScope)) {
+					unknownScopeNodes.add(node);
+				}
+				if (node.target.kind === 'subquery') {
+					collectAstFlags(node.target.ast);
+				}
+				return;
+			}
+			case 'PROPERTY_GRAPH_FILTER': {
+				if (node.target.kind === 'subquery') {
+					collectAstFlags(node.target.ast);
+				}
 				return;
 			}
 		}
@@ -677,7 +703,9 @@ export function explainQuery(
 									: `matches ${formatDirectRegexLink(m, footnotes)}`
 								: m.kind === 'this'
 									? describeScopeThisLeaf(m, formatScopeValue, hostDoc)
-									: formatScopeValue(m.value);
+									: m.kind === 'query'
+										? `matches scalar values projected from ${formatInlineCode(m.raw)} (sibling query ${formatInlineCode(`@query.${m.queryName}`)})`
+										: formatScopeValue(m.value);
 						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
 						const leafDiag = consumeDiagLinksForSpan(node.expr.span);
 						const remDiag = consumeUnattachedContainedDiags(node.span);
@@ -700,13 +728,116 @@ export function explainQuery(
 								? `matches ${formatDirectRegexLink(m, footnotes)}`
 								: m.kind === 'this'
 									? describeScopeThisLeaf(m, formatScopeValue, hostDoc)
-									: formatScopeValue(m.value),
+									: m.kind === 'query'
+										? `matches scalar values projected from ${formatInlineCode(m.raw)} (sibling query ${formatInlineCode(`@query.${m.queryName}`)})`
+										: formatScopeValue(m.value),
 						);
 						const remDiag = consumeUnattachedContainedDiags(node.span);
 						if (remDiag) {
 							bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${remDiag}`;
 						}
 					}
+					return;
+				}
+				case 'SCOPE_GRAPH_FILTER': {
+					if (unknownScopeNodes.has(node)) {
+						const suggestion = suggestScopeHint(node.rawScope, effectiveConfig);
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						bulletLines.push(`${indent}- ${sliceCode}`);
+						bulletLines.push(
+							`${indent}  ❌ Unknown search scope ${formatInlineCode(node.rawScope)}.${suggestion ? ` ${suggestion}` : ''}${exactDiagSuffix}${remDiag}`,
+						);
+						return;
+					}
+					if (!isGraphScopeCanonicalName(node.scope)) {
+						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						bulletLines.push(`${indent}- ${sliceCode}`);
+						bulletLines.push(
+							`${indent}  ❌ Scope ${formatInlineCode(node.scope)} does not support graph traversal (only \`links\`, \`embeds\`, and \`backlinks\` support graph targets).${exactDiagSuffix}${remDiag}`,
+						);
+						return;
+					}
+					const scopeFn = refScopeFootnote(footnotes, node.scope);
+					const hopDesc = describeHopBounds(node.hops);
+					const edgeDesc =
+						node.scope === 'backlinks'
+							? node.direction === 'outgoing'
+								? `incoming \`backlinks\`${scopeFn}`
+								: `inverted \`backlinks\`${scopeFn} (outgoing links)`
+							: node.direction === 'outgoing'
+								? `outgoing ${formatInlineCode(node.scope)}${scopeFn}`
+								: `incoming ${formatInlineCode(node.scope)}${scopeFn} from other notes`;
+					const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+
+					if (node.target.kind === 'subquery') {
+						const headerIdx = bulletLines.length;
+						bulletLines.push(`${indent}- ${sliceCode}`);
+						bulletLines.push(
+							`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach a note matching:${exactDiagSuffix}`,
+						);
+						renderAstBullets(node.target.ast, `${indent}  `);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						if (remDiag) {
+							bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${remDiag}`;
+						}
+						return;
+					}
+
+					const targetDiag = consumeDiagLinksForSpan(node.target.span);
+					const remDiag = consumeUnattachedContainedDiags(node.span);
+					const targetDesc =
+						node.target.kind === 'query_ref'
+							? `a note matched by sibling query ${formatInlineCode(`@query.${node.target.queryName}`)}`
+							: hostDoc === null
+								? '⚠️ `@this` (unavailable without a hosting note; evaluates to `false`)'
+								: hostDoc !== undefined
+									? `host note ${formatInlineCode(hostDoc.file.path)} (\`@this\`)`
+									: 'the hosting note (`@this`)';
+					bulletLines.push(`${indent}- ${sliceCode}`);
+					bulletLines.push(
+						`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach ${targetDesc}.${exactDiagSuffix}${targetDiag}${remDiag}`,
+					);
+					return;
+				}
+				case 'PROPERTY_GRAPH_FILTER': {
+					const keyCode = formatInlineCode(node.rawKey || node.key);
+					const hopDesc = describeHopBounds(node.hops);
+					const edgeDesc =
+						node.direction === 'outgoing'
+							? `outgoing ${keyCode} property links`
+							: `incoming ${keyCode} property links from other notes`;
+					const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+
+					if (node.target.kind === 'subquery') {
+						const headerIdx = bulletLines.length;
+						bulletLines.push(`${indent}- ${sliceCode}`);
+						bulletLines.push(
+							`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach a note matching:${exactDiagSuffix}`,
+						);
+						renderAstBullets(node.target.ast, `${indent}  `);
+						const remDiag = consumeUnattachedContainedDiags(node.span);
+						if (remDiag) {
+							bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${remDiag}`;
+						}
+						return;
+					}
+
+					const targetDiag = consumeDiagLinksForSpan(node.target.span);
+					const remDiag = consumeUnattachedContainedDiags(node.span);
+					const targetDesc =
+						node.target.kind === 'query_ref'
+							? `a note matched by sibling query ${formatInlineCode(`@query.${node.target.queryName}`)}`
+							: hostDoc === null
+								? '⚠️ `@this` (unavailable without a hosting note; evaluates to `false`)'
+								: hostDoc !== undefined
+									? `host note ${formatInlineCode(hostDoc.file.path)} (\`@this\`)`
+									: 'the hosting note (`@this`)';
+					bulletLines.push(`${indent}- ${sliceCode}`);
+					bulletLines.push(
+						`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach ${targetDesc}.${exactDiagSuffix}${targetDiag}${remDiag}`,
+					);
 					return;
 				}
 				case 'PROPERTY_FILTER': {

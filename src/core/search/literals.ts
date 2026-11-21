@@ -175,3 +175,132 @@ export function decodeThisReference(rawTokenText: string): DecodedThisReferenceR
 
 	return { ok: true, segments };
 }
+
+export type DecodedQueryReferenceResult =
+	| {
+			readonly ok: true;
+			readonly queryName: string;
+			readonly segments: string[];
+	  }
+	| {
+			readonly ok: false;
+			readonly issue: string;
+			readonly hint: string | null;
+	  };
+
+const VALID_QUERY_REF_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_-]*$/;
+
+/**
+ * Parses and validates a `@query.<name>` or `@query.<name>.<path>` token into its query name
+ * and optional decoded scalar path segments.
+ */
+export function decodeQueryReference(rawTokenText: string): DecodedQueryReferenceResult {
+	if (rawTokenText === '@query' || rawTokenText === '@query.') {
+		return {
+			ok: false,
+			issue: `Query reference "${rawTokenText}" requires a query name (e.g. "@query.tasks").`,
+			hint: 'Use "@query.<name>" for graph targets or "@query.<name>.<field>" for scalar values.',
+		};
+	}
+	if (!rawTokenText.startsWith('@query.')) {
+		return {
+			ok: false,
+			issue: `Invalid query reference "${rawTokenText}".`,
+			hint: 'Use "@query.<name>" (e.g. "@query.tasks").',
+		};
+	}
+	if (rawTokenText.endsWith('.')) {
+		return {
+			ok: false,
+			issue: `Query reference "${rawTokenText}" cannot end with a trailing dot.`,
+			hint: 'Specify a query or field segment after "." (e.g. "@query.tasks" or "@query.tasks.file.basename").',
+		};
+	}
+
+	const afterPrefix = rawTokenText.slice(7); // After '@query.'
+	const firstDot = afterPrefix.indexOf('.');
+	const rawQueryName = firstDot === -1 ? afterPrefix : afterPrefix.slice(0, firstDot);
+	if (
+		!VALID_QUERY_REF_NAME_RE.test(rawQueryName) ||
+		rawQueryName === 'explain' ||
+		FORBIDDEN_KEYS.has(rawQueryName) ||
+		FORBIDDEN_KEYS.has(rawQueryName.toLowerCase())
+	) {
+		return {
+			ok: false,
+			issue: `Invalid query name "${rawQueryName}" in "${rawTokenText}".`,
+			hint: 'Query names must start with a letter or "_" and contain only letters, digits, "_", or "-".',
+		};
+	}
+
+	if (firstDot === -1) {
+		return { ok: true, queryName: rawQueryName, segments: [] };
+	}
+
+	const segments: string[] = [];
+	let i = 7 + firstDot; // Position of '.' after `@query.<name>`
+	while (i < rawTokenText.length) {
+		i++; // Skip '.'
+		if (i >= rawTokenText.length || rawTokenText[i] === '.') {
+			return {
+				ok: false,
+				issue: `Query reference "${rawTokenText}" contains an empty path segment.`,
+				hint: 'Remove consecutive dots in the @query path.',
+			};
+		}
+
+		let segment: string;
+		const quoteChar = rawTokenText[i];
+		if (quoteChar === '"' || quoteChar === "'") {
+			const startQuote = i;
+			i++;
+			while (i < rawTokenText.length && rawTokenText[i] !== quoteChar) {
+				if (rawTokenText[i] === '\\') {
+					i += 2;
+				} else {
+					i++;
+				}
+			}
+			if (i >= rawTokenText.length || rawTokenText[i] !== quoteChar) {
+				return {
+					ok: false,
+					issue: `Query reference "${rawTokenText}" has an unclosed quoted segment.`,
+					hint: 'Close the quoted segment in the @query path.',
+				};
+			}
+			i++;
+			if (i < rawTokenText.length && rawTokenText[i] !== '.') {
+				return {
+					ok: false,
+					issue: `Invalid characters after quoted segment in "${rawTokenText}".`,
+					hint: 'Separate @query path segments with ".".',
+				};
+			}
+			segment = decodeQuotedString(rawTokenText.slice(startQuote, i));
+		} else {
+			const startUnquoted = i;
+			while (i < rawTokenText.length && rawTokenText[i] !== '.') {
+				i++;
+			}
+			segment = rawTokenText.slice(startUnquoted, i);
+		}
+
+		if (segment.length === 0) {
+			return {
+				ok: false,
+				issue: `Query reference "${rawTokenText}" contains an empty path segment.`,
+				hint: 'Provide a non-empty field or property name after ".".',
+			};
+		}
+		if (FORBIDDEN_KEYS.has(segment) || FORBIDDEN_KEYS.has(segment.trim().toLowerCase())) {
+			return {
+				ok: false,
+				issue: `Query reference "${rawTokenText}" contains forbidden segment "${segment}".`,
+				hint: 'Choose a field or property name other than "__proto__", "constructor", or "prototype".',
+			};
+		}
+		segments.push(segment);
+	}
+
+	return { ok: true, queryName: rawQueryName, segments };
+}

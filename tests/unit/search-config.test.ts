@@ -72,6 +72,7 @@ function createFixtureDoc(): NormalizedDocument {
 				subpath: '#Bio',
 				displayText: 'Alice Lead',
 				source: 'inline',
+				property: null,
 				origin: '[[Projects/Active/Sprint-12.md#Overview|Sprint-12]]',
 			},
 			{
@@ -81,6 +82,7 @@ function createFixtureDoc(): NormalizedDocument {
 				subpath: '',
 				displayText: 'Ghost Link',
 				source: 'frontmatter',
+				property: 'related',
 				origin: '[[Projects/Active/Sprint-12.md|Sprint-12]]',
 			},
 		],
@@ -92,6 +94,7 @@ function createFixtureDoc(): NormalizedDocument {
 				subpath: '',
 				displayText: 'Arch.png',
 				source: 'embed',
+				property: null,
 				origin: '[[Projects/Active/Sprint-12.md#^summary-block|Sprint-12]]',
 			},
 			{
@@ -101,6 +104,7 @@ function createFixtureDoc(): NormalizedDocument {
 				subpath: '',
 				displayText: 'MissingEmbed.png',
 				source: 'embed',
+				property: null,
 				origin: '[[Projects/Active/Sprint-12.md|Sprint-12]]',
 			},
 		],

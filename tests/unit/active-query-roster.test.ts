@@ -2128,4 +2128,212 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		for (const c of children) c.unload();
 		renderSpy.mockRestore();
 	});
+
+	it('hashVaultQueryMatch differentiates links by property attribution vs prose null', () => {
+		const baseMatch = {
+			file: {
+				path: 'notes/a.md',
+				name: 'a.md',
+				basename: 'a',
+				extension: 'md',
+				parent: 'notes',
+				created: '2026-01-01T00:00',
+				modified: '2026-01-01T00:00',
+				size: 42,
+			},
+			aliases: [],
+			aliasLocations: [],
+			tags: [],
+			tagLocations: [],
+			cssclasses: [],
+			headings: [],
+			links: [
+				{
+					link: 'Target',
+					rawTarget: 'Target',
+					resolvedPath: 'notes/Target.md',
+					subpath: '',
+					displayText: 'Target',
+					source: 'inline' as const,
+					property: null as string | null,
+					origin: '[[notes/a.md|a]]',
+				},
+			],
+			embeds: [],
+			blocks: [],
+			tasks: [],
+			propertyKeys: [],
+			properties: Object.create(null) as Record<string, unknown>,
+			propertyLocations: [],
+			diagnostics: [],
+			backlinks: [],
+		};
+
+		const upMatch = {
+			...baseMatch,
+			links: [{ ...baseMatch.links[0]!, property: 'up' }],
+		};
+		const relatedMatch = {
+			...baseMatch,
+			links: [{ ...baseMatch.links[0]!, property: 'related' }],
+		};
+
+		const hProse = hashVaultQueryMatch(baseMatch);
+		const hUp = hashVaultQueryMatch(upMatch);
+		const hRelated = hashVaultQueryMatch(relatedMatch);
+
+		expect(hProse).not.toBe(hUp);
+		expect(hUp).not.toBe(hRelated);
+		expect(hProse).not.toBe(hRelated);
+	});
+
+	it('deduplicates identical @query.<name> pipelines across subscribers while isolating distinct @this host contexts transitively', async () => {
+		const notes = new Map<
+			string,
+			{
+				file: {
+					path: string;
+					name: string;
+					basename: string;
+					extension: string;
+					parent: { path: string };
+					stat: { ctime: number; mtime: number; size: number };
+				};
+				cache: Record<string, unknown>;
+			}
+		>();
+		const addNote = (
+			path: string,
+			fm: Record<string, unknown>,
+			fmLinks: Array<{ link: string; key: string }> = [],
+		) => {
+			const slash = path.lastIndexOf('/');
+			const name = path.slice(slash + 1);
+			const basename = name.replace(/\.md$/, '');
+			notes.set(path, {
+				file: {
+					path,
+					name,
+					basename,
+					extension: 'md',
+					parent: { path: path.slice(0, slash) },
+					stat: { ctime: 1700000000000, mtime: 1700000000000, size: 100 },
+				},
+				cache: { frontmatter: fm, frontmatterLinks: fmLinks },
+			});
+		};
+
+		addNote('Goals/Alpha.md', { tags: ['goal'] });
+		addNote('Goals/Beta.md', { tags: ['goal'] });
+		addNote('Projects/P1.md', { tags: ['project'], up: '[[Alpha]]' }, [
+			{ link: 'Alpha', key: 'up' },
+		]);
+		addNote('Projects/P2.md', { tags: ['project'], up: '[[Beta]]' }, [
+			{ link: 'Beta', key: 'up' },
+		]);
+		addNote('Tasks/T1.md', { tags: ['task'], up: '[[P1]]' }, [{ link: 'P1', key: 'up' }]);
+		addNote('Tasks/T2.md', { tags: ['task'], up: '[[P2]]' }, [{ link: 'P2', key: 'up' }]);
+
+		const mockApp = {
+			vault: {
+				configDir: 'mock-config',
+				adapter: { read: vi.fn(async () => '{"types":{}}') },
+				getMarkdownFiles: () => Array.from(notes.values()).map((n) => n.file),
+				getFileByPath: (p: string) => notes.get(p)?.file ?? null,
+			},
+			metadataCache: {
+				getFileCache: (f: { path: string }) => notes.get(f.path)?.cache ?? null,
+				getFirstLinkpathDest: (raw: string) => {
+					for (const n of notes.values()) {
+						if (n.file.basename === raw || n.file.path === raw) return n.file;
+					}
+					return null;
+				},
+			},
+		} as never;
+
+		const roster = new ActiveQueryRoster(mockApp);
+		const alphaUpdates: VaultQueryResult[] = [];
+		const betaUpdates: VaultQueryResult[] = [];
+		const sharedUpdates1: VaultQueryResult[] = [];
+		const sharedUpdates2: VaultQueryResult[] = [];
+
+		// Notice `leaf_tasks` does NOT mention `@this` directly; it depends on `@query.projs`, which uses `@this`!
+		const hostPipeline = {
+			projs: '[up -> @this]',
+			leaf_tasks: '[up -> @query.projs]',
+		};
+		const sharedPipelineA = {
+			g: '#goal',
+			all_projs: '[up -> @query.g]',
+		};
+		const sharedPipelineB = {
+			roots: '#goal',
+			all_projs: '[up -> @query.roots]',
+		};
+
+		roster.register(
+			hostPipeline,
+			{ timeZone: 'UTC', sourcePath: 'Goals/Alpha.md' },
+			{},
+			(r) => {
+				alphaUpdates.push(r);
+			},
+		);
+		roster.register(hostPipeline, { timeZone: 'UTC', sourcePath: 'Goals/Beta.md' }, {}, (r) => {
+			betaUpdates.push(r);
+		});
+		roster.register(sharedPipelineA, { timeZone: 'UTC' }, {}, (r) => {
+			sharedUpdates1.push(r);
+		});
+		roster.register(sharedPipelineB, { timeZone: 'UTC' }, {}, (r) => {
+			sharedUpdates2.push(r);
+		});
+
+		await roster.nudge(1700000000000);
+
+		expect(alphaUpdates[0]?.projs?.map((m) => m.file.path)).toEqual(['Projects/P1.md']);
+		expect(alphaUpdates[0]?.leaf_tasks?.map((m) => m.file.path)).toEqual(['Tasks/T1.md']);
+
+		expect(betaUpdates[0]?.projs?.map((m) => m.file.path)).toEqual(['Projects/P2.md']);
+		expect(betaUpdates[0]?.leaf_tasks?.map((m) => m.file.path)).toEqual(['Tasks/T2.md']);
+
+		expect(sharedUpdates1[0]?.all_projs?.map((m) => m.file.path)).toEqual([
+			'Projects/P1.md',
+			'Projects/P2.md',
+		]);
+		expect(sharedUpdates2[0]?.all_projs?.map((m) => m.file.path)).toEqual([
+			'Projects/P1.md',
+			'Projects/P2.md',
+		]);
+
+		// Verify authored query names and suggestions in diagnostic logs (no __q*, __cyc_*, or __missing_* leakage)
+		const loggedMessages: string[] = [];
+		const rosterWithLogger = new ActiveQueryRoster(mockApp, {
+			log: (_level, message, meta) => {
+				loggedMessages.push(`${message} ${JSON.stringify(meta ?? {})}`);
+			},
+		});
+		rosterWithLogger.register(
+			{
+				active_tasks: '#task',
+				typo_ref: '[up -> @query.actve_tasks]',
+				alpha: 'links -> @query.beta',
+				beta: 'links -> @query.alpha',
+			},
+			{ timeZone: 'UTC' },
+			{},
+			() => {},
+		);
+		await rosterWithLogger.nudge(1700000000000);
+		const joinedLogs = loggedMessages.join('\n');
+		expect(joinedLogs).toContain('‼️typo_ref‼️');
+		expect(joinedLogs).toContain('[up -> @query.actve_tasks]');
+		expect(joinedLogs).toContain('ERROR_UNKNOWN_QUERY_REF');
+		expect(joinedLogs).toContain('‼️alpha‼️');
+		expect(joinedLogs).toContain('links -> @query.beta');
+		expect(joinedLogs).toContain('ERROR_CIRCULAR_QUERY_REF');
+		expect(joinedLogs).not.toContain('__missing_');
+		expect(joinedLogs).not.toContain('__cyc_');
+	});
 });

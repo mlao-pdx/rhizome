@@ -77,6 +77,20 @@ function assertAstSpansAndFreeze(ast: SearchAST, inputLength: number, checkFroze
 		case 'PROPERTY_FILTER':
 			if (checkFrozen && ast.valueExpr) assertValueExprFrozen(ast.valueExpr);
 			return;
+		case 'SCOPE_GRAPH_FILTER':
+		case 'PROPERTY_GRAPH_FILTER':
+			if (checkFrozen) {
+				expect(Object.isFrozen(ast.hops)).toBe(true);
+				expect(Object.isFrozen(ast.target)).toBe(true);
+			}
+			if (ast.target.span) {
+				if (checkFrozen) expect(Object.isFrozen(ast.target.span)).toBe(true);
+				assertValidSpan(ast.target.span, inputLength);
+			}
+			if (ast.target.kind === 'subquery') {
+				assertAstSpansAndFreeze(ast.target.ast, inputLength, checkFrozen);
+			}
+			return;
 		case 'LOGICAL':
 			if (checkFrozen) expect(Object.isFrozen(ast.children)).toBe(true);
 			for (const child of ast.children)
@@ -101,6 +115,10 @@ function collectExpectedPropertyKeysFromTree(ast: SearchAST, acc = new Set<strin
 	if (ast.type === 'PROPERTY_FILTER') {
 		const key = ast.key.trim().toLowerCase();
 		if (!isVirtualFileKey(key)) acc.add(key);
+	} else if (ast.type === 'SCOPE_GRAPH_FILTER' || ast.type === 'PROPERTY_GRAPH_FILTER') {
+		if (ast.target.kind === 'subquery') {
+			collectExpectedPropertyKeysFromTree(ast.target.ast, acc);
+		}
 	} else if (ast.type === 'NOT') {
 		collectExpectedPropertyKeysFromTree(ast.child, acc);
 	} else if (ast.type === 'LOGICAL') {

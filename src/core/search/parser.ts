@@ -14,12 +14,16 @@ import {
 	Colon,
 	CompOp,
 	DateTimeLiteral,
+	GraphArrow,
 	Identifier,
+	LBrace,
 	LBracket,
 	LParen,
 	Not,
 	Or,
+	QueryReference,
 	QuotedString,
+	RBrace,
 	RBracket,
 	RegexLiteral,
 	RParen,
@@ -139,41 +143,88 @@ export class SearchParser extends CstParser {
 		this.CONSUME(LBracket);
 		this.SUBRULE(this.propertyKey);
 		this.OPTION(() => {
-			this.CONSUME(Colon);
-			this.OPTION2(() => {
-				this.OR([
-					{
-						ALT: () => {
-							this.CONSUME(CompOp);
-							this.SUBRULE(this.valueLeaf);
-						},
+			this.OR([
+				{
+					ALT: () => {
+						this.CONSUME(GraphArrow);
+						this.SUBRULE(this.graphTarget);
 					},
-					{
-						ALT: () => {
-							this.SUBRULE(this.valueNotExpr);
-						},
+				},
+				{
+					ALT: () => {
+						this.CONSUME(Colon);
+						this.OPTION2(() => {
+							this.OR2([
+								{
+									ALT: () => {
+										this.CONSUME(CompOp);
+										this.SUBRULE(this.valueLeaf);
+									},
+								},
+								{
+									ALT: () => {
+										this.SUBRULE(this.valueNotExpr);
+									},
+								},
+							]);
+						});
 					},
-				]);
-			});
+				},
+			]);
 		});
 		this.CONSUME(RBracket);
 	});
 
 	public readonly scopedOperator = this.RULE('scopedOperator', () => {
 		this.SUBRULE(this.scopeName);
-		this.CONSUME(Colon);
 		this.OR([
 			{
 				ALT: () => {
-					this.CONSUME(CompOp);
-					this.SUBRULE(this.valueLeaf);
+					this.CONSUME(GraphArrow);
+					this.SUBRULE(this.graphTarget);
 				},
 			},
 			{
 				ALT: () => {
-					this.SUBRULE(this.valueNotExpr);
+					this.CONSUME(Colon);
+					this.OR2([
+						{
+							ALT: () => {
+								this.SUBRULE(this.subquery);
+							},
+						},
+						{
+							ALT: () => {
+								this.CONSUME(CompOp);
+								this.SUBRULE(this.valueLeaf);
+							},
+						},
+						{
+							ALT: () => {
+								this.SUBRULE(this.valueNotExpr);
+							},
+						},
+					]);
 				},
 			},
+		]);
+	});
+
+	public readonly subquery = this.RULE('subquery', () => {
+		const lbrace = this.CONSUME(LBrace);
+		this.withDepth(lbrace, () => {
+			this.OPTION(() => {
+				this.SUBRULE(this.orExpression);
+			});
+		});
+		this.CONSUME(RBrace);
+	});
+
+	public readonly graphTarget = this.RULE('graphTarget', () => {
+		this.OR([
+			{ ALT: () => this.SUBRULE(this.subquery) },
+			{ ALT: () => this.CONSUME(QueryReference) },
+			{ ALT: () => this.CONSUME(ThisReference) },
 		]);
 	});
 
@@ -242,6 +293,7 @@ export class SearchParser extends CstParser {
 			{ ALT: () => this.CONSUME(QuotedString) },
 			{ ALT: () => this.CONSUME(RegexLiteral) },
 			{ ALT: () => this.CONSUME(ThisReference) },
+			{ ALT: () => this.CONSUME(QueryReference) },
 			{ ALT: () => this.CONSUME(DateTimeLiteral) },
 			{ ALT: () => this.CONSUME(TagLiteral) },
 			{ ALT: () => this.CONSUME(Identifier) },
@@ -256,6 +308,7 @@ function isUnquotedValueToken(tok: IToken | undefined): tok is IToken {
 		tok !== undefined &&
 		(tok.tokenType === Identifier ||
 			tok.tokenType === ThisReference ||
+			tok.tokenType === QueryReference ||
 			tok.tokenType === DateTimeLiteral ||
 			tok.tokenType === TagLiteral)
 	);
@@ -267,6 +320,7 @@ function isBareLiteralToken(tok: IToken | undefined): tok is IToken {
 		(tok.tokenType === QuotedString ||
 			tok.tokenType === RegexLiteral ||
 			tok.tokenType === ThisReference ||
+			tok.tokenType === QueryReference ||
 			tok.tokenType === DateTimeLiteral ||
 			tok.tokenType === WikiLinkValue)
 	);
@@ -282,8 +336,23 @@ function recognitionExceptionToDiagnostic(
 	const ruleStack = err.context?.ruleStack ?? [];
 	const topRule = ruleStack[ruleStack.length - 1];
 
+	if (err.token.tokenType === Identifier && /^(?:->|<-)/.test(err.token.image)) {
+		const arrowPrefix = err.token.image.slice(0, 2);
+		const rest = err.token.image.slice(2);
+		const hint = /^\d+$/.test(rest)
+			? `Use "${arrowPrefix}..${rest}" for up to ${rest} hops or "${arrowPrefix}${rest}..${rest}" for exact ${rest} hops.`
+			: `Use "${arrowPrefix}", "${arrowPrefix}*", "${arrowPrefix}..3", or "${arrowPrefix}1..3".`;
+		return {
+			code: 'SYNTAX_ERROR',
+			severity: 'error',
+			issue: `Invalid graph hop quantifier "${err.token.image}".`,
+			hint,
+			span: tokenToSpan(err.token, fallback, input),
+		};
+	}
+
 	if (
-		err.name === 'MismatchedTokenException' &&
+		(err.name === 'MismatchedTokenException' || err.name === 'NoViableAltException') &&
 		topRule === 'scopedOperator' &&
 		prevTok?.tokenType === Identifier
 	) {

@@ -97,7 +97,7 @@
 <path d="M260 41h0"></path>
 <rect x="224" y="30" width="36" height="22" rx="10" ry="10"></rect>
 <text x="242" y="45" topRuleName="orExpression" dslRuleName="consume" tokenName="Or" label="OR">OR</text>
-<title>OR(?![^\s()[\]])</title>
+<title>OR(?![^\s()[\]{}])</title>
 </g>
 <path d="M260 41h10"></path>
 <path d="M270 41h10"></path>

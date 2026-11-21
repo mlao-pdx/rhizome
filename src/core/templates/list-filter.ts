@@ -21,6 +21,7 @@ import {
 	getConjunctionListFormatter,
 } from './table-filter';
 import { unwrapLiquidValue } from './temporal-drop';
+import { isTreeNode, type TreeNode } from './tree-filter';
 
 /**
  * Supported per-level Markdown list marker tokens (`'-'` for unordered bullets, `'1.'` for ordered items).
@@ -342,6 +343,10 @@ export function formatHorizonAtom(val: unknown): string | null {
 		const nameAtom = formatHorizonAtom(u.name) ?? '{...}';
 		return `${nameAtom} ${badge}`;
 	}
+	if (isTreeNode(u)) {
+		const itemAtom = formatHorizonAtom(u.item) ?? '{...}';
+		return u.size > 0 ? `${itemAtom} (${u.size}+)` : itemAtom;
+	}
 	const scalar = formatTableScalar(u);
 	if (scalar !== null) return scalar;
 	if (isPlainRecord(u)) return formatEllipsizedObject(u);
@@ -354,6 +359,11 @@ function formatLeafItemAtHorizon(rawItem: unknown, env: ListRenderEnv): string |
 	const u = unwrapLiquidValue(rawItem);
 	if (isGroupByBucket(u)) {
 		return formatHorizonAtom(u);
+	}
+	if (isTreeNode(u)) {
+		const baseAtom = formatLeafItemAtHorizon(u.item, env);
+		if (baseAtom === null) return null;
+		return u.size > 0 ? `${baseAtom} (${u.size}+)` : baseAtom;
 	}
 	if (isPlainRecord(u)) {
 		const obj = env.selectors.length > 0 ? pickFromObject(u, env.selectors, env.filterThis) : u;
@@ -592,6 +602,64 @@ export function renderGroupBucketAtDepth(
 }
 
 /**
+ * Renders a `TreeNode` subtree as a Markdown list starting at `depth` (1-based),
+ * applying leaf `selectors` to `node.item` and recursing into `node.children`.
+ */
+export function renderTreeNodeAtDepth(
+	node: TreeNode,
+	depth: number,
+	itemIndex: number,
+	env: ListRenderEnv,
+): RenderListResult {
+	recordListRenderStep(env);
+	const maxDepth = env.styles.length;
+	if (depth > maxDepth) {
+		const atom = formatLeafItemAtHorizon(node, env);
+		return emitHorizonLine(atom !== null ? [atom] : [], maxDepth, env);
+	}
+
+	const uItem = unwrapLiquidValue(node.item);
+	let headRes: RenderListResult = { lines: [], hitHorizon: false };
+	if (!isVacuousSortOrGroupValue(uItem)) {
+		if (isPlainRecord(uItem)) {
+			headRes = renderObjectItemInArray(uItem, depth, itemIndex, env, true);
+		} else if (env.selectors.length === 0) {
+			const scalar = formatTableScalar(uItem) ?? formatHorizonAtom(uItem);
+			if (scalar !== null) {
+				const marker = formatMarker(env.styles, depth, itemIndex);
+				const line = formatBulletLine(depth, marker, scalar);
+				recordListRenderLine(env, line);
+				headRes = { lines: [line], hitHorizon: false };
+			}
+		}
+	}
+
+	const rawChildren = Array.isArray(node.children) ? node.children : [];
+	if (rawChildren.length === 0) {
+		return headRes;
+	}
+
+	const childRes = renderArrayAtDepth(rawChildren, depth + 1, env, true);
+	if (headRes.lines.length === 0) {
+		if (childRes.lines.length === 0) {
+			return { lines: [], hitHorizon: false };
+		}
+		const marker = formatMarker(env.styles, depth, itemIndex);
+		const fallbackHead = formatBulletLine(depth, marker, '{...}');
+		recordListRenderLine(env, fallbackHead);
+		return {
+			lines: [fallbackHead, ...childRes.lines],
+			hitHorizon: childRes.hitHorizon,
+		};
+	}
+
+	return {
+		lines: [...headRes.lines, ...childRes.lines],
+		hitHorizon: headRes.hitHorizon || childRes.hitHorizon,
+	};
+}
+
+/**
  * Renders an array of items as a Markdown list starting at `depth` (1-based).
  */
 export function renderArrayAtDepth(
@@ -629,6 +697,16 @@ export function renderArrayAtDepth(
 			if (bucketRes.lines.length > 0) {
 				lines.push(...bucketRes.lines);
 				if (bucketRes.hitHorizon) hitHorizon = true;
+				itemIdx++;
+			}
+			continue;
+		}
+
+		if (isTreeNode(el)) {
+			const treeRes = renderTreeNodeAtDepth(el, depth, itemIdx, env);
+			if (treeRes.lines.length > 0) {
+				lines.push(...treeRes.lines);
+				if (treeRes.hitHorizon) hitHorizon = true;
 				itemIdx++;
 			}
 			continue;
@@ -714,6 +792,12 @@ export function listFilter(
 
 	if (isGroupByBucket(unwrapped)) {
 		const rendered = renderGroupBucketAtDepth(unwrapped, 1, 0, env).lines.join('\n');
+		checkFilterOutputSize(rendered.length);
+		return rendered;
+	}
+
+	if (isTreeNode(unwrapped)) {
+		const rendered = renderTreeNodeAtDepth(unwrapped, 1, 0, env).lines.join('\n');
 		checkFilterOutputSize(rendered.length);
 		return rendered;
 	}

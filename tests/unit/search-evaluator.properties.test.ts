@@ -5,6 +5,7 @@ import {
 	evaluateDoc,
 	evaluateVault,
 	normalizeAST,
+	normalizeObsidianMetadata,
 	oracleEvaluateDoc,
 	oracleEvaluateVault,
 	parseTemporalExpr,
@@ -210,6 +211,154 @@ describe('Phase 6 evaluator invariants', () => {
 							}
 						}
 					}
+				},
+			),
+		);
+	});
+
+	it('Graph Differential Invariant: multi-source reverse BFS + residual simple-path evaluator matches forward-DFS oracle across arbitrary cyclic/self-linked vaults and @query.* waves', async () => {
+		const nodePaths = ['n0.md', 'n1.md', 'n2.md', 'n3.md', 'n4.md', 'n5.md'] as const;
+		const edgeSpecArb = fc.record({
+			from: fc.integer({ min: 0, max: nodePaths.length - 1 }),
+			to: fc.integer({ min: 0, max: nodePaths.length - 1 }),
+			kind: fc.constantFrom(
+				'prose' as const,
+				'up' as const,
+				'related' as const,
+				'embed' as const,
+			),
+		});
+		const nodeTagsArb = fc.array(fc.subarray(['goal', 'project', 'task'], { maxLength: 2 }), {
+			minLength: nodePaths.length,
+			maxLength: nodePaths.length,
+		});
+		const arrowArb = fc.constantFrom(
+			'->',
+			'<-',
+			'->*',
+			'<-*',
+			'->0..*',
+			'<-0..*',
+			'->..2',
+			'<-..3',
+			'->2..3',
+			'<-2..4',
+			'->3..3',
+		);
+		const targetArb = fc.constantFrom(
+			'{ #goal }',
+			'{ #project }',
+			'{ #task }',
+			'{}',
+			'@this',
+			'@query.wave0',
+			'{ links -> { #goal } }',
+		);
+		const graphFilterArb = fc.oneof(
+			fc
+				.tuple(fc.constantFrom('links', 'embeds', 'backlinks'), arrowArb, targetArb)
+				.map(([s, a, t]) => `${s} ${a} ${t}`),
+			fc
+				.tuple(fc.constantFrom('up', 'related'), arrowArb, targetArb)
+				.map(([k, a, t]) => `[${k} ${a} ${t}]`),
+			fc.constantFrom(
+				'tag:@query.wave0.tags',
+				'[file.basename: = @query.wave0.file.basename]',
+			),
+		);
+		const compoundGraphQueryArb = fc.oneof(
+			graphFilterArb,
+			graphFilterArb.map((q) => `NOT (${q})`),
+			fc
+				.tuple(
+					fc.constantFrom('AND' as const, 'OR' as const),
+					graphFilterArb,
+					graphFilterArb,
+				)
+				.map(([op, l, r]) => `(${l}) ${op} (${r})`),
+		);
+
+		await assertProperty(
+			'search/evaluator__graph-reachability-oracle-equivalence',
+			fc.property(
+				nodeTagsArb,
+				fc.array(edgeSpecArb, { maxLength: 18 }),
+				fc.option(fc.integer({ min: 0, max: nodePaths.length - 1 }), { nil: null }),
+				compoundGraphQueryArb,
+				(tagsPerNode, edges, hostIdx, queryStr) => {
+					const config = evaluatorConfig('UTC');
+					const validPaths = new Set<string>(nodePaths);
+					const resolveLinkPath = (rawTarget: string) =>
+						validPaths.has(rawTarget) ? rawTarget : null;
+
+					const docs = nodePaths.map((p, idx) => {
+						const outgoing = edges.filter((e) => e.from === idx);
+						const upTargets = outgoing
+							.filter((e) => e.kind === 'up')
+							.map((e) => nodePaths[e.to]!);
+						const relTargets = outgoing
+							.filter((e) => e.kind === 'related')
+							.map((e) => nodePaths[e.to]!);
+						const proseTargets = outgoing
+							.filter((e) => e.kind === 'prose')
+							.map((e) => nodePaths[e.to]!);
+						const embedTargets = outgoing
+							.filter((e) => e.kind === 'embed')
+							.map((e) => nodePaths[e.to]!);
+
+						return normalizeObsidianMetadata(
+							{
+								path: p,
+								name: p,
+								basename: p.replace(/\.md$/, ''),
+								extension: 'md',
+								parent: { path: '/' },
+								stat: { ctime: 1700000000000, mtime: 1700000000000, size: 100 },
+							},
+							{
+								frontmatter: {
+									tags: tagsPerNode[idx]!,
+									...(upTargets.length > 0
+										? { up: upTargets.map((t) => `[[${t}]]`) }
+										: {}),
+									...(relTargets.length > 0
+										? { related: relTargets.map((t) => `[[${t}]]`) }
+										: {}),
+								},
+								frontmatterLinks: [
+									...upTargets.map((t, i) => ({ link: t, key: `up.${i}` })),
+									...relTargets.map((t, i) => ({
+										link: t,
+										key: `related.${i}`,
+									})),
+								],
+								links: proseTargets.map((t) => ({ link: t })),
+								embeds: embedTargets.map((t) => ({ link: t })),
+							},
+							config,
+							[],
+							resolveLinkPath,
+						);
+					});
+
+					const hostDoc = hostIdx !== null ? docs[hostIdx]! : null;
+					const wave0Prepared = evaluatorQuery(
+						'#project',
+						config,
+						1700000000000,
+						hostDoc,
+					);
+					const wave0Matches = evaluateVault(docs, wave0Prepared).matches;
+					const prior = new Map([['wave0', wave0Matches]]);
+
+					const prepared = evaluatorQuery(queryStr, config, 1700000000000, hostDoc);
+					const actual = evaluateVault(docs, prepared, prior).matches.map(
+						(d) => d.file.path,
+					);
+					const expected = oracleEvaluateVault(docs, prepared, prior).matches.map(
+						(d) => d.file.path,
+					);
+					expect(actual).toEqual(expected);
 				},
 			),
 		);

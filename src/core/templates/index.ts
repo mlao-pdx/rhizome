@@ -12,6 +12,8 @@ export * from './aggregate-filter';
 export * from './group-by-filter';
 export * from './sort-group-filters';
 export * from './collection-filters';
+export * from './graph-filters';
+export * from './tree-filter';
 export * from './table-filter';
 export * from './list-filter';
 export * from './heading-filter';

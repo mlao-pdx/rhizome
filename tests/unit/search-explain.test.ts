@@ -432,4 +432,29 @@ describe('explainQuery', () => {
 		);
 		expect(md).toContain('> [!warning] Warning 1: `WARN_MISSING_THIS_VALUE`');
 	});
+
+	it('explains ScopeGraphFilterNode, PropertyGraphFilterNode, hop quantifiers, @query.<name> targets, and scalar @query.* projections', () => {
+		const cfg = makeConfig({ propertyTypes: { priority: 'number' } });
+		const md = explainQuery(
+			'links ->* { #project AND [priority: >= @query.baselines.properties.priority] } AND [up <-0..3 @query.goals] AND [parent -> @this]',
+			cfg,
+			REF_TIME_MS,
+			'Graph Explain Plan',
+			null,
+		);
+
+		expect(md).toContain('# Graph Explain Plan');
+		expect(md).toContain('Traverses outgoing `links`');
+		expect(md).toContain('in 1 or more hops (cycle-free simple path, up to 64 hops)');
+		expect(md).toContain(
+			'compares against scalar values projected from `@query.baselines.properties.priority` (sibling query `@query.baselines`)',
+		);
+		expect(md).toContain('Traverses incoming `up` property links from other notes');
+		expect(md).toContain('in 0 to 3 hops (reflexive self-match or cycle-free simple path)');
+		expect(md).toContain('sibling query `@query.goals`');
+		expect(md).toContain(
+			'⚠️ `@this` (unavailable without a hosting note; evaluates to `false`)',
+		);
+		expect(md).toContain('> [!warning] Warning 1: `WARN_MISSING_THIS_VALUE`');
+	});
 });

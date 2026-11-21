@@ -44,13 +44,26 @@ export const LParen = createToken({ name: 'LParen', pattern: /\(/, label: '(' })
 export const RParen = createToken({ name: 'RParen', pattern: /\)/, label: ')' });
 export const LBracket = createToken({ name: 'LBracket', pattern: /\[/, label: '[' });
 export const RBracket = createToken({ name: 'RBracket', pattern: /\]/, label: ']' });
+export const LBrace = createToken({ name: 'LBrace', pattern: /\{/, label: '{' });
+export const RBrace = createToken({ name: 'RBrace', pattern: /\}/, label: '}' });
 
-// Anchor-free boundary assertion: succeeds before whitespace, (), [], or EOF
-export const Or = createToken({ name: 'Or', pattern: /OR(?![^\s()[\]])/, label: 'OR' });
-export const And = createToken({ name: 'And', pattern: /AND(?![^\s()[\]])/, label: 'AND' });
-export const Not = createToken({ name: 'Not', pattern: /NOT(?![^\s()[\]])/, label: 'NOT' });
+// Anchor-free boundary assertion: succeeds before whitespace, (), [], {}, or EOF
+export const Or = createToken({ name: 'Or', pattern: /OR(?![^\s()[\]{}])/, label: 'OR' });
+export const And = createToken({ name: 'And', pattern: /AND(?![^\s()[\]{}])/, label: 'AND' });
+export const Not = createToken({ name: 'Not', pattern: /NOT(?![^\s()[\]{}])/, label: 'NOT' });
 
 export const BangNot = createToken({ name: 'BangNot', pattern: /!(?![=\s])/, label: '!' });
+
+/**
+ * Matches graph traversal arrows (`->` and `<-`) with optional hop quantifiers
+ * (`*`, `..N`, `..*`, `M..N`, `M..*`). Lookahead ensures comparison sequences such
+ * as `[score:<-5]` continue to lex as `<` followed by `-5`.
+ */
+export const GraphArrow = createToken({
+	name: 'GraphArrow',
+	pattern: /(?:->(?:\*|\d*\.\.(?:\d+|\*)|\d+|\.\.)?|<-(?:\*|\d*\.\.(?:\d+|\*))?)(?![^\s{@\]()])/,
+	label: 'graph arrow',
+});
 
 /**
  * Matches `@this` and `@this.<path>` host-note references, supporting unquoted dot-separated
@@ -61,8 +74,18 @@ export const BangNot = createToken({ name: 'BangNot', pattern: /!(?![=\s])/, lab
 export const ThisReference = createToken({
 	name: 'ThisReference',
 	pattern:
-		/@this(?![a-zA-Z0-9_+-])(?:\.(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s.()[\]{}:"'><=!]*))*(?![^\s()[\]])/,
+		/@this(?![a-zA-Z0-9_+-])(?:\.(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s.()[\]{}:"'><=!]*))*(?![^\s()[\]{}])/,
 	label: '@this.path',
+});
+
+/**
+ * Matches `@query.<name>` sibling-query graph targets and `@query.<name>.<path>` scalar projections.
+ */
+export const QueryReference = createToken({
+	name: 'QueryReference',
+	pattern:
+		/@query(?![a-zA-Z0-9_+-])(?:\.(?:"(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\s.()[\]{}:"'><=!]*))*(?![^\s()[\]{}])/,
+	label: '@query.name',
 });
 
 /**
@@ -74,7 +97,7 @@ export const ThisReference = createToken({
 export const DateTimeLiteral = createToken({
 	name: 'DateTimeLiteral',
 	pattern:
-		/(?:(?:\d{4}-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?|@[a-zA-Z0-9_+-]+)(?:\.\.(?:\d{4}(?:-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?)?|@[a-zA-Z0-9_+-]+))?|\d{4}\.\.(?:\d{4}(?:-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?)?|@[a-zA-Z0-9_+-]+))(?![^\s()[\]])/,
+		/(?:(?:\d{4}-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?|@[a-zA-Z0-9_+-]+)(?:\.\.(?:\d{4}(?:-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?)?|@[a-zA-Z0-9_+-]+))?|\d{4}\.\.(?:\d{4}(?:-\d{2}(?:-\d{2}(?:(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)|(?:[+-]\d+d))?)?)?|@[a-zA-Z0-9_+-]+))(?![^\s()[\]{}])/,
 	label: 'date literal',
 });
 
@@ -105,7 +128,7 @@ export const TagLiteral = createToken({
 
 export const Identifier = createToken({
 	name: 'Identifier',
-	pattern: /[^\s()[\]{}:"'><=!]+/,
+	pattern: /(?:(?!->(?:\*|\d*\.\.(?:\d+|\*)|\d+|\.\.)?(?![^\s{@\]()]))[^\s()[\]{}:"'><=!])+/,
 	label: 'identifier',
 });
 
@@ -118,11 +141,15 @@ export const ALL_TOKENS: TokenType[] = [
 	RParen,
 	LBracket,
 	RBracket,
+	LBrace,
+	RBrace,
 	Or,
 	And,
 	Not,
 	BangNot,
+	GraphArrow,
 	ThisReference,
+	QueryReference,
 	DateTimeLiteral,
 	Colon,
 	CompOp,

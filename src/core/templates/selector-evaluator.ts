@@ -51,6 +51,8 @@ const MULTI_ARG_FILTER_MAX_EXTRA_COMMAS: Readonly<Record<string, number>> = Obje
 	date_to_string: 1,
 	date_to_long_string: 1,
 	default: 1,
+	lookup: 2,
+	tree: 2,
 });
 
 /**
@@ -162,6 +164,13 @@ function splitTrailingAsClause(trimmed: string): { leftPart: string; targetPath:
 		};
 	}
 	return { leftPart: trimmed, targetPath: null };
+}
+
+/**
+ * Returns `true` when `rawSelector` ends with an explicit `as <target.deep.path>` clause.
+ */
+export function hasExplicitTrailingAsClause(rawSelector: string): boolean {
+	return splitTrailingAsClause(rawSelector.trim()).targetPath !== null;
 }
 
 function findFirstTopLevelPipe(raw: string): number {

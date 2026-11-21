@@ -29,6 +29,7 @@ export function makeDoc(
 	options: {
 		file?: DocFileSpec;
 		frontmatter?: Record<string, unknown>;
+		frontmatterLinks?: Array<{ link: string; displayText?: string; key?: string }>;
 		links?: Array<{ link: string; displayText?: string }>;
 		embeds?: Array<{ link: string; displayText?: string }>;
 		tags?: string[];
@@ -44,6 +45,11 @@ export function makeDoc(
 	const extension = dotIdx === -1 ? '' : name.slice(dotIdx + 1);
 	const cache = {
 		frontmatter: options.frontmatter,
+		frontmatterLinks: (options.frontmatterLinks ?? []).map((link) => ({
+			link: link.link,
+			displayText: link.displayText,
+			key: link.key,
+		})),
 		tags: (options.tags ?? []).map((tag) => ({ tag, position: {} as never })),
 		links: (options.links ?? []).map((link) => ({
 			link: link.link,

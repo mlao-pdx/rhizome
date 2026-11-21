@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+	collectReferencedPropertyKeys,
 	compileQuery,
 	initEngineConfig,
 	levenshteinDistance,
@@ -866,5 +867,68 @@ describe('Step 6: PreparedQuery & AST deep freeze (Conformance Test 16c)', () =>
 		expect(mismatchRes.executable).toBe(true);
 		expect(mismatchRes.prepared).not.toBeNull();
 		expect(mismatchRes.diagnostics.map((d) => d.code)).toEqual(['WARN_THIS_TYPE_MISMATCH']);
+	});
+
+	it('validates graph subqueries recursively, emits WARN_MISSING_THIS_VALUE when hostDoc is null, and validates @query.* existence & cycles', () => {
+		const cfgRes = initEngineConfig({
+			timeZone: 'UTC',
+			propertyTypes: { score: 'number', due: 'date' },
+			customScopes: [
+				{
+					canonicalName: 'callout',
+					aliases: [],
+					extract: () => [],
+					matchString: () => false,
+				},
+			],
+		});
+		if (!cfgRes.ok) throw new Error('Expected valid config');
+		const config = cfgRes.config;
+
+		// 1. Recursive subquery validation & property collection
+		const badInner = compileQuery('links ->* { [score: = "nan"] }', config, PINNED_REF_MS);
+		expect(badInner.executable).toBe(false);
+		expect(badInner.diagnostics.map((d) => d.code)).toEqual(['ERROR_TYPE_MISMATCH']);
+
+		const goodInner = compileQuery(
+			'[up ->* { [due: >= 2026-01-01] AND [score: > 5] }]',
+			config,
+			PINNED_REF_MS,
+		);
+		expect(goodInner.executable).toBe(true);
+		expect(Array.from(collectReferencedPropertyKeys(goodInner.ast!)).sort()).toEqual([
+			'due',
+			'score',
+		]);
+
+		// 2. Custom scope does not support graph traversal
+		const badCustom = compileQuery('callout -> @this', config, PINNED_REF_MS);
+		expect(badCustom.executable).toBe(false);
+		expect(badCustom.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
+
+		// 3. System / virtual property keys rejected in [key -> ...]
+		for (const badProp of ['[tags -> @this]', '[file.path -> @this]']) {
+			const res = compileQuery(badProp, config, PINNED_REF_MS);
+			expect(res.executable).toBe(false);
+			expect(res.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
+		}
+
+		// 4. Bare @this emits WARN_MISSING_THIS_VALUE when hostDoc === null
+		const missingHost = compileQuery('[up ->* @this]', config, PINNED_REF_MS, null);
+		expect(missingHost.executable).toBe(true);
+		expect(missingHost.diagnostics.map((d) => d.code)).toEqual(['WARN_MISSING_THIS_VALUE']);
+
+		// 5. Unknown @query.<name> emits ERROR_UNKNOWN_QUERY_REF with Levenshtein hint
+		const known = new Set(['active_tasks', 'projects']);
+		const unknownRef = compileQuery(
+			'links <- @query.active_task',
+			config,
+			PINNED_REF_MS,
+			undefined,
+			known,
+		);
+		expect(unknownRef.executable).toBe(false);
+		expect(unknownRef.diagnostics[0]?.code).toBe('ERROR_UNKNOWN_QUERY_REF');
+		expect(unknownRef.diagnostics[0]?.hint).toContain('@query.active_tasks');
 	});
 });

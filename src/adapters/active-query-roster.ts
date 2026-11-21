@@ -1,12 +1,24 @@
 import { type App, normalizePath } from 'obsidian';
 import type { Digest64 } from '@core/hash/xxhash64';
 import { XxHash64Accumulator } from '@core/hash/xxhash64';
-import type { NormalizedDocument, PropertyTypeRegistry, ResolvedEngineConfig } from '@core/search';
+import {
+	analyzeQueryDependencyDag,
+	decodeQueryReference,
+	type NormalizedDocument,
+	parseAndLowerQuery,
+	type PropertyTypeRegistry,
+	QueryReference,
+	type ResolvedEngineConfig,
+	type SearchAST,
+	SearchLexer,
+	ThisReference,
+} from '@core/search';
 import { HOST_QUERY_KEY } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import type { BacklinkIndex } from './backlink-index';
 import { markSensitive } from './logger-format';
 import type { NormalizedDocumentCache } from './normalized-document-cache';
+import { logQueryCompilation } from './vault-query-logging';
 import {
 	resolveDefaultTimeZone,
 	resolveGroupEngineConfig,
@@ -78,6 +90,11 @@ function updateMatch(acc: XxHash64Accumulator, match: VaultQueryMatch): void {
 		acc.updateString(l.subpath);
 		acc.updateString(l.displayText);
 		acc.updateString(l.source);
+		if (l.property === null || l.property === undefined) {
+			acc.updateU32(0x10000001);
+		} else {
+			acc.updateString(l.property);
+		}
 		acc.updateString(l.origin);
 	}
 
@@ -95,6 +112,11 @@ function updateMatch(acc: XxHash64Accumulator, match: VaultQueryMatch): void {
 		acc.updateString(e.subpath);
 		acc.updateString(e.displayText);
 		acc.updateString(e.source);
+		if (e.property === null || e.property === undefined) {
+			acc.updateU32(0x10000001);
+		} else {
+			acc.updateString(e.property);
+		}
 		acc.updateString(e.origin);
 	}
 
@@ -690,7 +712,53 @@ export class ActiveQueryRoster {
 			>;
 			const queryHostDocs: Record<string, NormalizedDocument | null | undefined> =
 				Object.create(null) as Record<string, NormalizedDocument | null | undefined>;
+			const subDedupMaps = new Map<number, ReadonlyMap<string, string>>();
 			let qIdx = 0;
+
+			interface TokenizedSubQuery {
+				readonly rawQuery: string;
+				readonly directUsesThis: boolean;
+				readonly queryRefs: ReadonlyArray<{
+					readonly startOffset: number;
+					readonly endOffset: number;
+					readonly rawImage: string;
+					readonly queryName: string;
+					readonly suffixAfterName: string;
+				}>;
+			}
+
+			const tokenizeSubQuery = (rawQuery: string): TokenizedSubQuery => {
+				const lexed = SearchLexer.tokenize(rawQuery);
+				let directUsesThis = false;
+				const queryRefs: Array<{
+					readonly startOffset: number;
+					readonly endOffset: number;
+					readonly rawImage: string;
+					readonly queryName: string;
+					readonly suffixAfterName: string;
+				}> = [];
+
+				for (let i = 0; i < lexed.tokens.length; i++) {
+					const tok = lexed.tokens[i]!;
+					if (tok.tokenType === ThisReference) {
+						directUsesThis = true;
+					} else if (tok.tokenType === QueryReference) {
+						const decoded = decodeQueryReference(tok.image);
+						if (decoded.ok) {
+							const prefixLen = 7 + decoded.queryName.length; // '@query.' + queryName
+							queryRefs.push({
+								startOffset: tok.startOffset,
+								endOffset: tok.startOffset + tok.image.length,
+								rawImage: tok.image,
+								queryName: decoded.queryName,
+								suffixAfterName: tok.image.slice(prefixLen),
+							});
+						}
+					}
+				}
+
+				return { rawQuery, directUsesThis, queryRefs };
+			};
 
 			for (const sub of group.subs) {
 				const subSourceKey = sub.sourcePath ?? '';
@@ -698,20 +766,98 @@ export class ActiveQueryRoster {
 					sub.sourcePath !== undefined
 						? (hostDocsByPath.get(sub.sourcePath) ?? null)
 						: undefined;
-				for (const [, rawQuery] of sub.entries) {
-					const usesThis = /@this(?![a-zA-Z0-9_+-])/.test(rawQuery);
-					const compositeKey = usesThis
-						? `${subSourceKey}\0${rawQuery}`
-						: `\0${rawQuery}`;
-					if (!queryToDedupKey.has(compositeKey)) {
-						const dedupKey = `__q${qIdx++}`;
+
+				const localInfoMap = new Map<string, TokenizedSubQuery>();
+				const subDagInputs: Array<{
+					readonly name: string;
+					readonly ast: SearchAST | null;
+				}> = [];
+				const parsedDiagsByLocalName = new Map<
+					string,
+					ReturnType<typeof parseAndLowerQuery>['diagnostics']
+				>();
+
+				for (const [localName, rawQuery] of sub.entries) {
+					localInfoMap.set(localName, tokenizeSubQuery(rawQuery));
+					const parsed = parseAndLowerQuery(rawQuery);
+					parsedDiagsByLocalName.set(localName, parsed.diagnostics);
+					subDagInputs.push({ name: localName, ast: parsed.ast });
+				}
+
+				const subDag = analyzeQueryDependencyDag(subDagInputs, { checkUnknownRefs: true });
+				for (const [localName, rawQuery] of sub.entries) {
+					const unknownDiags = subDag.unknownRefDiagnosticsByQuery.get(localName) ?? [];
+					const cycleDiags = subDag.cycleDiagnosticsByQuery.get(localName) ?? [];
+					if (unknownDiags.length > 0 || cycleDiags.length > 0) {
+						logQueryCompilation(this.logger, localName, rawQuery, {
+							ast: null,
+							prepared: null,
+							diagnostics: [
+								...(parsedDiagsByLocalName.get(localName) ?? []),
+								...unknownDiags,
+								...cycleDiags,
+							],
+							executable: false,
+						});
+					}
+				}
+
+				const resolvedByLocalName = new Map<string, string>();
+
+				const resolveLocalDedupKey = (localName: string): string | undefined => {
+					if (subDag.blockedQueryNames.has(localName)) {
+						return undefined;
+					}
+					const existing = resolvedByLocalName.get(localName);
+					if (existing !== undefined) {
+						return existing;
+					}
+					const info = localInfoMap.get(localName);
+					if (!info) {
+						return undefined;
+					}
+
+					const resolvedRefKeys: string[] = [];
+					for (let i = 0; i < info.queryRefs.length; i++) {
+						const ref = info.queryRefs[i]!;
+						const depKey = resolveLocalDedupKey(ref.queryName);
+						if (depKey === undefined) {
+							return undefined;
+						}
+						resolvedRefKeys.push(depKey);
+					}
+
+					let rewritten = info.rawQuery;
+					for (let i = info.queryRefs.length - 1; i >= 0; i--) {
+						const ref = info.queryRefs[i]!;
+						const depKey = resolvedRefKeys[i]!;
+						const replacement = `@query.${depKey}${ref.suffixAfterName}`;
+						rewritten =
+							rewritten.slice(0, ref.startOffset) +
+							replacement +
+							rewritten.slice(ref.endOffset);
+					}
+
+					const compositeKey = info.directUsesThis
+						? `${subSourceKey}\0${rewritten}`
+						: `\0${rewritten}`;
+					let dedupKey = queryToDedupKey.get(compositeKey);
+					if (dedupKey === undefined) {
+						dedupKey = `__q${qIdx++}`;
 						queryToDedupKey.set(compositeKey, dedupKey);
-						dedupQueries[dedupKey] = rawQuery;
-						if (usesThis && sub.sourcePath !== undefined) {
+						dedupQueries[dedupKey] = rewritten;
+						if (info.directUsesThis && sub.sourcePath !== undefined) {
 							queryHostDocs[dedupKey] = subHostDoc;
 						}
 					}
+					resolvedByLocalName.set(localName, dedupKey);
+					return dedupKey;
+				};
+
+				for (const [localName] of sub.entries) {
+					resolveLocalDedupKey(localName);
 				}
+				subDedupMaps.set(sub.id, resolvedByLocalName);
 			}
 
 			const batchResult =
@@ -753,13 +899,9 @@ export class ActiveQueryRoster {
 					const hostDoc = hostDocsByPath.get(sub.sourcePath) ?? null;
 					subscriberResult[HOST_QUERY_KEY] = hostDoc ? [toVaultQueryMatch(hostDoc)] : [];
 				}
-				const subSourceKey = sub.sourcePath ?? '';
-				for (const [name, rawQuery] of sub.entries) {
-					const usesThis = /@this(?![a-zA-Z0-9_+-])/.test(rawQuery);
-					const compositeKey = usesThis
-						? `${subSourceKey}\0${rawQuery}`
-						: `\0${rawQuery}`;
-					const dedupKey = queryToDedupKey.get(compositeKey);
+				const subResolvedMap = subDedupMaps.get(sub.id);
+				for (const [name] of sub.entries) {
+					const dedupKey = subResolvedMap?.get(name);
 					if (
 						dedupKey !== undefined &&
 						Object.prototype.hasOwnProperty.call(batchResult, dedupKey)

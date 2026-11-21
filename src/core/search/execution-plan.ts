@@ -1,4 +1,5 @@
 import { collectReferencedPropertyKeys } from './ast-utils';
+import { astUsesGraphFeatures, isGraphScopeCanonicalName } from './graph-dag';
 import { coerceHostScalarForProperty, resolveThisReference } from './host-reference';
 import { validateRegexLiteral } from './literals';
 import { resolveQueryPropertyType, STRICT_NUMBER_RE } from './property-coercion';
@@ -6,6 +7,9 @@ import { normalizeScopeComparisonOperands } from './scopes';
 import { parseTemporalExpr } from './temporal';
 import type {
 	DateInterval,
+	GraphDirection,
+	GraphScopeName,
+	HopBounds,
 	NormalizedDocument,
 	ObsidianPropertyType,
 	PreparedQuery,
@@ -25,7 +29,12 @@ export type CompiledValueExprNode =
 	  }
 	| { readonly type: 'VALUE_NOT'; readonly child: CompiledValueExprNode }
 	| { readonly type: 'VALUE_LEAF_REGEX'; readonly regex: RegExp }
-	| { readonly type: 'VALUE_LEAF_STRING'; readonly value: string; readonly quoted: boolean };
+	| { readonly type: 'VALUE_LEAF_STRING'; readonly value: string; readonly quoted: boolean }
+	| {
+			readonly type: 'VALUE_LEAF_QUERY';
+			readonly queryName: string;
+			readonly segments: readonly string[];
+	  };
 
 export type CompiledPropertyColonNode =
 	| {
@@ -42,7 +51,15 @@ export type CompiledPropertyColonNode =
 	| { readonly type: 'COLON_NUMBER'; readonly rhsNum: number }
 	| { readonly type: 'COLON_CHECKBOX'; readonly rhsBool: boolean }
 	| { readonly type: 'COLON_TEMPORAL'; readonly rhsInterval: DateInterval }
-	| { readonly type: 'COLON_TEXT'; readonly value: string; readonly quoted: boolean };
+	| { readonly type: 'COLON_TEXT'; readonly value: string; readonly quoted: boolean }
+	| {
+			readonly type: 'COLON_QUERY';
+			readonly propType: ObsidianPropertyType;
+			readonly timeZone: string;
+			readonly referenceTimeMs: number;
+			readonly queryName: string;
+			readonly segments: readonly string[];
+	  };
 
 export type CompiledPropertyComparison =
 	| { readonly kind: 'number'; readonly operator: PropertyOperator; readonly rhsNum: number }
@@ -53,6 +70,23 @@ export type CompiledPropertyComparison =
 			readonly rhsInterval: DateInterval;
 	  }
 	| { readonly kind: 'text'; readonly operator: PropertyOperator; readonly rhsLower: string };
+
+export type CompiledGraphTarget =
+	| { readonly kind: 'this_ref'; readonly hostPath: string | null }
+	| { readonly kind: 'query_ref'; readonly queryName: string }
+	| { readonly kind: 'subquery'; readonly subRoot: CompiledSearchNode };
+
+export type CompiledGraphEdge =
+	| { readonly kind: 'scope'; readonly scope: GraphScopeName }
+	| { readonly kind: 'property'; readonly lowerKey: string };
+
+export interface CompiledGraphFilterNode {
+	readonly type: 'GRAPH_FILTER';
+	readonly edge: CompiledGraphEdge;
+	readonly direction: GraphDirection;
+	readonly hops: HopBounds;
+	readonly target: CompiledGraphTarget;
+}
 
 export type CompiledSearchNode =
 	| { readonly type: 'MATCH_ALL' }
@@ -73,6 +107,13 @@ export type CompiledSearchNode =
 			readonly operator: Exclude<ScopeOperator, ':'>;
 			readonly normalizedRhsValues: readonly string[];
 	  }
+	| {
+			readonly type: 'SCOPED_COMPARE_QUERY';
+			readonly scopeDef: ScopeDefinition;
+			readonly operator: Exclude<ScopeOperator, ':'>;
+			readonly queryName: string;
+			readonly segments: readonly string[];
+	  }
 	| { readonly type: 'PROPERTY_EXISTS'; readonly lowerKey: string }
 	| { readonly type: 'PROPERTY_EMPTY'; readonly lowerKey: string }
 	| {
@@ -85,12 +126,24 @@ export type CompiledSearchNode =
 			readonly type: 'PROPERTY_COMPARE';
 			readonly lowerKey: string;
 			readonly comparisons: readonly CompiledPropertyComparison[];
-	  };
+	  }
+	| {
+			readonly type: 'PROPERTY_COMPARE_QUERY';
+			readonly lowerKey: string;
+			readonly propType: ObsidianPropertyType;
+			readonly operator: PropertyOperator;
+			readonly timeZone: string;
+			readonly referenceTimeMs: number;
+			readonly queryName: string;
+			readonly segments: readonly string[];
+	  }
+	| CompiledGraphFilterNode;
 
 export interface ExecutionPlan {
 	readonly root: CompiledSearchNode;
 	readonly queriedKeys: ReadonlySet<string>;
 	readonly expectedFingerprint: string;
+	readonly usesGraph: boolean;
 }
 
 const EXECUTION_PLAN_CACHE = new WeakMap<PreparedQuery, ExecutionPlan>();
@@ -134,6 +187,13 @@ function compileValueExpr(
 						value: String(v),
 						quoted: true,
 					})),
+				};
+			}
+			if (expr.matcher.kind === 'query') {
+				return {
+					type: 'VALUE_LEAF_QUERY',
+					queryName: expr.matcher.queryName,
+					segments: expr.matcher.segments,
 				};
 			}
 			return {
@@ -217,6 +277,16 @@ function compilePropertyColonExpr(
 					type: 'COLON_LOGICAL',
 					operator: 'OR',
 					children,
+				};
+			}
+			if (expr.matcher.kind === 'query') {
+				return {
+					type: 'COLON_QUERY',
+					propType,
+					timeZone: resolvedConfig.timeZone,
+					referenceTimeMs,
+					queryName: expr.matcher.queryName,
+					segments: expr.matcher.segments,
 				};
 			}
 			const { value: rhsRaw, quoted } = expr.matcher;
@@ -307,6 +377,11 @@ function compilePropertyComparisons(
 		}
 		return comparisons;
 	}
+	if (valueExpr.matcher.kind === 'query') {
+		throw new Error(
+			`Query scalar comparison for "${lowerKey}" must compile via PROPERTY_COMPARE_QUERY.`,
+		);
+	}
 	const { value: rhsRaw, quoted } = valueExpr.matcher;
 
 	switch (propType) {
@@ -386,6 +461,15 @@ function compileSearchNode(
 				);
 			}
 			const canonical = scopeDef.canonicalName;
+			if (ast.expr.matcher.kind === 'query') {
+				return {
+					type: 'SCOPED_COMPARE_QUERY',
+					scopeDef,
+					operator: op,
+					queryName: ast.expr.matcher.queryName,
+					segments: ast.expr.matcher.segments,
+				};
+			}
 			const rawValues =
 				ast.expr.matcher.kind === 'this'
 					? resolveThisReference(hostDoc, ast.expr.matcher.segments).values.map(String)
@@ -395,6 +479,62 @@ function compileSearchNode(
 				scopeDef,
 				operator: op,
 				normalizedRhsValues: normalizeScopeComparisonOperands(canonical, rawValues),
+			};
+		}
+		case 'SCOPE_GRAPH_FILTER': {
+			if (!isGraphScopeCanonicalName(ast.scope)) {
+				throw new Error(`Invalid graph scope in execution plan: "${ast.scope}".`);
+			}
+			const compiledTarget: CompiledGraphTarget =
+				ast.target.kind === 'this_ref'
+					? {
+							kind: 'this_ref',
+							hostPath: hostDoc ? hostDoc.file.path : null,
+						}
+					: ast.target.kind === 'query_ref'
+						? { kind: 'query_ref', queryName: ast.target.queryName }
+						: {
+								kind: 'subquery',
+								subRoot: compileSearchNode(
+									ast.target.ast,
+									resolvedConfig,
+									referenceTimeMs,
+									hostDoc,
+								),
+							};
+			return {
+				type: 'GRAPH_FILTER',
+				edge: { kind: 'scope', scope: ast.scope },
+				direction: ast.direction,
+				hops: ast.hops,
+				target: compiledTarget,
+			};
+		}
+		case 'PROPERTY_GRAPH_FILTER': {
+			const lowerKey = ast.key.trim().toLowerCase();
+			const compiledTarget: CompiledGraphTarget =
+				ast.target.kind === 'this_ref'
+					? {
+							kind: 'this_ref',
+							hostPath: hostDoc ? hostDoc.file.path : null,
+						}
+					: ast.target.kind === 'query_ref'
+						? { kind: 'query_ref', queryName: ast.target.queryName }
+						: {
+								kind: 'subquery',
+								subRoot: compileSearchNode(
+									ast.target.ast,
+									resolvedConfig,
+									referenceTimeMs,
+									hostDoc,
+								),
+							};
+			return {
+				type: 'GRAPH_FILTER',
+				edge: { kind: 'property', lowerKey },
+				direction: ast.direction,
+				hops: ast.hops,
+				target: compiledTarget,
 			};
 		}
 		case 'PROPERTY_FILTER': {
@@ -423,6 +563,18 @@ function compileSearchNode(
 					),
 				};
 			}
+			if (ast.valueExpr?.type === 'VALUE_LEAF' && ast.valueExpr.matcher.kind === 'query') {
+				return {
+					type: 'PROPERTY_COMPARE_QUERY',
+					lowerKey,
+					propType,
+					operator: ast.operator,
+					timeZone: resolvedConfig.timeZone,
+					referenceTimeMs,
+					queryName: ast.valueExpr.matcher.queryName,
+					segments: ast.valueExpr.matcher.segments,
+				};
+			}
 			return {
 				type: 'PROPERTY_COMPARE',
 				lowerKey,
@@ -449,6 +601,7 @@ export function getExecutionPlan(prepared: PreparedQuery): ExecutionPlan {
 		root: compileSearchNode(ast, resolvedConfig, referenceTimeMs, hostDoc),
 		queriedKeys: collectReferencedPropertyKeys(ast),
 		expectedFingerprint: resolvedConfig.normalizationFingerprint,
+		usesGraph: astUsesGraphFeatures(ast),
 	};
 	EXECUTION_PLAN_CACHE.set(prepared, plan);
 	return plan;

@@ -232,6 +232,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '#Overview',
 				displayText: '#Overview',
 				source: 'inline',
+				property: null,
 				origin: '[[Notes/A.md|A]]',
 			},
 			{
@@ -241,6 +242,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '^summary-block',
 				displayText: 'Summary',
 				source: 'inline',
+				property: null,
 				origin: '[[Notes/A.md|A]]',
 			},
 			{
@@ -250,6 +252,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '#Bio',
 				displayText: 'Alice',
 				source: 'inline',
+				property: null,
 				origin: '[[Notes/A.md|A]]',
 			},
 			{
@@ -259,6 +262,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '',
 				displayText: 'MissingNote',
 				source: 'inline',
+				property: null,
 				origin: '[[Notes/A.md|A]]',
 			},
 		]);
@@ -455,6 +459,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '',
 				displayText: 'Ref',
 				source: 'frontmatter',
+				property: null,
 				origin: '[[RootNote.md|RootNote]]',
 			},
 		]);
@@ -466,6 +471,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '#page=1',
 				displayText: 'Diagram.png#page=1',
 				source: 'embed',
+				property: null,
 				origin: '[[RootNote.md|RootNote]]',
 			},
 		]);
@@ -821,6 +827,7 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 				subpath: '',
 				displayText: 'Chart.png',
 				source: 'embed',
+				property: null,
 				origin: '[[Projects/Plan.md#^outer-block|Plan]]',
 			},
 		]);
@@ -1033,5 +1040,153 @@ describe('normalizeObsidianMetadata & Conformance Matrix scenarios', () => {
 
 		// Blank active heading falls back directly to noteOrigin (does not walk back to Same Offset Last)
 		expect(resolver.resolve(pos(360, 365))).toBe(resolver.noteOrigin);
+	});
+
+	it('attributes NormalizedLink.property across scalar/array/dotted frontmatter keys, inline property spans, uncovered inline wikilinks, and prose links', () => {
+		const config = getStandardConfig();
+		const pos = (startOffset: number, endOffset: number) => ({
+			start: { line: 1, col: 0, offset: startOffset },
+			end: { line: 1, col: 0, offset: endOffset },
+		});
+		const resolveLinkPath = (raw: string) => (raw === 'Unresolved' ? null : `Vault/${raw}.md`);
+
+		const doc = normalizeObsidianMetadata(
+			makeFile({ path: 'Notes/Task.md', name: 'Task.md', basename: 'Task' }),
+			{
+				frontmatter: {
+					Project: '[[ProjA]]',
+					up: ['[[Goal1]]', '[[Goal2]]'],
+					'rel.parent': '[[DottedScalar]]',
+					'rel.list': ['[[DottedItem]]'],
+					'v.1': '[[LiteralNumericKey]]',
+				},
+				frontmatterLinks: [
+					{ link: 'ProjA', key: 'Project' },
+					{ link: 'Goal1', key: 'up.0' },
+					{ link: 'Goal2', key: 'up.1' },
+					{ link: 'DottedScalar', key: 'rel.parent' },
+					{ link: 'DottedItem', key: 'rel.list.0' },
+					{ link: 'LiteralNumericKey', key: 'v.1' },
+				],
+				links: [
+					// Prose link outside any inline property
+					{ link: 'ProseNote', position: pos(5, 18) },
+					// Inline link covered by [Assignee:: [[Alice]]]
+					{ link: 'Alice', displayText: 'Alice', position: pos(32, 41) },
+				],
+				embeds: [{ link: 'Diagram.png', position: pos(100, 115) }],
+			},
+			config,
+			[
+				{
+					key: ' Assignee ',
+					value: '[[Alice]]',
+					line: 3,
+					position: pos(20, 42),
+				},
+				{
+					key: 'Reviewer',
+					value: '[[Bob|Robert]] and ![[IgnoredEmbed]]',
+					line: 4,
+					position: pos(50, 90),
+				},
+				{
+					key: 'BlockedBy',
+					value: ['[[Task0]]', '[[Unresolved]]'],
+					line: 5,
+					position: null,
+				},
+			],
+			resolveLinkPath,
+		);
+
+		expect(
+			doc.links.map((l) => ({
+				link: l.link,
+				displayText: l.displayText,
+				resolvedPath: l.resolvedPath,
+				source: l.source,
+				property: l.property,
+			})),
+		).toEqual([
+			{
+				link: 'ProjA',
+				displayText: 'ProjA',
+				resolvedPath: 'Vault/ProjA.md',
+				source: 'frontmatter',
+				property: 'Project',
+			},
+			{
+				link: 'Goal1',
+				displayText: 'Goal1',
+				resolvedPath: 'Vault/Goal1.md',
+				source: 'frontmatter',
+				property: 'up',
+			},
+			{
+				link: 'Goal2',
+				displayText: 'Goal2',
+				resolvedPath: 'Vault/Goal2.md',
+				source: 'frontmatter',
+				property: 'up',
+			},
+			{
+				link: 'DottedScalar',
+				displayText: 'DottedScalar',
+				resolvedPath: 'Vault/DottedScalar.md',
+				source: 'frontmatter',
+				property: 'rel.parent',
+			},
+			{
+				link: 'DottedItem',
+				displayText: 'DottedItem',
+				resolvedPath: 'Vault/DottedItem.md',
+				source: 'frontmatter',
+				property: 'rel.list',
+			},
+			{
+				link: 'LiteralNumericKey',
+				displayText: 'LiteralNumericKey',
+				resolvedPath: 'Vault/LiteralNumericKey.md',
+				source: 'frontmatter',
+				property: 'v.1',
+			},
+			{
+				link: 'ProseNote',
+				displayText: 'ProseNote',
+				resolvedPath: 'Vault/ProseNote.md',
+				source: 'inline',
+				property: null,
+			},
+			{
+				link: 'Alice',
+				displayText: 'Alice',
+				resolvedPath: 'Vault/Alice.md',
+				source: 'inline',
+				property: 'Assignee',
+			},
+			{
+				link: 'Bob',
+				displayText: 'Robert',
+				resolvedPath: 'Vault/Bob.md',
+				source: 'inline',
+				property: 'Reviewer',
+			},
+			{
+				link: 'Task0',
+				displayText: 'Task0',
+				resolvedPath: 'Vault/Task0.md',
+				source: 'inline',
+				property: 'BlockedBy',
+			},
+			{
+				link: 'Unresolved',
+				displayText: 'Unresolved',
+				resolvedPath: null,
+				source: 'inline',
+				property: 'BlockedBy',
+			},
+		]);
+		expect(doc.embeds[0]?.property).toBeNull();
 	});
 });

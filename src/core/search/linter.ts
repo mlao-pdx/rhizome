@@ -168,7 +168,7 @@ export function formatLeafMatcher(matcher: LeafMatcher): string {
 	if (matcher.kind === 'regex') {
 		return `/${matcher.pattern}/${matcher.flags}`;
 	}
-	if (matcher.kind === 'this') {
+	if (matcher.kind === 'this' || matcher.kind === 'query') {
 		return matcher.raw;
 	}
 	return matcher.quoted ? encodeDoubleQuoted(matcher.value) : matcher.value;
@@ -206,7 +206,7 @@ export function formatRhsDisplay(valueExpr: ValueExprAST | undefined): string {
 	if (valueExpr.matcher.kind === 'regex') {
 		return `/${valueExpr.matcher.pattern}/${valueExpr.matcher.flags}`;
 	}
-	if (valueExpr.matcher.kind === 'this') {
+	if (valueExpr.matcher.kind === 'this' || valueExpr.matcher.kind === 'query') {
 		return valueExpr.matcher.raw;
 	}
 	return valueExpr.matcher.quoted ? `"${valueExpr.matcher.value}"` : valueExpr.matcher.value;
@@ -297,6 +297,13 @@ export function lintQueryAST(
 
 			case 'NOT':
 				traverse(node.child);
+				return;
+
+			case 'SCOPE_GRAPH_FILTER':
+			case 'PROPERTY_GRAPH_FILTER':
+				if (node.target.kind === 'subquery') {
+					traverse(node.target.ast);
+				}
 				return;
 
 			case 'LOGICAL': {

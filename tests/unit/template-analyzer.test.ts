@@ -228,4 +228,47 @@ describe('analyzeRhizomeCodeBlock & findRhizomeCodeBlocks', () => {
 		expect(blocks[0]?.source.trim()).toBe('{% query a %}tag:work{% endquery %}');
 		expect(blocks[1]?.source.trim()).toBe('{{ a.size }}');
 	});
+
+	it('highlights graph arrows, subquery braces, scopes inside { ... }, and @query.* tokens, and lints unknown/circular @query.* blocks', () => {
+		const standalone = [
+			'{% query tasks %}',
+			'[up ->* { tag:project }] AND links <- @query.missing',
+			'{% endquery %}',
+		].join('\n');
+
+		const analysis = analyzeRhizomeCodeBlock(standalone, config, PINNED_REF_MS);
+		const tokenTextByKind = (kind: string) =>
+			analysis.tokens
+				.filter((t) => t.kind === kind)
+				.map((t) => standalone.slice(t.startOffset, t.endOffset));
+
+		expect(tokenTextByKind('query-operator')).toContain('->*');
+		expect(tokenTextByKind('query-operator')).toContain('<-');
+		expect(tokenTextByKind('query-paren')).toContain('{');
+		expect(tokenTextByKind('query-paren')).toContain('}');
+		expect(tokenTextByKind('query-scope')).toContain('tag');
+		expect(tokenTextByKind('query-scope')).toContain('links');
+		expect(tokenTextByKind('query-date')).toContain('@query.missing');
+
+		expect(analysis.diagnostics.map((d) => d.code)).toContain('ERROR_UNKNOWN_QUERY_REF');
+
+		// When external {% render %} is present, unknown @query.* may come from a partial, so suppress ERROR_UNKNOWN_QUERY_REF
+		const withPartial = `${standalone}\n{% render "shared-queries" %}`;
+		const partialAnalysis = analyzeRhizomeCodeBlock(withPartial, config, PINNED_REF_MS);
+		expect(partialAnalysis.diagnostics.map((d) => d.code)).not.toContain(
+			'ERROR_UNKNOWN_QUERY_REF',
+		);
+
+		// Circular @query.* references are always caught in-block with exact cycle chain
+		const cyclic = [
+			'{% query alpha %}links -> @query.beta{% endquery %}',
+			'{% query beta %}[up <- @query.alpha]{% endquery %}',
+		].join('\n');
+		const cyclicAnalysis = analyzeRhizomeCodeBlock(cyclic, config, PINNED_REF_MS);
+		const cycDiags = cyclicAnalysis.diagnostics.filter(
+			(d) => d.code === 'ERROR_CIRCULAR_QUERY_REF',
+		);
+		expect(cycDiags.length).toBeGreaterThanOrEqual(2);
+		expect(cycDiags[0]?.issue).toContain('alpha -> beta -> alpha');
+	});
 });

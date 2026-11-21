@@ -1,7 +1,9 @@
 import { type App, normalizePath, type TFile } from 'obsidian';
 import { deepFreeze } from '@core/cache/deep-freeze';
 import {
+	analyzeQueryDependencyDag,
 	compileQuery,
+	createGraphEvaluationContext,
 	explainQuery,
 	evaluateDoc,
 	FORBIDDEN_KEYS,
@@ -10,6 +12,7 @@ import {
 	initEngineConfig,
 	INTERNAL_RHIZOME_CODES,
 	type BacklinkRef,
+	type CompileResult,
 	type DocumentEvaluationContext,
 	type NormalizedAliasLocation,
 	type NormalizedBlock,
@@ -25,6 +28,7 @@ import {
 	type PropertyTypeRegistry,
 	type ResolvedEngineConfig,
 	type ResolveLinkPathFn,
+	VaultGraphSnapshot,
 } from '@core/search';
 import { HOST_QUERY_KEY } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
@@ -599,28 +603,80 @@ export async function runVaultQuery(
 		results[HOST_QUERY_KEY] = hostDoc ? [toVaultQueryMatch(hostDoc)] : [];
 	}
 
-	const executableQueries: Array<{
-		name: string;
-		prepared: PreparedQuery;
-		bucket: VaultQueryMatch[];
+	const userKnownQueryNames = new Set<string>();
+	for (const [name] of sanitizedEntries) {
+		if (!name.startsWith('◊')) {
+			userKnownQueryNames.add(name);
+		}
+	}
+
+	const prelimCompiled: Array<{
+		readonly name: string;
+		readonly rawInput: string;
+		readonly isInternal: boolean;
+		readonly compileResult: CompileResult;
 	}> = [];
 
 	for (const [name, rawInput] of sanitizedEntries) {
+		const isInternal = name.startsWith('◊');
 		const queryHostDoc =
 			options?.queryHostDocs &&
 			Object.prototype.hasOwnProperty.call(options.queryHostDocs, name)
 				? options.queryHostDocs[name]
 				: hostDoc;
-		const compileResult = compileQuery(rawInput, resolvedConfig, rawRefTimeMs, queryHostDoc);
-		logQueryCompilation(logger, name, rawInput, compileResult);
-		if (compileResult.executable && compileResult.prepared) {
-			const bucket: VaultQueryMatch[] = [];
-			results[name] = bucket;
-			executableQueries.push({
-				name,
-				prepared: compileResult.prepared,
-				bucket,
+		const compileResult = compileQuery(
+			rawInput,
+			resolvedConfig,
+			rawRefTimeMs,
+			queryHostDoc,
+			isInternal ? undefined : userKnownQueryNames,
+		);
+		prelimCompiled.push({ name, rawInput, isInternal, compileResult });
+	}
+
+	const dagAnalysis = analyzeQueryDependencyDag(
+		prelimCompiled
+			.filter((item) => !item.isInternal)
+			.map((item) => ({ name: item.name, ast: item.compileResult.ast })),
+		{ checkUnknownRefs: false },
+	);
+
+	interface ExecutableWaveEntry {
+		readonly name: string;
+		readonly prepared: PreparedQuery;
+		readonly bucket: VaultQueryMatch[];
+		readonly matchedDocs: NormalizedDocument[];
+	}
+
+	const executableQueries: ExecutableWaveEntry[] = [];
+	const executableByName = new Map<string, ExecutableWaveEntry>();
+
+	for (const item of prelimCompiled) {
+		const cycleDiags = item.isInternal
+			? undefined
+			: dagAnalysis.cycleDiagnosticsByQuery.get(item.name);
+		const isBlocked = !item.isInternal && dagAnalysis.blockedQueryNames.has(item.name);
+		if (cycleDiags && cycleDiags.length > 0) {
+			logQueryCompilation(logger, item.name, item.rawInput, {
+				ast: null,
+				prepared: null,
+				diagnostics: [...item.compileResult.diagnostics, ...cycleDiags],
+				executable: false,
 			});
+			continue;
+		}
+		logQueryCompilation(logger, item.name, item.rawInput, item.compileResult);
+		if (item.compileResult.executable && item.compileResult.prepared && !isBlocked) {
+			const bucket: VaultQueryMatch[] = [];
+			results[item.name] = bucket;
+			const entry: ExecutableWaveEntry = {
+				name: item.name,
+				prepared: item.compileResult.prepared,
+				bucket,
+				matchedDocs: [],
+			};
+			executableQueries.push(entry);
+			executableByName.set(item.name, entry);
 		}
 	}
 
@@ -643,113 +699,307 @@ export async function runVaultQuery(
 	}
 
 	const queriedKeys = new Set<string>();
+	let anyUsesGraph = false;
 	for (const entry of executableQueries) {
-		for (const key of getExecutionPlan(entry.prepared).queriedKeys) {
+		const plan = getExecutionPlan(entry.prepared);
+		if (plan.usesGraph) {
+			anyUsesGraph = true;
+		}
+		for (const key of plan.queriedKeys) {
 			queriedKeys.add(key);
 		}
 	}
 	const propDiagnosticsAggregator = new QueriedPropertyDiagnosticsAggregator(queriedKeys);
+
+	const executionWaves: ExecutableWaveEntry[][] = [];
+	const internalEntries = prelimCompiled
+		.filter((item) => item.isInternal && executableByName.has(item.name))
+		.map((item) => executableByName.get(item.name)!);
+	for (let w = 0; w < dagAnalysis.waves.length; w++) {
+		const waveEntries: ExecutableWaveEntry[] = w === 0 ? [...internalEntries] : [];
+		for (const qName of dagAnalysis.waves[w]!) {
+			const entry = executableByName.get(qName);
+			if (entry) {
+				waveEntries.push(entry);
+			}
+		}
+		if (waveEntries.length > 0) {
+			executionWaves.push(waveEntries);
+		}
+	}
+	if (executionWaves.length === 0 && internalEntries.length > 0) {
+		executionWaves.push(internalEntries);
+	}
 
 	let notesScanned = 0;
 	let uncachedNotes = prepared.stats?.uncached ?? 0;
 	const scanStartedAt = Date.now();
 	let projectMs = 0;
 
-	if (cache !== undefined && vaultFiles !== undefined) {
-		for (const file of vaultFiles) {
-			const doc = cache.get(file.path);
-			if (doc === undefined) {
-				continue;
-			}
-			notesScanned++;
-			propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
+	if (!anyUsesGraph && executionWaves.length <= 1) {
+		if (cache !== undefined && vaultFiles !== undefined) {
+			for (const file of vaultFiles) {
+				const doc = cache.get(file.path);
+				if (doc === undefined) {
+					continue;
+				}
+				notesScanned++;
+				propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
 
-			let cachedProjection: CachedMatchProjection | undefined;
-			const ctx: DocumentEvaluationContext | undefined =
-				backlinks !== undefined
-					? {
-							backlinks: () => {
-								cachedProjection ??= getOrUpdateCachedProjection(
-									doc,
-									backlinks,
-									file,
-									isIgnoredFile,
-								);
-								return cachedProjection.match.backlinks;
-							},
+				let cachedProjection: CachedMatchProjection | undefined;
+				const ctx: DocumentEvaluationContext | undefined =
+					backlinks !== undefined
+						? {
+								backlinks: () => {
+									cachedProjection ??= getOrUpdateCachedProjection(
+										doc,
+										backlinks,
+										file,
+										isIgnoredFile,
+									);
+									return cachedProjection.match.backlinks;
+								},
+							}
+						: undefined;
+
+				let sharedMatch: VaultQueryMatch | undefined;
+				for (const entry of executableQueries) {
+					if (evaluateDoc(doc, entry.prepared, ctx)) {
+						if (sharedMatch === undefined) {
+							const projectStartedAt = Date.now();
+							cachedProjection ??= getOrUpdateCachedProjection(
+								doc,
+								backlinks,
+								file,
+								isIgnoredFile,
+							);
+							sharedMatch = cachedProjection.match;
+							projectMs += Date.now() - projectStartedAt;
 						}
-					: undefined;
-
-			let sharedMatch: VaultQueryMatch | undefined;
-			for (const entry of executableQueries) {
-				if (evaluateDoc(doc, entry.prepared, ctx)) {
-					if (sharedMatch === undefined) {
-						const projectStartedAt = Date.now();
-						cachedProjection ??= getOrUpdateCachedProjection(
-							doc,
-							backlinks,
-							file,
-							isIgnoredFile,
-						);
-						sharedMatch = cachedProjection.match;
-						projectMs += Date.now() - projectStartedAt;
+						entry.bucket.push(sharedMatch);
 					}
-					entry.bucket.push(sharedMatch);
+				}
+			}
+		} else {
+			for (const file of app.vault.getMarkdownFiles()) {
+				if ((file as { deleted?: boolean }).deleted) {
+					continue;
+				}
+				const cacheEntry = app.metadataCache.getFileCache(file);
+				if (
+					hasInternalRhizomeFlag(
+						cacheEntry?.frontmatter,
+						INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
+					)
+				) {
+					continue;
+				}
+				notesScanned++;
+				if (cacheEntry === null) {
+					uncachedNotes++;
+				}
+				let doc: NormalizedDocument;
+				try {
+					doc = normalizeObsidianMetadata(
+						file,
+						cacheEntry,
+						resolvedConfig,
+						[],
+						resolveLinkPath,
+					);
+				} catch (error) {
+					logger?.log(
+						'warn',
+						`Skipped note that failed normalization: ${markSensitive(file.path)}`,
+						{
+							source: 'query.run',
+							error: String(error),
+						},
+					);
+					continue;
+				}
+				deepFreeze(doc);
+				const ctx = createBacklinkContext(backlinks, file, isIgnoredFile);
+				propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
+
+				let sharedMatch: VaultQueryMatch | undefined;
+				for (const entry of executableQueries) {
+					if (evaluateDoc(doc, entry.prepared, ctx)) {
+						if (sharedMatch === undefined) {
+							const projectStartedAt = Date.now();
+							sharedMatch = toVaultQueryMatch(doc, ctx?.backlinks());
+							projectMs += Date.now() - projectStartedAt;
+						}
+						entry.bucket.push(sharedMatch);
+					}
 				}
 			}
 		}
 	} else {
-		for (const file of app.vault.getMarkdownFiles()) {
-			if ((file as { deleted?: boolean }).deleted) {
-				continue;
-			}
-			const cacheEntry = app.metadataCache.getFileCache(file);
-			if (
-				hasInternalRhizomeFlag(
-					cacheEntry?.frontmatter,
-					INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
-				)
-			) {
-				continue;
-			}
-			notesScanned++;
-			if (cacheEntry === null) {
-				uncachedNotes++;
-			}
-			let doc: NormalizedDocument;
-			try {
-				doc = normalizeObsidianMetadata(
-					file,
-					cacheEntry,
-					resolvedConfig,
-					[],
-					resolveLinkPath,
-				);
-			} catch (error) {
-				logger?.log(
-					'warn',
-					`Skipped note that failed normalization: ${markSensitive(file.path)}`,
-					{
-						source: 'query.run',
-						error: String(error),
-					},
-				);
-				continue;
-			}
-			deepFreeze(doc);
-			const ctx = createBacklinkContext(backlinks, file, isIgnoredFile);
-			propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
+		interface MaterializedPassDoc {
+			readonly doc: NormalizedDocument;
+			readonly file: TFile;
+			readonly getBacklinks: () => readonly BacklinkRef[];
+			readonly projectMatch: () => VaultQueryMatch;
+			sharedMatch: VaultQueryMatch | undefined;
+		}
 
-			let sharedMatch: VaultQueryMatch | undefined;
-			for (const entry of executableQueries) {
-				if (evaluateDoc(doc, entry.prepared, ctx)) {
-					if (sharedMatch === undefined) {
-						const projectStartedAt = Date.now();
-						sharedMatch = toVaultQueryMatch(doc, ctx?.backlinks());
-						projectMs += Date.now() - projectStartedAt;
-					}
-					entry.bucket.push(sharedMatch);
+		const passDocs: MaterializedPassDoc[] = [];
+		const passDocByPath = new Map<string, MaterializedPassDoc>();
+
+		if (cache !== undefined && vaultFiles !== undefined) {
+			for (const file of vaultFiles) {
+				const doc = cache.get(file.path);
+				if (doc === undefined) {
+					continue;
 				}
+				notesScanned++;
+				propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
+				let cachedProjection: CachedMatchProjection | undefined;
+				const getBacklinks = (): readonly BacklinkRef[] => {
+					if (backlinks === undefined) return EMPTY_BACKLINKS;
+					cachedProjection ??= getOrUpdateCachedProjection(
+						doc,
+						backlinks,
+						file,
+						isIgnoredFile,
+					);
+					return cachedProjection.match.backlinks;
+				};
+				const projectMatch = (): VaultQueryMatch => {
+					cachedProjection ??= getOrUpdateCachedProjection(
+						doc,
+						backlinks,
+						file,
+						isIgnoredFile,
+					);
+					return cachedProjection.match;
+				};
+				const item: MaterializedPassDoc = {
+					doc,
+					file,
+					getBacklinks,
+					projectMatch,
+					sharedMatch: undefined,
+				};
+				passDocs.push(item);
+				passDocByPath.set(doc.file.path, item);
+			}
+		} else {
+			for (const file of app.vault.getMarkdownFiles()) {
+				if ((file as { deleted?: boolean }).deleted) {
+					continue;
+				}
+				const cacheEntry = app.metadataCache.getFileCache(file);
+				if (
+					hasInternalRhizomeFlag(
+						cacheEntry?.frontmatter,
+						INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
+					)
+				) {
+					continue;
+				}
+				notesScanned++;
+				if (cacheEntry === null) {
+					uncachedNotes++;
+				}
+				let doc: NormalizedDocument;
+				try {
+					doc = normalizeObsidianMetadata(
+						file,
+						cacheEntry,
+						resolvedConfig,
+						[],
+						resolveLinkPath,
+					);
+				} catch (error) {
+					logger?.log(
+						'warn',
+						`Skipped note that failed normalization: ${markSensitive(file.path)}`,
+						{
+							source: 'query.run',
+							error: String(error),
+						},
+					);
+					continue;
+				}
+				deepFreeze(doc);
+				propDiagnosticsAggregator.recordNote(file.path, doc.diagnostics);
+				const baseCtx = createBacklinkContext(backlinks, file, isIgnoredFile);
+				const getBacklinks = (): readonly BacklinkRef[] =>
+					baseCtx ? baseCtx.backlinks() : (doc.backlinks ?? EMPTY_BACKLINKS);
+				const projectMatch = (): VaultQueryMatch =>
+					toVaultQueryMatch(doc, baseCtx?.backlinks());
+				const item: MaterializedPassDoc = {
+					doc,
+					file,
+					getBacklinks,
+					projectMatch,
+					sharedMatch: undefined,
+				};
+				passDocs.push(item);
+				passDocByPath.set(doc.file.path, item);
+			}
+		}
+
+		const lazyBacklinkPathsResolver =
+			backlinks !== undefined
+				? (targetPath: string): readonly string[] => {
+						const item = passDocByPath.get(targetPath);
+						if (!item) return [];
+						const sources = backlinks.get(item.file);
+						if (!sources || sources.size === 0) return [];
+						const out: string[] = [];
+						for (const [sourceFile, count] of sources) {
+							if (
+								count > 0 &&
+								!(sourceFile as { deleted?: boolean }).deleted &&
+								!isIgnoredFile(sourceFile)
+							) {
+								out.push(sourceFile.path);
+							}
+						}
+						return out;
+					}
+				: undefined;
+
+		const graphSnapshot = new VaultGraphSnapshot(
+			passDocs.map((p) => p.doc),
+			lazyBacklinkPathsResolver,
+		);
+		const getBacklinksForDoc = (d: NormalizedDocument): readonly BacklinkRef[] =>
+			passDocByPath.get(d.file.path)?.getBacklinks() ?? EMPTY_BACKLINKS;
+		const priorQueryDocs = new Map<string, readonly NormalizedDocument[]>();
+
+		for (let w = 0; w < executionWaves.length; w++) {
+			const wave = executionWaves[w]!;
+			const graphCtx = createGraphEvaluationContext(
+				graphSnapshot,
+				priorQueryDocs,
+				getBacklinksForDoc,
+			);
+			for (let i = 0; i < passDocs.length; i++) {
+				const item = passDocs[i]!;
+				const docCtx: DocumentEvaluationContext = {
+					backlinks: item.getBacklinks,
+					graphContext: graphCtx,
+				};
+				for (let j = 0; j < wave.length; j++) {
+					const entry = wave[j]!;
+					if (evaluateDoc(item.doc, entry.prepared, docCtx)) {
+						if (item.sharedMatch === undefined) {
+							const projectStartedAt = Date.now();
+							item.sharedMatch = item.projectMatch();
+							projectMs += Date.now() - projectStartedAt;
+						}
+						entry.bucket.push(item.sharedMatch);
+						entry.matchedDocs.push(item.doc);
+					}
+				}
+			}
+			for (let j = 0; j < wave.length; j++) {
+				const entry = wave[j]!;
+				priorQueryDocs.set(entry.name, entry.matchedDocs);
 			}
 		}
 	}

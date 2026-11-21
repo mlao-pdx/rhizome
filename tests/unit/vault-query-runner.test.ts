@@ -1021,5 +1021,106 @@ describe('runVaultQuery', () => {
 			expect(Object.isFrozen(hostDoc.backlinks)).toBe(true);
 			expect(Object.isFrozen(hostDoc.backlinks?.[0])).toBe(true);
 		});
+
+		it('executes multi-query @query.<name> DAG waves in topological order over a single vault normalization pass and omits cyclic/unknown queries', async () => {
+			let fileCacheReads = 0;
+			const app = makeMockApp({
+				typesJson: JSON.stringify({ types: { priority: 'number' } }),
+				linkMap: {
+					Apollo: 'projects/Apollo.md',
+					Q4Goal: 'goals/Q4Goal.md',
+				},
+				onGetFileCache: () => {
+					fileCacheReads++;
+				},
+				notes: [
+					{
+						path: 'goals/Q4Goal.md',
+						cache: {
+							frontmatter: { tags: ['goal'], priority: 10 },
+						},
+					},
+					{
+						path: 'projects/Apollo.md',
+						cache: {
+							frontmatter: { tags: ['project'], up: '[[Q4Goal]]', priority: 5 },
+							frontmatterLinks: [{ link: 'Q4Goal', key: 'up' } as never],
+						},
+					},
+					{
+						path: 'tasks/LandModule.md',
+						cache: {
+							frontmatter: { tags: ['task'], up: '[[Apollo]]', priority: 7 },
+							frontmatterLinks: [{ link: 'Apollo', key: 'up' } as never],
+						},
+					},
+				],
+			});
+
+			const logs: Array<{
+				level: string;
+				message: string;
+				meta?: Record<string, unknown> | undefined;
+			}> = [];
+			const logger = {
+				log: (level: string, message: string, meta?: Record<string, unknown>) => {
+					logs.push({ level, message, meta });
+				},
+			};
+
+			// Intentionally declared in reverse dependency order (Wave 2 -> Wave 1 -> Wave 0) plus cyclic & unknown queries
+			const res = await runVaultQuery(
+				app,
+				{
+					goal_tasks:
+						'#task AND [up -> @query.goal_projects] AND [priority: > @query.goal_projects.properties.priority]',
+					goal_projects: '#project AND [up -> @query.goals]',
+					goals: '#goal',
+					cyc_a: 'links -> @query.cyc_b',
+					cyc_b: 'links -> @query.cyc_a',
+					bad_ref: 'links -> @query.nonexistent',
+				},
+				{ timeZone: 'UTC' },
+				logger,
+			);
+
+			expect(res.goals?.map((m) => m.file.path)).toEqual(['goals/Q4Goal.md']);
+			expect(res.goal_projects?.map((m) => m.file.path)).toEqual(['projects/Apollo.md']);
+			expect(res.goal_tasks?.map((m) => m.file.path)).toEqual(['tasks/LandModule.md']);
+			expect(res.cyc_a).toBeUndefined();
+			expect(res.cyc_b).toBeUndefined();
+			expect(res.bad_ref).toBeUndefined();
+
+			// Vault of 3 notes is normalized once across all 3 DAG waves!
+			expect(fileCacheReads).toBe(3);
+			const summary = logs.find((l) => l.message === 'Completed vault query run');
+			expect(summary?.meta?.['notesScanned']).toBe(3);
+			expect(
+				logs.some((l) => JSON.stringify(l.meta ?? {}).includes('ERROR_CIRCULAR_QUERY_REF')),
+			).toBe(true);
+
+			// Lazy backlinks check: non-backlinks graph queries never project backlinks for unmatched notes
+			let backlinkGetCalls = 0;
+			const spyBacklinks = {
+				get: () => {
+					backlinkGetCalls++;
+					return undefined;
+				},
+			};
+			await runVaultQuery(
+				app,
+				{ none: '[up ->* { #missing }]' },
+				{ timeZone: 'UTC', backlinks: spyBacklinks as never },
+			);
+			expect(backlinkGetCalls).toBe(0);
+
+			await runVaultQuery(
+				app,
+				{ descendants: '[up ->* { #goal }]' },
+				{ timeZone: 'UTC', backlinks: spyBacklinks as never },
+			);
+			// Only the 2 matched notes (Apollo, LandModule) project backlinks; unmatched Q4Goal is untouched
+			expect(backlinkGetCalls).toBe(2);
+		});
 	});
 });

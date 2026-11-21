@@ -75,6 +75,7 @@ export interface ObsidianFileInput {
 export interface ObsidianLinkCacheInput {
 	readonly link: string;
 	readonly displayText?: string | undefined;
+	readonly key?: string | undefined;
 	readonly position?: ObsidianPosInput | undefined;
 }
 
@@ -282,12 +283,108 @@ function validateIntegerTimestampMs(val: number, fieldName: string): number {
 	return val === 0 ? 0 : val;
 }
 
+const INLINE_WIKILINK_RE = /\[\[([^[\]\r\n]+)\]\]/g;
+
+function sanitizeLinkPropertyKey(rawKey: string): string | null {
+	const trimmed = rawKey.trim();
+	const lower = trimmed.toLowerCase();
+	if (
+		trimmed.length === 0 ||
+		FORBIDDEN_KEYS.has(trimmed) ||
+		FORBIDDEN_KEYS.has(lower) ||
+		FORBIDDEN_KEYS.has(rawKey) ||
+		OMITTED_PROPERTY_VIEW_KEYS.has(lower)
+	) {
+		return null;
+	}
+	return trimmed;
+}
+
+function resolveFrontmatterLinkProperty(
+	rawKey: string | undefined,
+	frontmatter: Readonly<Record<string, unknown>> | undefined,
+): string | null {
+	if (typeof rawKey !== 'string') {
+		return null;
+	}
+	if (
+		frontmatter &&
+		typeof frontmatter === 'object' &&
+		Object.prototype.hasOwnProperty.call(frontmatter, rawKey)
+	) {
+		return sanitizeLinkPropertyKey(rawKey);
+	}
+	return sanitizeLinkPropertyKey(rawKey.replace(/(?:\.\d+)+$/, ''));
+}
+
+function extractWikilinksFromValue(val: unknown): ObsidianLinkCacheInput[] {
+	const texts: string[] = [];
+	if (typeof val === 'string') {
+		if (val.includes('[[')) {
+			texts.push(val);
+		}
+	} else if (Array.isArray(val)) {
+		for (const item of val as readonly unknown[]) {
+			if (typeof item === 'string' && item.includes('[[')) {
+				texts.push(item);
+			}
+		}
+	}
+	if (texts.length === 0) {
+		return [];
+	}
+
+	const out: ObsidianLinkCacheInput[] = [];
+	for (const str of texts) {
+		INLINE_WIKILINK_RE.lastIndex = 0;
+		let match: RegExpExecArray | null;
+		while ((match = INLINE_WIKILINK_RE.exec(str)) !== null) {
+			if (match.index > 0 && str[match.index - 1] === '!') {
+				continue;
+			}
+			const inner = match[1]!;
+			const pipeIdx = inner.indexOf('|');
+			if (pipeIdx === -1) {
+				const link = inner.trim();
+				if (link.length > 0) {
+					out.push({ link });
+				}
+			} else {
+				const rawLink = inner.slice(0, pipeIdx);
+				const unescaped = rawLink.endsWith('\\') ? rawLink.slice(0, -1) : rawLink;
+				const link = unescaped.trim();
+				if (link.length === 0) {
+					continue;
+				}
+				const alias = inner.slice(pipeIdx + 1).trim();
+				out.push({
+					link,
+					displayText: alias.length > 0 ? alias : link,
+				});
+			}
+		}
+	}
+	return out;
+}
+
+interface PreparedInlineAttribution {
+	readonly property: string;
+	readonly value: unknown;
+	readonly position: ObsidianPosInput | null | undefined;
+	readonly startOffset: number | null;
+	readonly endOffset: number | null;
+	readonly span: number;
+	readonly orderIndex: number;
+	readonly coveredLinks: Map<string, number>;
+}
+
 function normalizeLinkItem(
 	l: ObsidianLinkCacheInput,
 	source: 'frontmatter' | 'inline' | 'embed',
 	sourcePath: string,
 	origin: string,
 	resolveLinkPath: ResolveLinkPathFn | undefined,
+	property: string | null,
 ): NormalizedLink {
 	const raw = l.link;
 	let rawTarget = raw;
@@ -323,6 +420,7 @@ function normalizeLinkItem(
 		subpath,
 		displayText: l.displayText ?? raw,
 		source,
+		property,
 		origin,
 	};
 }
@@ -611,6 +709,104 @@ export function normalizeObsidianMetadata(
 		origin: originResolver.forHeading(h.heading),
 	}));
 
+	const inlineAttributions: PreparedInlineAttribution[] = [];
+	const positionedInlineAttributions: PreparedInlineAttribution[] = [];
+	for (let i = 0; i < inlineProperties.length; i++) {
+		const inline = inlineProperties[i]!;
+		const prop = typeof inline.key === 'string' ? sanitizeLinkPropertyKey(inline.key) : null;
+		if (prop === null) {
+			continue;
+		}
+		const pStart = inline.position?.start?.offset;
+		const pEnd = inline.position?.end?.offset;
+		const hasValidSpan = isValidOffset(pStart) && isValidOffset(pEnd) && pStart <= pEnd;
+		const entry: PreparedInlineAttribution = {
+			property: prop,
+			value: inline.value,
+			position: inline.position,
+			startOffset: hasValidSpan ? pStart : null,
+			endOffset: hasValidSpan ? pEnd : null,
+			span: hasValidSpan ? pEnd - pStart : 0,
+			orderIndex: i,
+			coveredLinks: new Map<string, number>(),
+		};
+		inlineAttributions.push(entry);
+		if (hasValidSpan) {
+			positionedInlineAttributions.push(entry);
+		}
+	}
+	if (positionedInlineAttributions.length > 1) {
+		positionedInlineAttributions.sort(
+			(a, b) =>
+				a.span - b.span || b.startOffset! - a.startOffset! || a.orderIndex - b.orderIndex,
+		);
+	}
+
+	const normalizedBodyLinks: NormalizedLink[] = (cache?.links ?? []).map((l) => {
+		let matchedProperty: string | null = null;
+		const lStart = l.position?.start?.offset;
+		const lEnd = l.position?.end?.offset;
+		if (isValidOffset(lStart) && positionedInlineAttributions.length > 0) {
+			const effectiveEnd = isValidOffset(lEnd) && lStart <= lEnd ? lEnd : lStart;
+			const trimmedLinkKey = l.link.trim();
+			for (let i = 0; i < positionedInlineAttributions.length; i++) {
+				const attr = positionedInlineAttributions[i]!;
+				const aStart = attr.startOffset!;
+				const aEnd = attr.endOffset!;
+				if (matchedProperty === null && aStart <= lStart && effectiveEnd <= aEnd) {
+					matchedProperty = attr.property;
+				}
+				const overlaps =
+					lStart === effectiveEnd
+						? aStart <= lStart && lStart <= aEnd
+						: lStart < aEnd && effectiveEnd > aStart;
+				if (overlaps) {
+					attr.coveredLinks.set(
+						trimmedLinkKey,
+						(attr.coveredLinks.get(trimmedLinkKey) ?? 0) + 1,
+					);
+				}
+			}
+		}
+		return normalizeLinkItem(
+			l,
+			'inline',
+			tfile.path,
+			originResolver.resolve(l.position),
+			resolveLinkPath,
+			matchedProperty,
+		);
+	});
+
+	const fallbackInlineLinks: NormalizedLink[] = [];
+	for (let i = 0; i < inlineAttributions.length; i++) {
+		const attr = inlineAttributions[i]!;
+		const extracted = extractWikilinksFromValue(attr.value);
+		if (extracted.length === 0) {
+			continue;
+		}
+		const inlineOrigin = originResolver.resolve(attr.position);
+		for (let j = 0; j < extracted.length; j++) {
+			const ext = extracted[j]!;
+			const trimmedLinkKey = ext.link.trim();
+			const remaining = attr.coveredLinks.get(trimmedLinkKey) ?? 0;
+			if (remaining > 0) {
+				attr.coveredLinks.set(trimmedLinkKey, remaining - 1);
+				continue;
+			}
+			fallbackInlineLinks.push(
+				normalizeLinkItem(
+					ext,
+					'inline',
+					tfile.path,
+					inlineOrigin,
+					resolveLinkPath,
+					attr.property,
+				),
+			);
+		}
+	}
+
 	const links: NormalizedLink[] = [
 		...(cache?.frontmatterLinks ?? []).map((l) =>
 			normalizeLinkItem(
@@ -619,17 +815,11 @@ export function normalizeObsidianMetadata(
 				tfile.path,
 				originResolver.noteOrigin,
 				resolveLinkPath,
+				resolveFrontmatterLinkProperty(l.key, cache?.frontmatter),
 			),
 		),
-		...(cache?.links ?? []).map((l) =>
-			normalizeLinkItem(
-				l,
-				'inline',
-				tfile.path,
-				originResolver.resolve(l.position),
-				resolveLinkPath,
-			),
-		),
+		...normalizedBodyLinks,
+		...fallbackInlineLinks,
 	];
 
 	const embeds: NormalizedLink[] = (cache?.embeds ?? []).map((e) =>
@@ -639,6 +829,7 @@ export function normalizeObsidianMetadata(
 			tfile.path,
 			originResolver.resolve(e.position),
 			resolveLinkPath,
+			null,
 		),
 	);
 

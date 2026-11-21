@@ -105,7 +105,7 @@
 <path d="M270 51h0"></path>
 <rect x="226" y="40" width="44" height="22" rx="10" ry="10"></rect>
 <text x="248" y="55" topRuleName="valueAndExpr" dslRuleName="consume" tokenName="And" label="AND">AND</text>
-<title>AND(?![^\s()[\]])</title>
+<title>AND(?![^\s()[\]{}])</title>
 </g>
 <path d="M270 51h20"></path>
 </g>

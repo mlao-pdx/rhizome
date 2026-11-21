@@ -1,4 +1,10 @@
-import { isVirtualFileKey, type LogicalNode, type SearchAST, type ValueExprAST } from './types';
+import {
+	isVirtualFileKey,
+	type GraphTargetAST,
+	type LogicalNode,
+	type SearchAST,
+	type ValueExprAST,
+} from './types';
 
 /**
  * Recursively freezes a `ValueExprAST` node, including its `matcher` or `children` array.
@@ -6,7 +12,7 @@ import { isVirtualFileKey, type LogicalNode, type SearchAST, type ValueExprAST }
 export function deepFreezeValueExprAST(expr: ValueExprAST): ValueExprAST {
 	if (expr.span) Object.freeze(expr.span);
 	if (expr.type === 'VALUE_LEAF') {
-		if (expr.matcher.kind === 'this') {
+		if (expr.matcher.kind === 'this' || expr.matcher.kind === 'query') {
 			Object.freeze(expr.matcher.segments);
 		}
 		Object.freeze(expr.matcher);
@@ -19,6 +25,14 @@ export function deepFreezeValueExprAST(expr: ValueExprAST): ValueExprAST {
 	for (const c of expr.children) deepFreezeValueExprAST(c);
 	Object.freeze(expr.children);
 	return Object.freeze(expr);
+}
+
+function deepFreezeGraphTarget(target: GraphTargetAST): GraphTargetAST {
+	if (target.span) Object.freeze(target.span);
+	if (target.kind === 'subquery') {
+		deepFreezeAST(target.ast);
+	}
+	return Object.freeze(target);
 }
 
 /**
@@ -35,6 +49,11 @@ export function deepFreezeAST(ast: SearchAST): SearchAST {
 		case 'SCOPED_FILTER':
 			deepFreezeValueExprAST(ast.expr);
 			return Object.freeze(ast);
+		case 'SCOPE_GRAPH_FILTER':
+		case 'PROPERTY_GRAPH_FILTER':
+			Object.freeze(ast.hops);
+			deepFreezeGraphTarget(ast.target);
+			return Object.freeze(ast);
 		case 'PROPERTY_FILTER':
 			if (ast.valueExpr) deepFreezeValueExprAST(ast.valueExpr);
 			return Object.freeze(ast);
@@ -46,7 +65,8 @@ export function deepFreezeAST(ast: SearchAST): SearchAST {
 }
 
 /**
- * Collects all non-virtual user property keys referenced anywhere in `ast`.
+ * Collects all non-virtual user property keys referenced anywhere in `ast`,
+ * including inside nested `{ ... }` graph subqueries.
  * Virtual `file.*` keys are excluded because they read `doc.file`, not `doc.propertyOccurrences`.
  */
 export function collectReferencedPropertyKeys(
@@ -59,6 +79,12 @@ export function collectReferencedPropertyKeys(
 			if (!isVirtualFileKey(k)) out.add(k);
 			return out;
 		}
+		case 'SCOPE_GRAPH_FILTER':
+		case 'PROPERTY_GRAPH_FILTER':
+			if (ast.target.kind === 'subquery') {
+				collectReferencedPropertyKeys(ast.target.ast, out);
+			}
+			return out;
 		case 'NOT':
 			return collectReferencedPropertyKeys(ast.child, out);
 		case 'LOGICAL':
@@ -94,7 +120,14 @@ export function normalizeValueExprAST(expr: ValueExprAST): ValueExprAST {
 								raw: expr.matcher.raw,
 								segments: [...expr.matcher.segments],
 							}
-						: { ...expr.matcher },
+						: expr.matcher.kind === 'query'
+							? {
+									kind: 'query',
+									raw: expr.matcher.raw,
+									queryName: expr.matcher.queryName,
+									segments: [...expr.matcher.segments],
+								}
+							: { ...expr.matcher },
 			};
 		case 'VALUE_NOT':
 			return { type: 'VALUE_NOT', syntax: 'NOT', child: normalizeValueExprAST(expr.child) };
@@ -173,6 +206,57 @@ export function normalizeAST(ast: SearchAST): SearchAST {
 				rawKey: lowerKey,
 				operator: ast.operator,
 				...(ast.valueExpr ? { valueExpr: normalizeValueExprAST(ast.valueExpr) } : {}),
+			};
+		}
+		case 'SCOPE_GRAPH_FILTER': {
+			const normTarget: GraphTargetAST =
+				ast.target.kind === 'subquery'
+					? { kind: 'subquery', ast: normalizeAST(ast.target.ast) }
+					: ast.target.kind === 'query_ref'
+						? {
+								kind: 'query_ref',
+								raw: `@query.${ast.target.queryName}`,
+								queryName: ast.target.queryName,
+							}
+						: { kind: 'this_ref', raw: '@this' };
+			return {
+				type: 'SCOPE_GRAPH_FILTER',
+				scope: ast.scope,
+				rawScope: ast.scope,
+				direction: ast.direction,
+				hops: {
+					minHops: ast.hops.minHops,
+					maxHops: ast.hops.maxHops,
+					unbounded: ast.hops.unbounded,
+					raw: ast.hops.raw === ':' ? '->' : ast.hops.raw,
+				},
+				target: normTarget,
+			};
+		}
+		case 'PROPERTY_GRAPH_FILTER': {
+			const lowerKey = ast.key.trim().toLowerCase();
+			const normTarget: GraphTargetAST =
+				ast.target.kind === 'subquery'
+					? { kind: 'subquery', ast: normalizeAST(ast.target.ast) }
+					: ast.target.kind === 'query_ref'
+						? {
+								kind: 'query_ref',
+								raw: `@query.${ast.target.queryName}`,
+								queryName: ast.target.queryName,
+							}
+						: { kind: 'this_ref', raw: '@this' };
+			return {
+				type: 'PROPERTY_GRAPH_FILTER',
+				key: lowerKey,
+				rawKey: lowerKey,
+				direction: ast.direction,
+				hops: {
+					minHops: ast.hops.minHops,
+					maxHops: ast.hops.maxHops,
+					unbounded: ast.hops.unbounded,
+					raw: ast.hops.raw,
+				},
+				target: normTarget,
 			};
 		}
 		case 'LOGICAL': {

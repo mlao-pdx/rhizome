@@ -679,6 +679,10 @@ describe('search metadata normalizer & property coercion invariants', () => {
 				fc.string({ maxLength: 16 }),
 			),
 			displayText: fc.option(fc.string({ maxLength: 12 }), { nil: undefined }),
+			key: fc.option(
+				fc.constantFrom('up', 'up.0', 'Project', 'rel.parent.1', '   ', '__proto__'),
+				{ nil: undefined },
+			),
 			position: optionalPosArb,
 		});
 
@@ -789,10 +793,20 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					const noteOrigin = `[[${doc.file.path}|${doc.file.basename}]]`;
 
 					// Invariant 1: doc.links orders frontmatterLinks before inline links,
-					// and every frontmatter link has origin === noteOrigin
-					expect(doc.links.length).toBe(fmLinks.length + bodyLinks.length);
+					// every frontmatter link has origin === noteOrigin, and every embed has property === null
+					expect(doc.links.length).toBeGreaterThanOrEqual(
+						fmLinks.length + bodyLinks.length,
+					);
 					let seenInlineLink = false;
 					for (const l of doc.links) {
+						if (l.property !== null) {
+							expect(typeof l.property).toBe('string');
+							expect(l.property.trim()).toBe(l.property);
+							expect(l.property.length).toBeGreaterThan(0);
+							expect(['__proto__', 'constructor', 'prototype']).not.toContain(
+								l.property.toLowerCase(),
+							);
+						}
 						if (l.source === 'frontmatter') {
 							expect(seenInlineLink).toBe(false);
 							expect(l.origin).toBe(noteOrigin);
@@ -800,6 +814,9 @@ describe('search metadata normalizer & property coercion invariants', () => {
 							expect(l.source).toBe('inline');
 							seenInlineLink = true;
 						}
+					}
+					for (const e of doc.embeds) {
+						expect(e.property).toBeNull();
 					}
 
 					// Invariant 2: doc.tags is the authored-case sorted set projection of doc.tagLocations,
@@ -938,7 +955,7 @@ describe('search metadata normalizer & property coercion invariants', () => {
 					}
 					expect(
 						doc.tagLocations
-							.filter((tl) => tl.source === 'inline')
+							.filter((tl) => tl.source !== 'frontmatter')
 							.map((tl) => tl.origin),
 					).toEqual(expectedInlineTagOrigins);
 

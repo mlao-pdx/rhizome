@@ -201,6 +201,7 @@ export interface NormalizedLink {
 	subpath: string; // "#Heading" or "^block", or ""
 	displayText: string;
 	source: 'frontmatter' | 'inline' | 'embed';
+	readonly property: string | null; // Trimmed authored-case property key, or null for prose links and embeds
 	origin: string; // "[[NoteFullPath#^BlockId|NoteBasename]]" | "[[NoteFullPath#Heading|NoteBasename]]" | "[[NoteFullPath|NoteBasename]]"
 }
 
@@ -304,7 +305,13 @@ export interface SourceSpan {
 }
 
 export type SearchAST =
-	MatchAllNode | LogicalNode | NotNode | ScopedFilterNode | PropertyFilterNode;
+	| MatchAllNode
+	| LogicalNode
+	| NotNode
+	| ScopedFilterNode
+	| ScopeGraphFilterNode
+	| PropertyFilterNode
+	| PropertyGraphFilterNode;
 
 export interface MatchAllNode {
 	readonly type: 'MATCH_ALL';
@@ -329,7 +336,13 @@ export interface NotNode {
 export type LeafMatcher =
 	| { readonly kind: 'string'; readonly value: string; readonly quoted: boolean }
 	| { readonly kind: 'regex'; readonly pattern: string; readonly flags: string }
-	| { readonly kind: 'this'; readonly raw: string; readonly segments: readonly string[] };
+	| { readonly kind: 'this'; readonly raw: string; readonly segments: readonly string[] }
+	| {
+			readonly kind: 'query';
+			readonly raw: string;
+			readonly queryName: string;
+			readonly segments: readonly string[];
+	  };
 
 export type ValueExprAST =
 	| {
@@ -358,6 +371,37 @@ export interface ScopedFilterNode {
 	readonly span?: SourceSpan;
 }
 
+export type GraphScopeName = 'links' | 'embeds' | 'backlinks';
+
+export type GraphDirection = 'outgoing' | 'incoming';
+
+export interface HopBounds {
+	readonly minHops: number;
+	readonly maxHops: number;
+	readonly unbounded: boolean;
+	readonly raw: string;
+}
+
+export type GraphTargetAST =
+	| { readonly kind: 'subquery'; readonly ast: SearchAST; readonly span?: SourceSpan }
+	| {
+			readonly kind: 'query_ref';
+			readonly raw: string;
+			readonly queryName: string;
+			readonly span?: SourceSpan;
+	  }
+	| { readonly kind: 'this_ref'; readonly raw: string; readonly span?: SourceSpan };
+
+export interface ScopeGraphFilterNode {
+	readonly type: 'SCOPE_GRAPH_FILTER';
+	readonly scope: string;
+	readonly rawScope: string;
+	readonly direction: GraphDirection;
+	readonly hops: HopBounds;
+	readonly target: GraphTargetAST;
+	readonly span?: SourceSpan;
+}
+
 export type PropertyOperator = 'EXISTS' | 'EMPTY' | ':' | '=' | '!=' | '<' | '>' | '<=' | '>=';
 
 export interface PropertyFilterNode {
@@ -369,12 +413,24 @@ export interface PropertyFilterNode {
 	readonly span?: SourceSpan;
 }
 
+export interface PropertyGraphFilterNode {
+	readonly type: 'PROPERTY_GRAPH_FILTER';
+	readonly key: string; // Decoded, trimmed, lowercased property key
+	readonly rawKey: string; // Decoded property key (with outer quotes stripped if quoted)
+	readonly direction: GraphDirection;
+	readonly hops: HopBounds;
+	readonly target: GraphTargetAST;
+	readonly span?: SourceSpan;
+}
+
 export type DiagnosticSeverity = 'error' | 'warning' | 'hint';
 
 export type DiagnosticCode =
 	| 'SYNTAX_ERROR'
 	| 'ERROR_INVALID_CONFIG'
 	| 'ERROR_UNKNOWN_SCOPE'
+	| 'ERROR_UNKNOWN_QUERY_REF'
+	| 'ERROR_CIRCULAR_QUERY_REF'
 	| 'ERROR_TYPE_MISMATCH'
 	| 'ERROR_INVALID_OPERATOR_FOR_TYPE'
 	| 'WARN_SINGLE_VALUE_CONTRADICTION'
@@ -411,6 +467,7 @@ export interface SearchDiagnostic {
  */
 export interface DocumentEvaluationContext {
 	readonly backlinks: () => readonly BacklinkRef[];
+	readonly graphContext?: unknown;
 }
 
 export interface ScopeDefinition {
