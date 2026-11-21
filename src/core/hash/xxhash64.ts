@@ -54,6 +54,12 @@ export class XxHash64Accumulator {
 	private s2 = SEED_LANE_2;
 	private totalBytes = 0;
 
+	reset(): void {
+		this.s1 = SEED_LANE_1;
+		this.s2 = SEED_LANE_2;
+		this.totalBytes = 0;
+	}
+
 	updateU32(val: number): void {
 		const w = val | 0;
 		this.s1 = xxh32Round(this.s1, w);
@@ -167,9 +173,17 @@ export class XxHash64Accumulator {
 		this.updateString(typeof val);
 	}
 
+	digestHi(): number {
+		return xxh32Avalanche((this.s1 + this.totalBytes) | 0);
+	}
+
+	digestLo(): number {
+		return xxh32Avalanche((this.s2 + this.totalBytes) | 0);
+	}
+
 	digest(): Digest64 {
-		const hi = xxh32Avalanche((this.s1 + this.totalBytes) | 0);
-		const lo = xxh32Avalanche((this.s2 + this.totalBytes) | 0);
+		const hi = this.digestHi();
+		const lo = this.digestLo();
 		return { hi, lo, hex: formatHex64(hi, lo) };
 	}
 }

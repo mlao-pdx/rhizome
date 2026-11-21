@@ -1,5 +1,6 @@
 import { parseTemporalExpr } from './temporal';
 import {
+	type DateParseResult,
 	INTERNAL_RHIZOME_PROPERTY_KEY,
 	isVirtualFileKey,
 	type ObsidianPropertyType,
@@ -8,6 +9,53 @@ import {
 	type SanitizedScalar,
 	type TypedPropertyValue,
 } from './types';
+
+const MAX_STORED_TEMPORAL_ZONES = 16;
+const MAX_STORED_TEMPORAL_ENTRIES = 4_096;
+const MAX_CACHED_TEMPORAL_STRING_LEN = 128;
+
+const storedTemporalCacheByZone = new Map<string, Map<string, DateParseResult>>();
+
+function parseStoredTemporalCached(val: string, timeZone: string): DateParseResult {
+	if (val.length > MAX_CACHED_TEMPORAL_STRING_LEN) {
+		return parseTemporalExpr(val, {
+			allowYearOnly: true,
+			allowRelative: false,
+			timeZone,
+		});
+	}
+	let zoneMap = storedTemporalCacheByZone.get(timeZone);
+	if (zoneMap !== undefined) {
+		const hit = zoneMap.get(val);
+		if (hit !== undefined) {
+			return hit;
+		}
+	} else {
+		if (storedTemporalCacheByZone.size >= MAX_STORED_TEMPORAL_ZONES) {
+			const oldestZone = storedTemporalCacheByZone.keys().next().value;
+			if (oldestZone !== undefined) {
+				storedTemporalCacheByZone.delete(oldestZone);
+			}
+		}
+		zoneMap = new Map<string, DateParseResult>();
+		storedTemporalCacheByZone.set(timeZone, zoneMap);
+	}
+	const parsed = Object.freeze(
+		parseTemporalExpr(val, {
+			allowYearOnly: true,
+			allowRelative: false,
+			timeZone,
+		}),
+	);
+	if (zoneMap.size >= MAX_STORED_TEMPORAL_ENTRIES) {
+		const oldestKey = zoneMap.keys().next().value;
+		if (oldestKey !== undefined) {
+			zoneMap.delete(oldestKey);
+		}
+	}
+	zoneMap.set(val, parsed);
+	return parsed;
+}
 
 export const FORBIDDEN_KEYS: ReadonlySet<string> = new Set([
 	'__proto__',
@@ -159,21 +207,13 @@ export function coercePropertyValue(
 					);
 				}
 				const iso = val.toISOString();
-				const res = parseTemporalExpr(iso, {
-					allowYearOnly: true,
-					allowRelative: false,
-					timeZone,
-				});
+				const res = parseStoredTemporalCached(iso, timeZone);
 				return res.ok
 					? { kind: propType, interval: res.interval, raw: iso }
 					: invalidValue(iso, propType, 'Use ISO-8601 format (YYYY-MM-DD).');
 			}
 			if (typeof val === 'string') {
-				const res = parseTemporalExpr(val, {
-					allowYearOnly: true,
-					allowRelative: false,
-					timeZone,
-				});
+				const res = parseStoredTemporalCached(val, timeZone);
 				if (res.ok) {
 					return { kind: propType, interval: res.interval, raw: val };
 				}

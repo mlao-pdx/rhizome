@@ -16,6 +16,7 @@ import {
 import { HOST_QUERY_KEY } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import type { BacklinkIndex } from './backlink-index';
+import { createMemoizedLinkResolver } from './link-resolver-memo';
 import { markSensitive } from './logger-format';
 import type { NormalizedDocumentCache } from './normalized-document-cache';
 import { logQueryCompilation } from './vault-query-logging';
@@ -299,6 +300,8 @@ export class ActiveQueryRoster {
 	private rerunPending = false;
 	private rerunOnlyIfChanged = true;
 	private renamePending = false;
+	private refreshScheduled = false;
+	private dirtySinceLastCompletedPass = false;
 	private vaultRevision = 0;
 	private resetRevision = 0;
 
@@ -342,6 +345,22 @@ export class ActiveQueryRoster {
 	 */
 	markVaultDirty(): void {
 		this.vaultRevision++;
+	}
+
+	/**
+	 * Marks that a debounced refresh timer has been scheduled so an in-flight time-sliced
+	 * nudge pass can supersede early and hand off to the trailing pass.
+	 */
+	notifyRefreshScheduled(): void {
+		this.vaultRevision++;
+		this.refreshScheduled = true;
+	}
+
+	/**
+	 * Clears the external refresh-timer flag once the scheduled timer fires or is cancelled.
+	 */
+	clearRefreshScheduled(): void {
+		this.refreshScheduled = false;
 	}
 
 	/**
@@ -415,6 +434,8 @@ export class ActiveQueryRoster {
 		const snapshot = [...this.subscriptions.values()];
 		this.subscriptions.clear();
 		this.rerunPending = false;
+		this.dirtySinceLastCompletedPass = false;
+		this.renamePending = false;
 
 		for (const sub of snapshot) {
 			sub.signal?.removeEventListener('abort', sub.onAbort);
@@ -442,6 +463,7 @@ export class ActiveQueryRoster {
 	 */
 	nudge(referenceTimeMs: number = Date.now(), options?: NudgeOptions): Promise<void> {
 		this.vaultRevision++;
+		this.refreshScheduled = false;
 		if (this.subscriptions.size === 0) {
 			return Promise.resolve();
 		}
@@ -482,6 +504,8 @@ export class ActiveQueryRoster {
 		this.rerunPending = false;
 		this.rerunOnlyIfChanged = true;
 		this.renamePending = false;
+		this.refreshScheduled = false;
+		this.dirtySinceLastCompletedPass = false;
 	}
 
 	/**
@@ -521,8 +545,10 @@ export class ActiveQueryRoster {
 		if (this.subscriptions.size === 0) {
 			return;
 		}
-		const hadPendingRename = this.renamePending;
-		this.renamePending = false;
+		const startResetRev = this.resetRevision;
+		if (this.renamePending) {
+			this.dirtySinceLastCompletedPass = true;
+		}
 
 		const groups = new Map<
 			string,
@@ -559,18 +585,49 @@ export class ActiveQueryRoster {
 		}
 
 		if (groups.size === 0) {
+			this.dirtySinceLastCompletedPass = false;
+			this.renamePending = false;
 			return;
 		}
 
 		const backlinkStartedAt = Date.now();
+		const prevProjectionRev = this.backlinkIndex?.projectionRevision ?? 0;
 		const backlinksChanged =
 			typeof this.backlinkIndex?.reconcile === 'function'
 				? this.backlinkIndex.reconcile()
 				: false;
+		const nextProjectionRev = this.backlinkIndex?.projectionRevision ?? 0;
+		const backlinkProjectionChanged =
+			backlinksChanged || nextProjectionRev !== prevProjectionRev;
+		if (backlinkProjectionChanged) {
+			this.dirtySinceLastCompletedPass = true;
+		}
 		const backlinks = this.backlinkIndex?.snapshot();
 		const backlinkReconcileMs = Math.max(0, Date.now() - backlinkStartedAt);
 
+		const isPassSuperseded = (): boolean =>
+			this.rerunPending ||
+			this.refreshScheduled ||
+			this.resetRevision !== startResetRev ||
+			this.subscriptions.size === 0;
+
 		for (const group of groups.values()) {
+			const isGroupCancelled = (): boolean =>
+				group.subs.every(
+					(s) => s.signal?.aborted === true || !this.subscriptions.has(s.id),
+				);
+			const shouldSupersede = (): boolean => isPassSuperseded() || isGroupCancelled();
+
+			if (isPassSuperseded()) {
+				if (!onlyIfChanged) {
+					this.rerunOnlyIfChanged = false;
+				}
+				return;
+			}
+			if (isGroupCancelled()) {
+				continue;
+			}
+
 			const uniqueSourcePaths = new Set<string>();
 			for (const sub of group.subs) {
 				if (sub.sourcePath === undefined) {
@@ -584,9 +641,8 @@ export class ActiveQueryRoster {
 				}
 			}
 
-			const resolveLinkPath = (rawTarget: string, linkSourcePath: string) =>
-				this.app.metadataCache.getFirstLinkpathDest?.(rawTarget, linkSourcePath)?.path ??
-				null;
+			const linkMemo = createMemoizedLinkResolver(this.app);
+			const resolveLinkPath = linkMemo.resolveLinkPath;
 
 			let engineConfig: ResolvedEngineConfig | null = null;
 			if (this.documentCache !== undefined || uniqueSourcePaths.size > 0) {
@@ -596,19 +652,46 @@ export class ActiveQueryRoster {
 					group.propertyTypes,
 					this.logger,
 				);
+				linkMemo.clear();
+				if (isPassSuperseded()) {
+					if (!onlyIfChanged) {
+						this.rerunOnlyIfChanged = false;
+					}
+					return;
+				}
+				if (isGroupCancelled()) {
+					continue;
+				}
 			}
 
 			const docReconcileStartedAt = Date.now();
 			const docReconciled =
 				this.documentCache !== undefined && engineConfig !== null
-					? this.documentCache.reconcile(
+					? await this.documentCache.reconcileAsync(
 							this.app.vault.getMarkdownFiles(),
 							engineConfig,
 							resolveLinkPath,
+							{
+								shouldSupersede,
+								onYield: linkMemo.clear,
+							},
 						)
 					: undefined;
 			const docReconcileMs = Math.max(0, Date.now() - docReconcileStartedAt);
 			const reconcileDurationMs = backlinkReconcileMs + docReconcileMs;
+
+			if (docReconciled?.changed) {
+				this.dirtySinceLastCompletedPass = true;
+			}
+			if (isPassSuperseded()) {
+				if (!onlyIfChanged) {
+					this.rerunOnlyIfChanged = false;
+				}
+				return;
+			}
+			if (docReconciled?.superseded || isGroupCancelled()) {
+				continue;
+			}
 
 			const hostDocsByPath = new Map<string, NormalizedDocument | null>();
 			if (uniqueSourcePaths.size > 0 && engineConfig !== null) {
@@ -632,8 +715,9 @@ export class ActiveQueryRoster {
 				this.documentCache !== undefined &&
 				docReconciled !== undefined &&
 				!docReconciled.changed &&
-				!backlinksChanged &&
-				!hadPendingRename
+				!backlinkProjectionChanged &&
+				!this.dirtySinceLastCompletedPass &&
+				!this.renamePending
 			) {
 				for (const sub of group.subs) {
 					if (sub.signal?.aborted || !this.subscriptions.has(sub.id)) {
@@ -957,5 +1041,8 @@ export class ActiveQueryRoster {
 				}
 			}
 		}
+
+		this.dirtySinceLastCompletedPass = false;
+		this.renamePending = false;
 	}
 }

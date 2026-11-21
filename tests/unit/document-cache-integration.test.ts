@@ -121,9 +121,9 @@ describe('document cache integration', () => {
 		roster.register(queries, options, initial, () => {});
 		calls.length = 0;
 
-		const origReconcile = cache.reconcile.bind(cache);
-		vi.spyOn(cache, 'reconcile').mockImplementation((files, cfg, resolver) => {
-			const res = origReconcile(files, cfg, resolver);
+		const origReconcileAsync = cache.reconcileAsync.bind(cache);
+		vi.spyOn(cache, 'reconcileAsync').mockImplementation(async (files, cfg, resolver, opts) => {
+			const res = await origReconcileAsync(files, cfg, resolver, opts);
 			const end = Date.now() + 12;
 			while (Date.now() < end) {
 				// busy-wait to create measurable pre-pass reconciliation time

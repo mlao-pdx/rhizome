@@ -1,9 +1,25 @@
+import { expect } from 'vitest';
 import {
 	initEngineConfig,
 	normalizeObsidianMetadata,
 	type NormalizedDocument,
 	type ResolvedEngineConfig,
 } from '../../src/core/search';
+
+export function expectDeepFrozen(value: unknown, seen = new Set<object>()): void {
+	if (value === null || typeof value !== 'object') return;
+	const container = value;
+	if (seen.has(container)) return;
+	seen.add(container);
+	expect(Object.isFrozen(container)).toBe(true);
+	if (Array.isArray(value)) {
+		for (const item of value) expectDeepFrozen(item, seen);
+		return;
+	}
+	for (const entry of Object.values(value as Record<string, unknown>)) {
+		expectDeepFrozen(entry, seen);
+	}
+}
 
 export interface DocFileSpec {
 	path?: string;

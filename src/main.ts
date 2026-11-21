@@ -129,12 +129,13 @@ export default class RhizomePlugin extends Plugin {
 		let resetTimer: number | null = null;
 
 		const runRefresh = (): void => {
+			this.activeQueryRoster.clearRefreshScheduled();
 			if (this.activeQueryRoster.size > 0) {
 				void this.activeQueryRoster.nudge(Date.now(), { onlyIfChanged: true });
 			}
 		};
 		const scheduleRefresh = (): void => {
-			this.activeQueryRoster.markVaultDirty();
+			this.activeQueryRoster.notifyRefreshScheduled();
 			if (refreshTimer !== null) {
 				window.clearTimeout(refreshTimer);
 			}
@@ -281,6 +282,7 @@ export default class RhizomePlugin extends Plugin {
 						!this.backlinkIndex.hasSource(file.path);
 					this.activeQueryRoster.handleFileRename(oldPath, file.path, !untrackedIgnored);
 					if (!untrackedIgnored) {
+						this.backlinkIndex.notifyRename();
 						scheduleRefresh();
 					}
 				}

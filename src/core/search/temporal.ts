@@ -9,6 +9,83 @@ const RELATIVE_COARSE_RE = /^@(last|this|next)(week|month|quarter|year)$/i;
 
 export const MAX_SAFE_EPOCH_MS = 8_640_000_000_000_000;
 const MAX_DAY_OFFSET = 36_525;
+const MAX_4DIGIT_YEAR_EPOCH_MS = 253_402_300_799_999; // 9999-12-31T23:59:59.999Z
+const MIN_MODERN_INTL_EPOCH_MS = 94_694_400_000; // 1973-01-01T00:00:00.000Z (after sub-minute LMT offsets ended)
+const MAX_MODERN_INTL_EPOCH_MS = 4_102_444_800_000; // 2100-01-01T00:00:00.000Z
+const MAX_CACHED_ZONES = 32;
+const MAX_MINUTE_BUCKETS_PER_ZONE = 4_096;
+
+const PAD2: readonly string[] = Array.from({ length: 60 }, (_, i) => String(i).padStart(2, '0'));
+
+interface ZoneMinuteFormatterEntry {
+	readonly dtf: Intl.DateTimeFormat | null;
+	readonly buckets: Map<number, string>;
+}
+
+const minuteFormatZoneCache = new Map<string, ZoneMinuteFormatterEntry>();
+
+function getZoneMinuteFormatter(timeZone: string): ZoneMinuteFormatterEntry | null {
+	const existing = minuteFormatZoneCache.get(timeZone);
+	if (existing !== undefined) {
+		return existing;
+	}
+	try {
+		// Validate once against Temporal so invalid timeZone identifiers still throw identically.
+		Temporal.Instant.fromEpochMilliseconds(0).toZonedDateTimeISO(timeZone);
+	} catch {
+		return null;
+	}
+	let dtf: Intl.DateTimeFormat | null = null;
+	try {
+		dtf = new Intl.DateTimeFormat('en-US', {
+			timeZone,
+			calendar: 'iso8601',
+			year: 'numeric',
+			month: '2-digit',
+			day: '2-digit',
+			hour: '2-digit',
+			minute: '2-digit',
+			hourCycle: 'h23',
+		});
+	} catch {
+		dtf = null;
+	}
+	if (minuteFormatZoneCache.size >= MAX_CACHED_ZONES) {
+		const oldestZone = minuteFormatZoneCache.keys().next().value;
+		if (oldestZone !== undefined) {
+			minuteFormatZoneCache.delete(oldestZone);
+		}
+	}
+	const created: ZoneMinuteFormatterEntry = { dtf, buckets: new Map<number, string>() };
+	minuteFormatZoneCache.set(timeZone, created);
+	return created;
+}
+
+function formatUtcEpochMsToMinuteIsoFast(epochMs: number): string {
+	const totalMinutes = Math.floor(epochMs / 60_000);
+	const minuteOfDay = totalMinutes % 1_440;
+	const hour = Math.floor(minuteOfDay / 60);
+	const minute = minuteOfDay % 60;
+	const days = Math.floor(totalMinutes / 1_440);
+
+	// Howard Hinnant's civil-from-days algorithm for proleptic Gregorian calendar
+	const z = days + 719_468;
+	const era = Math.floor(z / 146_097);
+	const doe = z - era * 146_097;
+	const yoe = Math.floor(
+		(doe - Math.floor(doe / 1_460) + Math.floor(doe / 36_524) - Math.floor(doe / 146_096)) /
+			365,
+	);
+	const y = yoe + era * 400;
+	const doy = doe - (365 * yoe + Math.floor(yoe / 4) - Math.floor(yoe / 100));
+	const mp = Math.floor((5 * doy + 2) / 153);
+	const day = doy - Math.floor((153 * mp + 2) / 5) + 1;
+	const month = mp < 10 ? mp + 3 : mp - 9;
+	const year = y + (month <= 2 ? 1 : 0);
+
+	const yyyy = year >= 1_000 ? String(year) : String(year).padStart(4, '0');
+	return `${yyyy}-${PAD2[month]!}-${PAD2[day]!}T${PAD2[hour]!}:${PAD2[minute]!}`;
+}
 
 export interface TemporalParseOptions {
 	readonly allowYearOnly: boolean;
@@ -59,6 +136,9 @@ export function wallClockToUtcMs(
 	ms: number,
 	timeZone: string,
 ): number {
+	if (timeZone === 'UTC' && year >= 100 && year <= 9_999) {
+		return Date.UTC(year, month - 1, day, hour, minute, second, ms);
+	}
 	const pdt = new Temporal.PlainDateTime(year, month, day, hour, minute, second, ms);
 	const zdt = pdt.toZonedDateTime(timeZone, { disambiguation: 'compatible' });
 	return zdt.epochMilliseconds;
@@ -69,6 +149,58 @@ export function wallClockToUtcMs(
  * (`YYYY-MM-DDTHH:mm`) in `timeZone`.
  */
 export function formatEpochMsToMinuteIso(epochMs: number, timeZone: string): string {
+	if (Number.isSafeInteger(epochMs)) {
+		if (timeZone === 'UTC' && epochMs >= 0 && epochMs <= MAX_4DIGIT_YEAR_EPOCH_MS) {
+			return formatUtcEpochMsToMinuteIsoFast(epochMs);
+		}
+		if (epochMs >= MIN_MODERN_INTL_EPOCH_MS && epochMs <= MAX_MODERN_INTL_EPOCH_MS) {
+			const zoneEntry = getZoneMinuteFormatter(timeZone);
+			if (zoneEntry?.dtf) {
+				const minuteBucket = Math.floor(epochMs / 60_000);
+				const cached = zoneEntry.buckets.get(minuteBucket);
+				if (cached !== undefined) {
+					return cached;
+				}
+				const parts = zoneEntry.dtf.formatToParts(minuteBucket * 60_000);
+				let year = '';
+				let month = '';
+				let day = '';
+				let hour = '';
+				let minute = '';
+				for (const part of parts) {
+					switch (part.type) {
+						case 'year':
+							year = part.value;
+							break;
+						case 'month':
+							month = part.value;
+							break;
+						case 'day':
+							day = part.value;
+							break;
+						case 'hour':
+							hour = part.value;
+							break;
+						case 'minute':
+							minute = part.value;
+							break;
+					}
+				}
+				if (year && month && day && hour && minute) {
+					const hh = hour === '24' ? '00' : hour;
+					const formatted = `${year.padStart(4, '0')}-${month}-${day}T${hh}:${minute}`;
+					if (zoneEntry.buckets.size >= MAX_MINUTE_BUCKETS_PER_ZONE) {
+						const oldest = zoneEntry.buckets.keys().next().value;
+						if (oldest !== undefined) {
+							zoneEntry.buckets.delete(oldest);
+						}
+					}
+					zoneEntry.buckets.set(minuteBucket, formatted);
+					return formatted;
+				}
+			}
+		}
+	}
 	const zdt = Temporal.Instant.fromEpochMilliseconds(epochMs).toZonedDateTimeISO(timeZone);
 	const yyyy =
 		zdt.year < 0

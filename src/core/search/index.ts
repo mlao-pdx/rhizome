@@ -5,6 +5,7 @@ export * from './temporal';
 export * from './property-coercion';
 export * from './host-reference';
 export * from './metadata-normalizer';
+export * from './document-rebinder';
 export * from './tokens';
 export * from './literals';
 export * from './graph-dag';

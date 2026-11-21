@@ -478,4 +478,219 @@ describe('BodyScanCache & BodyScanIdbStore', () => {
 		expect(recAfterIgnore.changed).toBe(true);
 		expect(docCache.get('notes/work.md')).toBeUndefined();
 	});
+
+	it('preserves tasks, inlineProperties, and bodyRev across single, chained, and swap renames in memory and IndexedDB with zero cachedRead calls', async () => {
+		const fakeIdb = createFakeIdbFactory();
+		const dbName = 'rhizome-rename';
+		const now = 1_700_000_000_000;
+
+		const notes: MockVaultNote[] = [
+			{
+				path: 'inbox/alpha.md',
+				mtime: now - 1000,
+				size: 48,
+				content: '[owner:: alice]\n- [ ] Ship alpha 📅 2026-11-01',
+				cache: {},
+			},
+			{
+				path: 'inbox/beta.md',
+				mtime: now - 500,
+				size: 46,
+				content: '[owner:: bob]\n- [x] Review beta ✅ 2026-11-02',
+				cache: {},
+			},
+		];
+
+		let cachedReadCalls = 0;
+		const app = {
+			vault: {
+				getMarkdownFiles: () => notes.map(makeTFile),
+				cachedRead: async (file: { path: string }) => {
+					cachedReadCalls++;
+					return notes.find((n) => n.path === file.path)?.content ?? '';
+				},
+			},
+			metadataCache: {
+				getFileCache: (file: { path: string }) =>
+					notes.find((n) => n.path === file.path)?.cache ?? null,
+			},
+		} as unknown as App;
+
+		const idb = new BodyScanIdbStore(dbName, fakeIdb as unknown as IDBFactory, 1);
+		const bodyCache = new BodyScanCache(app, undefined, idb, () => now);
+
+		await bodyCache.reconcileVaultBodies();
+		expect(cachedReadCalls).toBe(2);
+		const alphaRev = bodyCache.getBodyRevision('inbox/alpha.md');
+		const betaRev = bodyCache.getBodyRevision('inbox/beta.md');
+
+		// 1. Chained rename: inbox/alpha.md -> stage/alpha.md -> archive/alpha.md
+		notes[0]!.path = 'stage/alpha.md';
+		expect(bodyCache.rename('inbox/alpha.md', 'stage/alpha.md')).toBe(true);
+		notes[0]!.path = 'archive/alpha.md';
+		expect(bodyCache.rename('stage/alpha.md', 'archive/alpha.md')).toBe(true);
+
+		expect(bodyCache.getEntry('inbox/alpha.md')).toBeUndefined();
+		expect(bodyCache.getEntry('stage/alpha.md')).toBeUndefined();
+		expect(bodyCache.getEntry('archive/alpha.md')?.path).toBe('archive/alpha.md');
+		expect(bodyCache.getBodyRevision('archive/alpha.md')).toBe(alphaRev);
+		expect(bodyCache.getInlineProperties('archive/alpha.md')[0]?.value).toBe('alice');
+		expect(bodyCache.getTasks('archive/alpha.md')[0]?.due).toBe('2026-11-01');
+
+		// 2. Swap rename before IDB flush: archive/alpha.md <-> inbox/beta.md via tmp.md
+		expect(bodyCache.rename('archive/alpha.md', 'tmp.md')).toBe(true);
+		expect(bodyCache.rename('inbox/beta.md', 'archive/alpha.md')).toBe(true);
+		expect(bodyCache.rename('tmp.md', 'inbox/beta.md')).toBe(true);
+		notes[0]!.path = 'inbox/beta.md';
+		notes[1]!.path = 'archive/alpha.md';
+
+		expect(bodyCache.getInlineProperties('inbox/beta.md')[0]?.value).toBe('alice');
+		expect(bodyCache.getBodyRevision('inbox/beta.md')).toBe(alphaRev);
+		expect(bodyCache.getInlineProperties('archive/alpha.md')[0]?.value).toBe('bob');
+		expect(bodyCache.getBodyRevision('archive/alpha.md')).toBe(betaRev);
+
+		// Flush to IndexedDB and verify exact persisted paths & zero disk reads on reconcile
+		await bodyCache.flushToIndexedDB();
+		const persisted = await idb.getAll();
+		expect(persisted.map((r) => r.path).sort()).toEqual(['archive/alpha.md', 'inbox/beta.md']);
+		expect(persisted.find((r) => r.path === 'inbox/beta.md')?.inlineProperties[0]?.value).toBe(
+			'alice',
+		);
+		expect(
+			persisted.find((r) => r.path === 'archive/alpha.md')?.inlineProperties[0]?.value,
+		).toBe('bob');
+
+		const passAfterMove = await bodyCache.reconcileVaultBodies();
+		expect(passAfterMove).toMatchObject({ scanned: 0, hits: 2, evicted: 0, changed: 0 });
+		expect(cachedReadCalls).toBe(2);
+	});
+
+	it('bumps bodyRev when rename overwrites an existing target with a distinct bodyDigest', () => {
+		const now = 1_700_000_000_000;
+		const app = {
+			vault: { getMarkdownFiles: () => [], cachedRead: async () => '' },
+			metadataCache: { getFileCache: () => ({}) },
+		} as unknown as App;
+		const bodyCache = new BodyScanCache(
+			app,
+			undefined,
+			new BodyScanIdbStore('rhizome-overwrite', null),
+			() => now,
+		);
+
+		bodyCache.ingestFromText(
+			{ path: 'a.md', stat: { ctime: now, mtime: now - 100, size: 20 } },
+			'[phase:: alpha]',
+		);
+		bodyCache.ingestFromText(
+			{ path: 'b.md', stat: { ctime: now, mtime: now - 50, size: 20 } },
+			'[phase:: beta]',
+		);
+		const revA = bodyCache.getBodyRevision('a.md');
+		const revB = bodyCache.getBodyRevision('b.md');
+
+		const docCache = new NormalizedDocumentCache(app, undefined, bodyCache);
+		const cfgRes = initEngineConfig({ timeZone: 'UTC', propertyTypes: {} });
+		if (!cfgRes.ok) throw new Error('Expected valid config');
+
+		const fileB = makeTFile({ path: 'b.md', mtime: now - 50, size: 20, content: '' });
+		docCache.reconcile([fileB], cfgRes.config, () => null);
+		expect(docCache.get('b.md')?.properties['phase']).toBe('beta');
+
+		// Overwrite b.md with a.md
+		expect(bodyCache.rename('a.md', 'b.md')).toBe(true);
+		const newRevB = bodyCache.getBodyRevision('b.md');
+		expect(newRevB).toBeGreaterThan(Math.max(revA, revB));
+		expect(bodyCache.getInlineProperties('b.md')[0]?.value).toBe('alpha');
+
+		// NormalizedDocumentCache sees the bumped bodyRev and refreshes b.md's properties
+		const fileBAfter = makeTFile({ path: 'b.md', mtime: now - 100, size: 20, content: '' });
+		const rec = docCache.reconcile([fileBAfter], cfgRes.config, () => null);
+		expect(rec.changed).toBe(true);
+		expect(docCache.get('b.md')?.properties['phase']).toBe('alpha');
+	});
+
+	it('remaps pre-hydration renames and skips pre-hydration deletes when hydrateFromIndexedDB is in flight', async () => {
+		const fakeIdb = createFakeIdbFactory();
+		const dbName = 'rhizome-prehydrate-rename';
+		const now = 1_700_000_000_000;
+
+		const seedStore = new BodyScanIdbStore(dbName, fakeIdb as unknown as IDBFactory, 1);
+		await seedStore.flushBatch(
+			[
+				{
+					path: 'old/one.md',
+					mtime: now - 2000,
+					size: 30,
+					bodyDigest: 'digest-one',
+					inlineProperties: [{ key: 'tag', value: 'one', source: 'dataview', line: 1 }],
+					tasks: [],
+				},
+				{
+					path: 'old/two.md',
+					mtime: now - 2000,
+					size: 30,
+					bodyDigest: 'digest-two',
+					inlineProperties: [{ key: 'tag', value: 'two', source: 'dataview', line: 1 }],
+					tasks: [],
+				},
+				{
+					path: 'old/deleted.md',
+					mtime: now - 2000,
+					size: 30,
+					bodyDigest: 'digest-del',
+					inlineProperties: [{ key: 'tag', value: 'del', source: 'dataview', line: 1 }],
+					tasks: [],
+				},
+			],
+			[],
+		);
+
+		const notes: MockVaultNote[] = [
+			{ path: 'moved/final-one.md', mtime: now - 2000, size: 30, content: '' },
+			{ path: 'old/one.md', mtime: now - 2000, size: 30, content: '' },
+		];
+		let cachedReadCalls = 0;
+		const app = {
+			vault: {
+				getMarkdownFiles: () => notes.map(makeTFile),
+				cachedRead: async () => {
+					cachedReadCalls++;
+					return '';
+				},
+			},
+			metadataCache: {
+				getFileCache: () => ({}),
+			},
+		} as unknown as App;
+
+		const liveStore = new BodyScanIdbStore(dbName, fakeIdb as unknown as IDBFactory, 1);
+		const bodyCache = new BodyScanCache(app, undefined, liveStore, () => now);
+
+		// Kick off hydration, then emit renames and deletes BEFORE microtasks resolve IDB open/getAll
+		const hydratePromise = bodyCache.hydrateFromIndexedDB();
+		bodyCache.rename('old/one.md', 'mid/one.md');
+		bodyCache.rename('mid/one.md', 'moved/final-one.md');
+		bodyCache.rename('old/two.md', 'old/one.md');
+		bodyCache.delete('old/deleted.md');
+
+		const hydrated = await hydratePromise;
+		expect(hydrated).toBe(2);
+
+		expect(bodyCache.getInlineProperties('moved/final-one.md')[0]?.value).toBe('one');
+		expect(bodyCache.getInlineProperties('old/one.md')[0]?.value).toBe('two');
+		expect(bodyCache.getEntry('old/two.md')).toBeUndefined();
+		expect(bodyCache.getEntry('old/deleted.md')).toBeUndefined();
+
+		await bodyCache.flushToIndexedDB();
+		const persistedAfter = await liveStore.getAll();
+		expect(persistedAfter.map((r) => r.path).sort()).toEqual([
+			'moved/final-one.md',
+			'old/one.md',
+		]);
+
+		const rec = await bodyCache.reconcileVaultBodies();
+		expect(rec).toMatchObject({ scanned: 0, hits: 2, evicted: 0, changed: 0 });
+		expect(cachedReadCalls).toBe(0);
+	});
 });

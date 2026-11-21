@@ -1,31 +1,21 @@
 import { type App, type TFile } from 'obsidian';
-import {
-	buildTargetSources,
-	normalizeResolvedLinks,
-	recordsEqual,
-	type TargetSources,
-} from '@core/backlinks/backlink-delta';
 import { deepFreeze } from '@core/cache/deep-freeze';
 import type { BacklinkRef, NormalizedDocument } from '@core/search';
 import type { LoggerPort } from '@ports/logger-port';
+import {
+	type BacklinkAppliedState,
+	type BacklinkSnapshot,
+	buildInitialBacklinkSnapshot,
+	clearBacklinkState,
+	createEmptyBacklinkState,
+	hasBacklinkSource,
+	hasBacklinkSourceChanged,
+	isBacklinkGraphUnchanged,
+	isLiveTFile,
+	reconcileBacklinkSnapshot,
+} from './backlink-reconcile';
 
-/**
- * Inverse of `MetadataCache.resolvedLinks`: target note → linking source → link count.
- * Keys use `TFile` identity so renames (which mutate `TFile.path` in place) do not
- * require a rebuild.
- */
-export type BacklinkSnapshot = ReadonlyMap<TFile, ReadonlyMap<TFile, number>>;
-
-function isMarkdownPath(path: string): boolean {
-	return path.toLowerCase().endsWith('.md');
-}
-
-/**
- * Centralizes the undocumented runtime `deleted` flag on `TFile`.
- */
-export function isLiveTFile(file: TFile): boolean {
-	return (file as { deleted?: boolean }).deleted !== true;
-}
+export { type BacklinkSnapshot, isLiveTFile };
 
 function compareBacklinkRefs(a: BacklinkRef, b: BacklinkRef): number {
 	if (a.count !== b.count) {
@@ -169,74 +159,13 @@ export function copyWithBacklinks(
 	return copy;
 }
 
-function snapshotsEqual(a: BacklinkSnapshot, b: BacklinkSnapshot): boolean {
-	if (a.size !== b.size) {
-		return false;
-	}
-	for (const [target, sourcesA] of a) {
-		const sourcesB = b.get(target);
-		if (!sourcesB || sourcesB.size !== sourcesA.size) {
-			return false;
-		}
-		for (const [source, count] of sourcesA) {
-			if (sourcesB.get(source) !== count) {
-				return false;
-			}
-		}
-	}
-	return true;
-}
-
-function rawDestEqualsNormalized(
-	raw: unknown,
-	normalized: Readonly<Record<string, number>> | undefined,
-): boolean {
-	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-		return normalized === undefined;
-	}
-	const rawRecord = raw as Record<string, unknown>;
-	let rawFiniteCount = 0;
-	for (const target in rawRecord) {
-		if (!Object.prototype.hasOwnProperty.call(rawRecord, target)) {
-			continue;
-		}
-		const count = rawRecord[target];
-		if (typeof count !== 'number' || !Number.isFinite(count)) {
-			continue;
-		}
-		rawFiniteCount++;
-		if (normalized === undefined || normalized[target] !== count) {
-			return false;
-		}
-	}
-	if (normalized === undefined) {
-		return rawFiniteCount === 0;
-	}
-	let normCount = 0;
-	for (const target in normalized) {
-		if (normalized[target] !== undefined) {
-			normCount++;
-		}
-	}
-	return rawFiniteCount === normCount;
-}
-
-interface LiveVaultFiles {
-	readonly liveByPath: Map<string, TFile>;
-	readonly markdownTargets: Set<string>;
-	readonly ignoredPaths: Set<string>;
-}
-
 /**
  * Lazy, atomic in-memory inverse index over `MetadataCache.resolvedLinks`.
  *
  * @remarks
- * (design, 2026-11-18) The published snapshot is never mutated: `reconcile()` compares live
- * non-ignored sources and Markdown targets against the last applied state, exits in O(sources +
- * targets) without allocating when nothing changed, and otherwise builds a fresh snapshot and
- * swaps it in only when structurally different. Non-Markdown sources such as `.canvas` are
- * retained; only Markdown targets and ignored Markdown notes (`DO_NOT_INDEX_OR_QUERY`) are
- * filtered.
+ * (design, 2026-11-18; updated 2026-11-20) Diffs edges by `TFile` identity rather than path
+ * strings so pure vault moves/renames update path tables without reconstructing `BacklinkSnapshot`
+ * while incrementing `projectionRevision` for consumers that read projected `.path` strings.
  */
 export class BacklinkIndex {
 	private readonly app: App;
@@ -244,10 +173,8 @@ export class BacklinkIndex {
 	private readonly logger: LoggerPort | undefined;
 	private current: BacklinkSnapshot | null = null;
 	private currentRevision = 0;
-	private appliedLiveByPath = new Map<string, TFile>();
-	private appliedSources = new Map<string, Record<string, number>>();
-	private appliedTargets = new Set<string>();
-	private appliedIgnoredPaths = new Set<string>();
+	private currentProjectionRevision = 0;
+	private state: BacklinkAppliedState = createEmptyBacklinkState();
 
 	constructor(app: App, isIgnored: (file: TFile) => boolean, logger?: LoggerPort) {
 		this.app = app;
@@ -260,36 +187,57 @@ export class BacklinkIndex {
 		return this.current !== null;
 	}
 
-	/** Increments only when a build/reconcile produces a structurally different snapshot. */
+	/** Increments only when a build/reconcile produces a structurally different `TFile` snapshot. */
 	get revision(): number {
 		return this.currentRevision;
 	}
 
+	/**
+	 * Increments whenever `revision` increments or any tracked `TFile.path` changed across a
+	 * rename/move, invalidating downstream caches that depend on projected path strings.
+	 */
+	get projectionRevision(): number {
+		return this.currentProjectionRevision;
+	}
+
+	/**
+	 * Marks projected backlink path strings as potentially changed after a live `vault.on('rename')`
+	 * event even before the next full `reconcile()` runs.
+	 */
+	notifyRename(): void {
+		if (this.current !== null) {
+			this.currentProjectionRevision++;
+		}
+	}
+
 	/** Whether `sourcePath` is currently tracked as a backlink source in the applied snapshot. */
 	hasSource(sourcePath: string): boolean {
-		return this.appliedSources.has(sourcePath);
+		return hasBacklinkSource(this.state, sourcePath);
 	}
 
 	/**
 	 * Checks in O(out-degree) whether `sourcePath`'s live `resolvedLinks` entry differs from
-	 * the record last applied to this index. Returns `true` when the index has not been built yet.
+	 * the edges last applied to this index. Returns `true` when the index has not been built yet.
 	 */
 	hasSourceChanged(sourcePath: string): boolean {
 		if (this.current === null) {
 			return true;
 		}
-		const resolvedLinks = this.readResolvedLinks();
-		return !rawDestEqualsNormalized(
-			resolvedLinks[sourcePath],
-			this.appliedSources.get(sourcePath),
-		);
+		return hasBacklinkSourceChanged(this.app, this.state, this.readResolvedLinks(), sourcePath);
 	}
 
 	/** Returns the current snapshot, building it lazily on first use. */
 	snapshot(): BacklinkSnapshot {
 		if (this.current === null) {
-			this.current = this.build();
+			const built = buildInitialBacklinkSnapshot(
+				this.readFiles(),
+				this.readResolvedLinks(),
+				this.isIgnored,
+			);
+			this.current = built.snapshot;
+			this.state = built.state;
 			this.currentRevision++;
+			this.currentProjectionRevision++;
 		}
 		return this.current;
 	}
@@ -305,115 +253,69 @@ export class BacklinkIndex {
 	/**
 	 * Reconciles the inverse backlink snapshot against live vault files and
 	 * `MetadataCache.resolvedLinks`. Builds the initial snapshot if not yet built.
-	 * Returns whether the projected snapshot changed.
+	 * Returns whether the structural `TFile` snapshot changed.
 	 */
 	reconcile(): boolean {
 		const startedAt = Date.now();
 		if (this.current === null) {
-			const initial = this.build();
-			this.current = initial;
+			const built = buildInitialBacklinkSnapshot(
+				this.readFiles(),
+				this.readResolvedLinks(),
+				this.isIgnored,
+			);
+			this.current = built.snapshot;
+			this.state = built.state;
 			this.currentRevision++;
-			const changed = initial.size > 0;
-			this.logReconcile(startedAt, this.appliedSources.size, initial.size, changed);
+			this.currentProjectionRevision++;
+			const changed = built.snapshot.size > 0;
+			this.logReconcile(
+				startedAt,
+				built.state.trackedSources.size,
+				built.snapshot.size,
+				changed,
+			);
 			return changed;
 		}
 
-		if (this.isUnchangedFastPath()) {
-			this.logReconcile(startedAt, 0, 0, false);
-			return false;
-		}
-
-		const { liveByPath, markdownTargets, ignoredPaths } = this.collectLiveFiles();
+		const files = this.readFiles();
 		const resolvedLinks = this.readResolvedLinks();
-		const nextSources = new Map<string, Record<string, number>>();
-		for (const sourcePath of Object.keys(resolvedLinks)) {
-			if (!liveByPath.has(sourcePath)) {
-				continue;
-			}
-			const destinations = normalizeResolvedLinks(resolvedLinks[sourcePath]);
-			if (destinations !== undefined) {
-				nextSources.set(sourcePath, destinations);
-			}
-		}
-
-		const affectedTargets = new Set<string>();
-		let changedSourceCount = 0;
-
-		for (const [sourcePath, oldDest] of this.appliedSources) {
-			const newDest = nextSources.get(sourcePath);
-			if (!recordsEqual(oldDest, newDest)) {
-				changedSourceCount++;
-				for (const target of Object.keys(oldDest)) {
-					affectedTargets.add(target);
-				}
-				if (newDest) {
-					for (const target of Object.keys(newDest)) {
-						affectedTargets.add(target);
-					}
-				}
-			}
-		}
-		for (const [sourcePath, newDest] of nextSources) {
-			if (!this.appliedSources.has(sourcePath)) {
-				changedSourceCount++;
-				for (const target of Object.keys(newDest)) {
-					affectedTargets.add(target);
-				}
-			}
-		}
-
-		let targetSetChanged = false;
-		for (const [target, sources] of this.current) {
-			if (liveByPath.get(target.path) !== target || !markdownTargets.has(target.path)) {
-				targetSetChanged = true;
-				affectedTargets.add(target.path);
-				continue;
-			}
-			for (const source of sources.keys()) {
-				if (liveByPath.get(source.path) !== source) {
-					targetSetChanged = true;
-					affectedTargets.add(target.path);
-					break;
-				}
-			}
-		}
-		for (const targetPath of markdownTargets) {
-			if (!this.appliedTargets.has(targetPath)) {
-				targetSetChanged = true;
-				affectedTargets.add(targetPath);
-			}
-		}
-		for (const targetPath of this.appliedTargets) {
-			if (!markdownTargets.has(targetPath)) {
-				targetSetChanged = true;
-				affectedTargets.add(targetPath);
-			}
-		}
-
-		if (changedSourceCount === 0 && !targetSetChanged) {
+		if (isBacklinkGraphUnchanged(files, resolvedLinks, this.isIgnored, this.state)) {
 			this.logReconcile(startedAt, 0, 0, false);
 			return false;
 		}
 
-		const previous = this.current;
-		const next = this.buildFromState(liveByPath, markdownTargets, ignoredPaths, nextSources);
-		if (snapshotsEqual(previous, next)) {
-			this.logReconcile(startedAt, changedSourceCount, affectedTargets.size, false);
+		const outcome = reconcileBacklinkSnapshot(
+			this.current,
+			this.state,
+			files,
+			resolvedLinks,
+			this.isIgnored,
+		);
+		this.state = outcome.state;
+		if (!outcome.structuralChanged) {
+			if (outcome.projectionChanged) {
+				this.currentProjectionRevision++;
+			}
+			this.logReconcile(
+				startedAt,
+				outcome.changedSourceCount,
+				outcome.affectedTargetCount,
+				false,
+			);
 			return false;
 		}
-		this.current = next;
+
+		this.current = outcome.snapshot;
 		this.currentRevision++;
-		this.logReconcile(startedAt, changedSourceCount, affectedTargets.size, true);
+		this.currentProjectionRevision++;
+		this.logReconcile(startedAt, outcome.changedSourceCount, outcome.affectedTargetCount, true);
 		return true;
 	}
 
 	/** Drops the snapshot so the next `snapshot()` or `reconcile()` rebuilds from scratch. */
 	dispose(): void {
 		this.current = null;
-		this.appliedLiveByPath.clear();
-		this.appliedSources.clear();
-		this.appliedTargets.clear();
-		this.appliedIgnoredPaths.clear();
+		clearBacklinkState(this.state);
 	}
 
 	/** Attaches this index's current projected backlinks to `doc`. */
@@ -437,155 +339,6 @@ export class BacklinkIndex {
 			(this.app.metadataCache as { resolvedLinks?: Record<string, Record<string, number>> })
 				.resolvedLinks ?? {}
 		);
-	}
-
-	private collectLiveFiles(): LiveVaultFiles {
-		const files = this.readFiles();
-		const liveByPath = new Map<string, TFile>();
-		const markdownTargets = new Set<string>();
-		const ignoredPaths = new Set<string>();
-
-		for (const file of files) {
-			if (!isLiveTFile(file)) {
-				continue;
-			}
-			if (isMarkdownPath(file.path)) {
-				if (this.isIgnored(file)) {
-					ignoredPaths.add(file.path);
-					continue;
-				}
-				markdownTargets.add(file.path);
-			}
-			liveByPath.set(file.path, file);
-		}
-
-		return { liveByPath, markdownTargets, ignoredPaths };
-	}
-
-	private build(): BacklinkSnapshot {
-		const { liveByPath, markdownTargets, ignoredPaths } = this.collectLiveFiles();
-		const resolvedLinks = this.readResolvedLinks();
-		const nextSources = new Map<string, Record<string, number>>();
-		for (const sourcePath of Object.keys(resolvedLinks)) {
-			if (!liveByPath.has(sourcePath)) {
-				continue;
-			}
-			const destinations = normalizeResolvedLinks(resolvedLinks[sourcePath]);
-			if (destinations !== undefined) {
-				nextSources.set(sourcePath, destinations);
-			}
-		}
-		return this.buildFromState(liveByPath, markdownTargets, ignoredPaths, nextSources);
-	}
-
-	private isUnchangedFastPath(): boolean {
-		const files = this.readFiles();
-		let liveCount = 0;
-		let markdownTargetCount = 0;
-		let ignoredCount = 0;
-
-		for (let i = 0; i < files.length; i++) {
-			const file = files[i]!;
-			if (!isLiveTFile(file)) {
-				continue;
-			}
-			const path = file.path;
-			if (isMarkdownPath(path)) {
-				if (this.isIgnored(file)) {
-					if (!this.appliedIgnoredPaths.has(path)) {
-						return false;
-					}
-					ignoredCount++;
-					continue;
-				}
-				if (!this.appliedTargets.has(path)) {
-					return false;
-				}
-				markdownTargetCount++;
-			}
-			if (this.appliedLiveByPath.get(path) !== file) {
-				return false;
-			}
-			liveCount++;
-		}
-
-		if (
-			liveCount !== this.appliedLiveByPath.size ||
-			markdownTargetCount !== this.appliedTargets.size ||
-			ignoredCount !== this.appliedIgnoredPaths.size
-		) {
-			return false;
-		}
-
-		const resolvedLinks = this.readResolvedLinks();
-		let matchedSources = 0;
-		for (const sourcePath in resolvedLinks) {
-			if (!Object.prototype.hasOwnProperty.call(resolvedLinks, sourcePath)) {
-				continue;
-			}
-			if (!this.appliedLiveByPath.has(sourcePath)) {
-				continue;
-			}
-			const raw = resolvedLinks[sourcePath];
-			const applied = this.appliedSources.get(sourcePath);
-			if (!rawDestEqualsNormalized(raw, applied)) {
-				return false;
-			}
-			if (applied !== undefined) {
-				matchedSources++;
-			}
-		}
-
-		return matchedSources === this.appliedSources.size;
-	}
-
-	private buildFromState(
-		liveByPath: Map<string, TFile>,
-		markdownTargets: Set<string>,
-		ignoredPaths: Set<string>,
-		nextSources: Map<string, Record<string, number>>,
-	): BacklinkSnapshot {
-		const filteredLinks = Object.create(null) as Record<
-			string,
-			Record<string, number> | undefined
-		>;
-		for (const [sourcePath, destinations] of nextSources) {
-			filteredLinks[sourcePath] = destinations;
-		}
-
-		const pathSources = buildTargetSources(filteredLinks, ignoredPaths);
-		for (const target of [...pathSources.keys()]) {
-			if (!markdownTargets.has(target)) {
-				pathSources.delete(target);
-			}
-		}
-
-		this.appliedLiveByPath = liveByPath;
-		this.appliedSources = nextSources;
-		this.appliedTargets = markdownTargets;
-		this.appliedIgnoredPaths = ignoredPaths;
-		return this.projectSnapshot(pathSources, liveByPath);
-	}
-
-	private projectSnapshot(
-		pathSources: TargetSources,
-		liveByPath: ReadonlyMap<string, TFile>,
-	): BacklinkSnapshot {
-		const next = new Map<TFile, Map<TFile, number>>();
-		for (const [targetPath, sources] of pathSources) {
-			const target = liveByPath.get(targetPath);
-			if (!target) continue;
-			const projected = new Map<TFile, number>();
-			for (const [sourcePath, count] of sources) {
-				const source = liveByPath.get(sourcePath);
-				if (!source || !isLiveTFile(source)) continue;
-				projected.set(source, count);
-			}
-			if (projected.size > 0) {
-				next.set(target, projected);
-			}
-		}
-		return next;
 	}
 
 	private logReconcile(

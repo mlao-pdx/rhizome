@@ -48,6 +48,17 @@ export function getInternalFileEpochMs(
 	return internalFileEpochMsMap.get(file);
 }
 
+/**
+ * Registers the internal UTC epoch-millisecond `{ ctime, mtime }` for a `NormalizedFileInfo`
+ * constructed during normalization or incremental rebinding.
+ */
+export function setInternalFileEpochMs(
+	file: NormalizedFileInfo,
+	epochs: { readonly ctime: number; readonly mtime: number },
+): void {
+	internalFileEpochMsMap.set(file, epochs);
+}
+
 export interface ObsidianLocInput {
 	readonly line: number;
 	readonly col: number;
@@ -283,6 +294,20 @@ function validateIntegerTimestampMs(val: number, fieldName: string): number {
 	return val === 0 ? 0 : val;
 }
 
+export function validateFileStat(tfile: ObsidianFileInput): {
+	readonly ctime: number;
+	readonly mtime: number;
+	readonly size: number;
+} {
+	const ctime = validateIntegerTimestampMs(tfile.stat.ctime, 'ctime');
+	const mtime = validateIntegerTimestampMs(tfile.stat.mtime, 'mtime');
+	if (!Number.isSafeInteger(tfile.stat.size) || tfile.stat.size < 0) {
+		throw new Error(`Invalid file stat size: ${tfile.stat.size}`);
+	}
+	const size = tfile.stat.size === 0 ? 0 : tfile.stat.size;
+	return { ctime, mtime, size };
+}
+
 const INLINE_WIKILINK_RE = /\[\[([^[\]\r\n]+)\]\]/g;
 
 function sanitizeLinkPropertyKey(rawKey: string): string | null {
@@ -438,11 +463,7 @@ export function normalizeObsidianMetadata(
 	resolveLinkPath?: ResolveLinkPathFn,
 	extractedTasks: readonly ExtractedTaskInput[] = [],
 ): NormalizedDocument {
-	const ctime = validateIntegerTimestampMs(tfile.stat.ctime, 'ctime');
-	const mtime = validateIntegerTimestampMs(tfile.stat.mtime, 'mtime');
-	if (!Number.isSafeInteger(tfile.stat.size) || tfile.stat.size < 0) {
-		throw new Error(`Invalid file stat size: ${tfile.stat.size}`);
-	}
+	const { ctime, mtime, size } = validateFileStat(tfile);
 
 	const { timeZone, propertyTypes, normalizationFingerprint } = resolvedConfig;
 	const propertyOccurrences: PropertyOccurrence[] = [];
@@ -888,8 +909,6 @@ export function normalizeObsidianMetadata(
 		};
 	});
 
-	const size = tfile.stat.size === 0 ? 0 : tfile.stat.size;
-
 	const file: NormalizedFileInfo = {
 		path: tfile.path,
 		name: tfile.name,
@@ -900,7 +919,7 @@ export function normalizeObsidianMetadata(
 		modified: formatEpochMsToMinuteIso(mtime, timeZone),
 		size,
 	};
-	internalFileEpochMsMap.set(file, { ctime, mtime });
+	setInternalFileEpochMs(file, { ctime, mtime });
 
 	return {
 		normalizationFingerprint,

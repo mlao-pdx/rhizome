@@ -11,12 +11,15 @@ import {
 	type NoteModel,
 	type VaultState,
 } from '../support/cache-vault';
-import { makeConfig } from '../support/cache-fixtures';
+import { expectDeepFrozen as assertFrozen, makeConfig } from '../support/cache-fixtures';
 import { BacklinkIndex } from '../../src/adapters/backlink-index';
+import { BodyScanCache } from '../../src/adapters/body-scan-cache';
+import { BodyScanIdbStore } from '../../src/adapters/body-scan-idb';
 import { NormalizedDocumentCache } from '../../src/adapters/normalized-document-cache';
 import { runVaultQuery } from '../../src/adapters/vault-query-runner';
 import { digestNormalizedDocument } from '../../src/core/cache/doc-digest';
 import {
+	getInternalFileEpochMs,
 	hasInternalRhizomeFlag,
 	INTERNAL_RHIZOME_CODES,
 	normalizeObsidianMetadata,
@@ -726,6 +729,159 @@ describe('normalized document cache properties', () => {
 					expect(cache.digest()).toBe(signatureBefore);
 				}
 			}),
+		);
+	});
+
+	it('I11 in-place TFile move and link rebinding match cold normalization across sync and async reconcile', async () => {
+		await assertProperty(
+			'cache/i11__in-place-move-and-relink-equals-cold',
+			fc.asyncProperty(
+				stateArb,
+				fc.subarray([0, 1, 2, 3, 4], { minLength: 1, maxLength: 5 }),
+				fc.constantFrom('Archive', 'Projects/2026', ''),
+				async (state, movedIds, targetFolder) => {
+					const vault = createCacheVault(state);
+					const bodyCache = new BodyScanCache(
+						vault.app,
+						undefined,
+						new BodyScanIdbStore('prop-move', null),
+						() => 1_700_000_100_000,
+					);
+					for (const file of mdFiles(vault)) {
+						bodyCache.ingestFromText(
+							file,
+							'[inline_owner:: alice]\n- [ ] Task item 📅 2026-11-20',
+						);
+					}
+
+					const syncCache = new NormalizedDocumentCache(vault.app, undefined, bodyCache);
+					const asyncCache = new NormalizedDocumentCache(vault.app, undefined, bodyCache);
+					const typedConfig = makeConfig({ priority: 'number' });
+
+					syncCache.reconcile(mdFiles(vault), typedConfig, vault.resolveLinkPath);
+					await asyncCache.reconcileAsync(
+						mdFiles(vault),
+						typedConfig,
+						vault.resolveLinkPath,
+						{
+							sliceBudgetMs: 0,
+						},
+					);
+
+					// Mutate selected live TFiles IN PLACE (same TFile & CachedMetadata object identity!)
+					const movedSet = new Set(movedIds);
+					const liveAllFiles = vault.files.filter(
+						(f) => !(f as { deleted?: boolean }).deleted,
+					);
+					const cacheMap = new Map<string, ReturnType<typeof vault.cacheFor>>();
+					for (const f of liveAllFiles) {
+						cacheMap.set(f.path, vault.cacheFor(f.path));
+					}
+
+					for (const f of liveAllFiles) {
+						const idMatch = /^notes\/n(\d+)/.exec(f.path);
+						if (!idMatch) continue;
+						const id = Number(idMatch[1]);
+						if (!movedSet.has(id) || !f.path.endsWith('.md')) continue;
+						const oldPath = f.path;
+						const cachedMeta = cacheMap.get(oldPath) ?? null;
+						const newBasename = `${f.basename}-moved`;
+						const newName = `${newBasename}.md`;
+						const newPath = targetFolder ? `${targetFolder}/${newName}` : newName;
+						if (newPath === oldPath) continue;
+
+						cacheMap.delete(oldPath);
+						(f as { path: string }).path = newPath;
+						(f as { name: string }).name = newName;
+						(f as { basename: string }).basename = newBasename;
+						(f as { parent: { path: string } }).parent = { path: targetFolder };
+						cacheMap.set(newPath, cachedMeta);
+						bodyCache.rename(oldPath, newPath);
+						syncCache.rename(oldPath, newPath);
+						asyncCache.rename(oldPath, newPath);
+					}
+
+					// Wire live metadataCache & link resolution against mutated in-place TFiles
+					(
+						vault.app.metadataCache as unknown as {
+							getFileCache: (file: TFile) => unknown;
+						}
+					).getFileCache = (file: TFile) => cacheMap.get(file.path) ?? null;
+
+					const liveResolver = (raw: string): string | null => {
+						const hit = liveAllFiles.find(
+							(f) =>
+								f.path === raw ||
+								f.basename === raw ||
+								f.basename === `${raw}-moved`,
+						);
+						return hit ? hit.path : null;
+					};
+					const nextResolvedLinks: Record<string, Record<string, number>> = {};
+					for (const f of liveAllFiles) {
+						const meta = cacheMap.get(f.path);
+						const out: Record<string, number> = {};
+						for (const l of meta?.links ?? []) {
+							const dest = liveResolver(l.link);
+							if (dest) out[dest] = (out[dest] ?? 0) + 1;
+						}
+						nextResolvedLinks[f.path] = out;
+					}
+					(
+						vault.app.metadataCache as unknown as {
+							resolvedLinks: Record<string, Record<string, number>>;
+						}
+					).resolvedLinks = nextResolvedLinks;
+
+					const currentMdFiles = liveAllFiles.filter((f) =>
+						f.path.toLowerCase().endsWith('.md'),
+					);
+					syncCache.reconcile(currentMdFiles, typedConfig, liveResolver);
+					await asyncCache.reconcileAsync(currentMdFiles, typedConfig, liveResolver, {
+						sliceBudgetMs: 0,
+					});
+
+					expect(asyncCache.digest()).toBe(syncCache.digest());
+
+					for (const f of currentMdFiles) {
+						const meta = cacheMap.get(f.path) ?? null;
+						if (
+							hasInternalRhizomeFlag(
+								meta?.frontmatter,
+								INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
+							)
+						) {
+							expect(syncCache.get(f.path)).toBeUndefined();
+							continue;
+						}
+						const syncDoc = syncCache.get(f.path)!;
+						const asyncDoc = asyncCache.get(f.path)!;
+						expect(syncDoc).toBeDefined();
+						expect(asyncDoc).toBeDefined();
+						assertFrozen(syncDoc);
+						assertFrozen(asyncDoc);
+						expect(getInternalFileEpochMs(syncDoc.file)).toEqual({
+							ctime: f.stat.ctime,
+							mtime: f.stat.mtime,
+						});
+
+						const coldDoc = normalizeObsidianMetadata(
+							f,
+							meta,
+							typedConfig,
+							bodyCache.getInlineProperties(f.path),
+							liveResolver,
+							bodyCache.getTasks(f.path),
+						);
+						expect(digestNormalizedDocument(syncDoc)).toBe(
+							digestNormalizedDocument(coldDoc),
+						);
+						expect(digestNormalizedDocument(asyncDoc)).toBe(
+							digestNormalizedDocument(coldDoc),
+						);
+					}
+				},
+			),
 		);
 	});
 });

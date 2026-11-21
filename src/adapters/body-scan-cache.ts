@@ -64,6 +64,10 @@ export class BodyScanCache {
 	private readonly store = new Map<string, BodyScanCacheEntry>();
 	private readonly pendingPuts = new Map<string, PersistedBodyScanRecord>();
 	private readonly pendingDeletes = new Set<string>();
+	private readonly pendingRenames = new Map<string, string>();
+	private readonly pendingRenameOrigins = new Map<string, string>();
+	private readonly preHydrationDeletes = new Set<string>();
+	private hydrationCompleted = false;
 	private flushTimer: number | null = null;
 	private nextRev = 1;
 	private reconcileToken = 0;
@@ -110,16 +114,34 @@ export class BodyScanCache {
 			return 0;
 		}
 		const records = await this.idb.getAll();
-		if (this.disposed || records.length === 0) {
+		if (this.disposed) {
+			return 0;
+		}
+		const pendingRenames = new Map(this.pendingRenames);
+		const preHydrationDeletes = new Set(this.preHydrationDeletes);
+		this.hydrationCompleted = true;
+		this.clearPreHydrationTracking();
+
+		if (records.length === 0) {
 			return 0;
 		}
 		const now = this.nowFn();
+		const retiredOrigins: string[] = [];
 		let hydrated = 0;
 		for (const rec of records) {
 			if (!rec || typeof rec.path !== 'string' || rec.path.length === 0) {
 				continue;
 			}
-			const existing = this.store.get(rec.path);
+			if (preHydrationDeletes.has(rec.path)) {
+				retiredOrigins.push(rec.path);
+				continue;
+			}
+			const targetPath = pendingRenames.get(rec.path) ?? rec.path;
+			const wasRenamed = targetPath !== rec.path;
+			if (wasRenamed) {
+				retiredOrigins.push(rec.path);
+			}
+			const existing = this.store.get(targetPath);
 			if (existing !== undefined && existing.mtime >= rec.mtime) {
 				continue;
 			}
@@ -132,16 +154,26 @@ export class BodyScanCache {
 					: rec.bodyDigest === EMPTY_BODY_DIGEST
 						? 0
 						: ++this.nextRev;
-			this.store.set(rec.path, {
-				path: rec.path,
+			const entry: BodyScanCacheEntry = {
+				path: targetPath,
 				mtime: clampedMtime,
 				size: rec.size,
 				bodyDigest: rec.bodyDigest,
 				bodyRev,
 				inlineProperties: rec.inlineProperties ?? EMPTY_INLINE_PROPERTIES,
 				tasks: rec.tasks ?? EMPTY_TASKS,
-			});
+			};
+			this.store.set(targetPath, entry);
+			if (wasRenamed) {
+				this.queuePut(entry);
+			}
 			hydrated++;
+		}
+		for (const oldOrigin of retiredOrigins) {
+			if (!this.store.has(oldOrigin) && !this.pendingPuts.has(oldOrigin)) {
+				this.pendingDeletes.add(oldOrigin);
+				this.scheduleFlush();
+			}
 		}
 		return hydrated;
 	}
@@ -160,6 +192,18 @@ export class BodyScanCache {
 		}
 		if (isIgnoredMetadata(cache as CachedMetadata | null | undefined)) {
 			return this.delete(file.path);
+		}
+
+		if (!this.hydrationCompleted) {
+			const origin = this.resolvePreHydrationOrigin(file.path);
+			if (origin !== null && origin !== file.path) {
+				this.deletePendingRename(origin);
+				this.preHydrationDeletes.add(origin);
+				if (!this.store.has(origin) && !this.pendingPuts.has(origin)) {
+					this.pendingDeletes.add(origin);
+					this.scheduleFlush();
+				}
+			}
 		}
 
 		const now = this.nowFn();
@@ -210,6 +254,20 @@ export class BodyScanCache {
 	 * Returns `true` if the removed entry held non-empty tasks or inline properties.
 	 */
 	delete(path: string): boolean {
+		if (this.disposed || path.length === 0) {
+			return false;
+		}
+		if (!this.hydrationCompleted) {
+			const origin = this.resolvePreHydrationOrigin(path);
+			if (origin !== null) {
+				this.deletePendingRename(origin);
+				this.preHydrationDeletes.add(origin);
+				if (!this.store.has(origin) && !this.pendingPuts.has(origin)) {
+					this.pendingDeletes.add(origin);
+					this.scheduleFlush();
+				}
+			}
+		}
 		const prev = this.store.get(path);
 		if (prev === undefined) {
 			return false;
@@ -221,8 +279,83 @@ export class BodyScanCache {
 		return prev.bodyDigest !== EMPTY_BODY_DIGEST;
 	}
 
-	rename(oldPath: string, _newPath: string): boolean {
-		return this.delete(oldPath);
+	/**
+	 * Re-keys a cached body-scan entry from `oldPath` to `newPath` across vault moves/renames,
+	 * preserving extracted tasks, inline properties, and `bodyRev` without re-reading disk.
+	 * Returns `true` if a non-empty entry was moved or overwritten.
+	 */
+	rename(oldPath: string, newPath: string): boolean {
+		if (this.disposed || oldPath.length === 0 || newPath.length === 0 || oldPath === newPath) {
+			return false;
+		}
+
+		if (!this.hydrationCompleted) {
+			const overwrittenOrigin = this.resolvePreHydrationOrigin(newPath);
+			const sourceOrigin = this.resolvePreHydrationOrigin(oldPath);
+			if (overwrittenOrigin !== null && overwrittenOrigin !== sourceOrigin) {
+				this.deletePendingRename(overwrittenOrigin);
+				this.preHydrationDeletes.add(overwrittenOrigin);
+				if (
+					!this.store.has(overwrittenOrigin) &&
+					!this.pendingPuts.has(overwrittenOrigin)
+				) {
+					this.pendingDeletes.add(overwrittenOrigin);
+					this.scheduleFlush();
+				}
+			}
+			if (this.store.has(oldPath)) {
+				if (sourceOrigin !== null) {
+					this.deletePendingRename(sourceOrigin);
+					this.preHydrationDeletes.add(sourceOrigin);
+				}
+			} else if (sourceOrigin !== null) {
+				if (sourceOrigin === newPath) {
+					this.deletePendingRename(sourceOrigin);
+				} else {
+					this.setPendingRename(sourceOrigin, newPath);
+				}
+			}
+		}
+
+		const prev = this.store.get(oldPath);
+		const existingTarget = this.store.get(newPath);
+
+		if (prev === undefined) {
+			if (existingTarget !== undefined) {
+				this.store.delete(newPath);
+				this.pendingPuts.delete(newPath);
+				this.pendingDeletes.add(newPath);
+				this.scheduleFlush();
+				return existingTarget.bodyDigest !== EMPTY_BODY_DIGEST;
+			}
+			return false;
+		}
+
+		this.store.delete(oldPath);
+		this.pendingPuts.delete(oldPath);
+		this.pendingDeletes.add(oldPath);
+
+		const bodyRev =
+			existingTarget !== undefined && existingTarget.bodyDigest !== prev.bodyDigest
+				? ++this.nextRev
+				: prev.bodyRev;
+
+		const rekeyed: BodyScanCacheEntry = {
+			path: newPath,
+			mtime: prev.mtime,
+			size: prev.size,
+			bodyDigest: prev.bodyDigest,
+			bodyRev,
+			inlineProperties: prev.inlineProperties,
+			tasks: prev.tasks,
+		};
+		this.store.set(newPath, rekeyed);
+		this.queuePut(rekeyed);
+
+		return (
+			prev.bodyDigest !== EMPTY_BODY_DIGEST ||
+			(existingTarget !== undefined && existingTarget.bodyDigest !== EMPTY_BODY_DIGEST)
+		);
 	}
 
 	/**
@@ -362,6 +495,11 @@ export class BodyScanCache {
 			}
 		}
 
+		if (!this.disposed && token === this.reconcileToken) {
+			this.hydrationCompleted = true;
+			this.clearPreHydrationTracking();
+		}
+
 		await this.flushToIndexedDB();
 		return { scanned, hits, evicted, changed };
 	}
@@ -372,6 +510,8 @@ export class BodyScanCache {
 	async clearAll(): Promise<void> {
 		this.reconcileToken++;
 		this.clearFlushTimer();
+		this.hydrationCompleted = true;
+		this.clearPreHydrationTracking();
 		this.pendingPuts.clear();
 		this.pendingDeletes.clear();
 		this.store.clear();
@@ -395,6 +535,7 @@ export class BodyScanCache {
 		this.clearFlushTimer();
 		const puts = [...this.pendingPuts.values()];
 		const deletes = [...this.pendingDeletes];
+		this.clearPreHydrationTracking();
 		this.pendingPuts.clear();
 		this.pendingDeletes.clear();
 		this.store.clear();
@@ -404,6 +545,42 @@ export class BodyScanCache {
 			this.idb.close();
 		}
 		this.disposed = true;
+	}
+
+	private setPendingRename(origin: string, target: string): void {
+		const prevTarget = this.pendingRenames.get(origin);
+		if (prevTarget !== undefined && this.pendingRenameOrigins.get(prevTarget) === origin) {
+			this.pendingRenameOrigins.delete(prevTarget);
+		}
+		this.pendingRenames.set(origin, target);
+		this.pendingRenameOrigins.set(target, origin);
+	}
+
+	private deletePendingRename(origin: string): void {
+		const prevTarget = this.pendingRenames.get(origin);
+		if (prevTarget !== undefined) {
+			this.pendingRenames.delete(origin);
+			if (this.pendingRenameOrigins.get(prevTarget) === origin) {
+				this.pendingRenameOrigins.delete(prevTarget);
+			}
+		}
+	}
+
+	private clearPreHydrationTracking(): void {
+		this.pendingRenames.clear();
+		this.pendingRenameOrigins.clear();
+		this.preHydrationDeletes.clear();
+	}
+
+	private resolvePreHydrationOrigin(livePath: string): string | null {
+		const mappedOrigin = this.pendingRenameOrigins.get(livePath);
+		if (mappedOrigin !== undefined) {
+			return mappedOrigin;
+		}
+		if (!this.preHydrationDeletes.has(livePath) && !this.pendingRenames.has(livePath)) {
+			return livePath;
+		}
+		return null;
 	}
 
 	private queuePut(entry: BodyScanCacheEntry): void {

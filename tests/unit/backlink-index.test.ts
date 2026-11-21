@@ -1,4 +1,4 @@
-import type { App, TFile as ObsidianTFile } from 'obsidian';
+import { editorInfoField, type App, type TFile as ObsidianTFile } from 'obsidian';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
@@ -9,7 +9,13 @@ import {
 	projectBacklinks,
 	type BacklinkSnapshot,
 } from '../../src/adapters/backlink-index';
-import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '../../src/core/search';
+import { createRhizomeAnalysisCache } from '../../src/adapters/codemirror/rhizome-analysis-cache';
+import { NormalizedDocumentCache } from '../../src/adapters/normalized-document-cache';
+import {
+	hasInternalRhizomeFlag,
+	initEngineConfig,
+	INTERNAL_RHIZOME_CODES,
+} from '../../src/core/search';
 import type { LoggerPort } from '../../src/ports/logger-port';
 import { createMockApp, TFile } from '../support/mock-obsidian-app';
 
@@ -451,6 +457,152 @@ describe('BacklinkIndex', () => {
 				{ path: 'notes/source-renamed.md', count: 1 },
 			]);
 			expect(index.rebuild()).toBe(false);
+		});
+
+		it('handles a 5,000-note bulk rename in a 20,000-note vault without rebuilding snapshot while advancing projectionRevision', () => {
+			const total = 20_000;
+			const moved = 5_000;
+			const files: MockTFile[] = [];
+			const resolvedLinks: Record<string, Record<string, number>> = {};
+
+			for (let i = 0; i < total; i++) {
+				files.push(makeFile(`inbox/n${i}.md`));
+			}
+			for (let i = 0; i < total; i++) {
+				const targetIdx = (i + 1) % total;
+				resolvedLinks[`inbox/n${i}.md`] = { [`inbox/n${targetIdx}.md`]: 1 };
+			}
+
+			const app = createMockApp({ files, resolvedLinks }) as App;
+			const index = new BacklinkIndex(app, noIgnore);
+			const initialSnapshot = index.snapshot();
+			expect(index.revision).toBe(1);
+			expect(index.projectionRevision).toBe(1);
+
+			// Move first 5,000 notes in-place and update resolvedLinks keys/targets
+			for (let i = 0; i < moved; i++) {
+				files[i]!.path = `archive/n${i}.md`;
+			}
+			const updatedLinks: Record<string, Record<string, number>> = {};
+			for (let i = 0; i < total; i++) {
+				const srcPath = files[i]!.path;
+				const dstPath = files[(i + 1) % total]!.path;
+				updatedLinks[srcPath] = { [dstPath]: 1 };
+			}
+			(
+				app.metadataCache as { resolvedLinks: Record<string, Record<string, number>> }
+			).resolvedLinks = updatedLinks;
+
+			const t0 = performance.now();
+			const structuralChanged = index.reconcile();
+			const elapsedMs = performance.now() - t0;
+
+			expect(structuralChanged).toBe(false);
+			expect(index.snapshot()).toBe(initialSnapshot);
+			expect(index.revision).toBe(1);
+			expect(index.projectionRevision).toBe(2);
+			expect(elapsedMs).toBeLessThan(250);
+
+			expect(projectBacklinks(index.snapshot(), files[1]!, noIgnore)).toEqual([
+				{ path: 'archive/n0.md', count: 1 },
+			]);
+
+			// Subsequent no-op reconcile keeps both revision and projectionRevision stable
+			expect(index.reconcile()).toBe(false);
+			expect(index.projectionRevision).toBe(2);
+		});
+
+		it('invalidates createRhizomeAnalysisCache host resolution when projectionRevision advances on source rename', () => {
+			const host = makeFile('notes/host.md');
+			const linker = makeFile('notes/alpha-linker.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/alpha-linker.md': { 'notes/host.md': 1 },
+			};
+			const fileCaches = new Map<string, unknown>([
+				[host.path, { frontmatter: {} }],
+				[linker.path, { frontmatter: {} }],
+			]);
+			const app = createMockApp({
+				files: [host, linker],
+				fileCache: fileCaches,
+				resolvedLinks,
+			}) as App;
+			const index = new BacklinkIndex(app, noIgnore);
+			const docCache = new NormalizedDocumentCache(app);
+			const cfgRes = initEngineConfig({ timeZone: 'UTC', propertyTypes: {} });
+			if (!cfgRes.ok) throw new Error('Expected valid config');
+
+			const analysisCache = createRhizomeAnalysisCache(app, index, docCache, cfgRes.config);
+			const mockView = {
+				state: {
+					field: (f: unknown) => (f === editorInfoField ? { file: host } : undefined),
+				},
+			} as never;
+			const codeBlock = '{% query q %}backlinks:@this.backlinks.path{% endquery %}';
+
+			// Initial analysis primes hostResolutionCache at revision=1, projectionRevision=1
+			const ensureFreshSpy = vi.spyOn(docCache, 'ensureFresh');
+			const first = analysisCache.getCachedAnalysis(codeBlock, mockView);
+			expect(first.diagnostics).toEqual([]);
+			expect(index.revision).toBe(1);
+			expect(index.projectionRevision).toBe(1);
+			expect(ensureFreshSpy).toHaveBeenCalledTimes(1);
+
+			// Calling again with a distinct codeblock while backlink projectionRevision is unchanged hits hostResolutionCache
+			analysisCache.getCachedAnalysis(
+				'{% query q2 %}backlinks:@this.backlinks.path{% endquery %}',
+				mockView,
+			);
+			expect(ensureFreshSpy).toHaveBeenCalledTimes(1);
+
+			// Rename linking source in-place and reconcile: structural revision stays 1, projectionRevision becomes 2
+			linker.path = 'notes/zeta-linker.md';
+			resolvedLinks['notes/zeta-linker.md'] = { 'notes/host.md': 1 };
+			delete resolvedLinks['notes/alpha-linker.md'];
+			expect(index.reconcile()).toBe(false);
+			expect(index.revision).toBe(1);
+			expect(index.projectionRevision).toBe(2);
+
+			const second = analysisCache.getCachedAnalysis(codeBlock, mockView);
+			expect(second.diagnostics).toEqual([]);
+			expect(ensureFreshSpy).toHaveBeenCalledTimes(2);
+		});
+
+		it('handles empty/NaN resolvedLinks records, key-order permutations, and count/target deltas in reconcile and hasSourceChanged', () => {
+			const a = makeFile('notes/a.md');
+			const b = makeFile('notes/b.md');
+			const t = makeFile('notes/t.md');
+			const u = makeFile('notes/u.md');
+			const resolvedLinks: Record<string, Record<string, number>> = {
+				'notes/a.md': { 'notes/t.md': 1, 'notes/u.md': 2 },
+				'notes/b.md': { 'notes/t.md': Number.NaN },
+			};
+			const app = createMockApp({ files: [a, b, t, u], resolvedLinks }) as App;
+			const index = new BacklinkIndex(app, noIgnore);
+			index.snapshot();
+
+			expect(index.hasSource('notes/a.md')).toBe(true);
+			expect(index.hasSource('notes/b.md')).toBe(false);
+
+			// Reversed key order + empty/NaN record is treated as unchanged
+			resolvedLinks['notes/a.md'] = {
+				'notes/u.md': 2,
+				'notes/a-missing.md': Number.NaN,
+				'notes/t.md': 1,
+			};
+			resolvedLinks['notes/b.md'] = {};
+			expect(index.hasSourceChanged('notes/a.md')).toBe(false);
+			expect(index.hasSourceChanged('notes/b.md')).toBe(false);
+			expect(index.reconcile()).toBe(false);
+
+			// Changing count or moving target updates only affected targets
+			resolvedLinks['notes/a.md'] = { 'notes/u.md': 3 };
+			expect(index.hasSourceChanged('notes/a.md')).toBe(true);
+			expect(index.reconcile()).toBe(true);
+			expect(projectBacklinks(index.snapshot(), t, noIgnore)).toEqual([]);
+			expect(projectBacklinks(index.snapshot(), u, noIgnore)).toEqual([
+				{ path: 'notes/a.md', count: 3 },
+			]);
 		});
 	});
 });

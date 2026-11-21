@@ -104,7 +104,7 @@ export function createRhizomeAnalysisCache(
 		}
 		const cache = app.metadataCache.getFileCache(hostFile);
 		const mtime = hostFile.stat?.mtime ?? 0;
-		const revision = backlinkIndex?.revision ?? 0;
+		const revision = backlinkIndex?.projectionRevision ?? 0;
 		const cacheReady = documentCache?.isReady ?? false;
 		const cacheRevision = documentCache?.getKey(hostFile.path)?.revision ?? '';
 		const cached = hostResolutionCache.get(hostFile.path);
@@ -166,13 +166,17 @@ export function createRhizomeAnalysisCache(
 			}
 		}
 
+		const effectiveRevision = backlinkIndex?.projectionRevision ?? revision;
+		const effectiveCacheRevision =
+			documentCache?.getKey(hostFile.path)?.revision ?? cacheRevision;
+
 		hostResolutionCache.set(hostFile.path, {
 			cache,
 			mtime,
-			revision,
+			revision: effectiveRevision,
 			config: cachedConfig,
 			cacheReady,
-			cacheRevision,
+			cacheRevision: effectiveCacheRevision,
 			resolved,
 		});
 		if (hostResolutionCache.size > 32) {

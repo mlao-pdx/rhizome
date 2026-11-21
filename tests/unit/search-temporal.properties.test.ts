@@ -1,9 +1,11 @@
+import { Temporal } from '@js-temporal/polyfill';
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
 	coercePropertyValue,
 	compareDateIntervals,
 	daysInMonth,
+	formatEpochMsToMinuteIso,
 	MAX_SAFE_EPOCH_MS,
 	parseSingleTemporalAtom,
 	parseTemporalExpr,
@@ -629,6 +631,59 @@ describe('search temporal property invariants', () => {
 					}
 				},
 			),
+		);
+	});
+
+	it('Invariant 6g: formatEpochMsToMinuteIso matches Temporal.Instant across UTC, DST zones, sub-hour offsets, pre-1973, and negative years', async () => {
+		const referenceFormat = (epochMs: number, timeZone: string): string => {
+			const zdt =
+				Temporal.Instant.fromEpochMilliseconds(epochMs).toZonedDateTimeISO(timeZone);
+			const yyyy =
+				zdt.year < 0
+					? `-${String(Math.abs(zdt.year)).padStart(6, '0')}`
+					: String(zdt.year).padStart(4, '0');
+			const mm = String(zdt.month).padStart(2, '0');
+			const dd = String(zdt.day).padStart(2, '0');
+			const hh = String(zdt.hour).padStart(2, '0');
+			const min = String(zdt.minute).padStart(2, '0');
+			return `${yyyy}-${mm}-${dd}T${hh}:${min}`;
+		};
+
+		const epochArb = fc.oneof(
+			// Modern note stat range (1973..2100) hitting Intl & UTC fast paths + minute buckets
+			fc.integer({ min: 94_694_400_000, max: 4_102_444_800_000 }),
+			// Exact midnight & DST boundary vicinities
+			fc.constantFrom(
+				0,
+				-1,
+				-60_000,
+				44_582_410_000, // 1971 Monrovia sub-minute offset era
+				44_582_440_000,
+				1_325_199_600_000, // 2011-12-30 Pacific/Apia skipped day vicinity
+				1_710_054_000_000, // 2024 US spring-forward DST
+				1_730_613_600_000, // 2024 US fall-back DST
+				253_402_300_799_999, // 9999-12-31T23:59:59.999Z
+			),
+			// Full safe epoch range including negative years and >9999 years
+			fc.integer({ min: -MAX_SAFE_EPOCH_MS, max: MAX_SAFE_EPOCH_MS }),
+		);
+
+		const zoneArb = fc.constantFrom(
+			'UTC',
+			'America/New_York',
+			'Europe/London',
+			'Asia/Tokyo',
+			'Asia/Kathmandu',
+			'Pacific/Chatham',
+			'Pacific/Apia',
+			'Africa/Monrovia',
+		);
+
+		await assertProperty(
+			'search/temporal__format-epoch-ms-matches-temporal-instant',
+			fc.property(epochArb, zoneArb, (epochMs, tz) => {
+				expect(formatEpochMsToMinuteIso(epochMs, tz)).toBe(referenceFormat(epochMs, tz));
+			}),
 		);
 	});
 });

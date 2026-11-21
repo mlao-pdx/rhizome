@@ -8,7 +8,10 @@ import {
 	hashVaultQueryMatch,
 	hashVaultQueryResult,
 } from '../../src/adapters/active-query-roster';
-import type { BacklinkIndex, BacklinkSnapshot } from '../../src/adapters/backlink-index';
+import { BacklinkIndex, type BacklinkSnapshot } from '../../src/adapters/backlink-index';
+import { BodyScanCache } from '../../src/adapters/body-scan-cache';
+import { BodyScanIdbStore } from '../../src/adapters/body-scan-idb';
+import { NormalizedDocumentCache } from '../../src/adapters/normalized-document-cache';
 import {
 	countExtractedQueryRecords,
 	exceedsLargeMarkdownThreshold,
@@ -2335,5 +2338,337 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(joinedLogs).toContain('ERROR_CIRCULAR_QUERY_REF');
 		expect(joinedLogs).not.toContain('__missing_');
 		expect(joinedLogs).not.toContain('__cyc_');
+	});
+
+	it('never drops subscriber updates when a superseded pass committed cache changes before yielding to a trailing onlyIfChanged pass', async () => {
+		const notes: Array<{
+			file: {
+				path: string;
+				name: string;
+				basename: string;
+				extension: string;
+				parent: { path: string };
+				stat: { ctime: number; mtime: number; size: number };
+			};
+			cache: CachedMetadata;
+		}> = [
+			{
+				file: {
+					path: 'notes/a.md',
+					name: 'a.md',
+					basename: 'a',
+					extension: 'md',
+					parent: { path: 'notes' },
+					stat: { ctime: 1_700_000_000_000, mtime: 1_700_000_000_000, size: 50 },
+				},
+				cache: { tags: [{ tag: '#ship', position: {} as never }] },
+			},
+			{
+				file: {
+					path: 'notes/b.md',
+					name: 'b.md',
+					basename: 'b',
+					extension: 'md',
+					parent: { path: 'notes' },
+					stat: { ctime: 1_700_000_000_000, mtime: 1_700_000_000_000, size: 50 },
+				},
+				cache: { frontmatter: {} },
+			},
+		];
+
+		const app = {
+			vault: {
+				configDir: 'mock-config',
+				adapter: { read: async () => '{"types":{}}' },
+				getFiles: () => notes.map((n) => n.file),
+				getMarkdownFiles: () => notes.map((n) => n.file),
+				getFileByPath: (p: string) => notes.find((n) => n.file.path === p)?.file ?? null,
+			},
+			metadataCache: {
+				resolvedLinks: {},
+				unresolvedLinks: {},
+				getFileCache: (f: { path: string }) =>
+					notes.find((n) => n.file.path === f.path)?.cache ?? null,
+				getFirstLinkpathDest: () => null,
+			},
+		} as unknown as App;
+
+		const index = new BacklinkIndex(app, () => false);
+		const docCache = new NormalizedDocumentCache(app);
+		const roster = new ActiveQueryRoster(app, undefined, index, docCache);
+
+		const initial = await runVaultQuery(
+			app,
+			{ shipped: '#ship' },
+			{
+				timeZone: 'UTC',
+				referenceTimeMs: 1_700_000_000_000,
+				cache: docCache,
+				backlinkIndex: index,
+			},
+		);
+		expect(initial['shipped']?.map((m) => m.file.path)).toEqual(['notes/a.md']);
+
+		const updates: VaultQueryResult[] = [];
+		roster.register({ shipped: '#ship' }, { timeZone: 'UTC' }, initial, (res) => {
+			updates.push(res);
+		});
+
+		// Add #ship to notes/b.md and simulate a pass that commits ALL docCache updates
+		// and then gets superseded by notifyRefreshScheduled() right before query evaluation!
+		notes[1]!.cache = { tags: [{ tag: '#ship', position: {} as never }] };
+		notes[1]!.file.stat = { ...notes[1]!.file.stat, mtime: notes[1]!.file.stat.mtime + 1 };
+
+		const origReconcileAsync = docCache.reconcileAsync.bind(docCache);
+		let interceptedOnce = false;
+		vi.spyOn(docCache, 'reconcileAsync').mockImplementation(
+			async (files, cfg, resolver, opts) => {
+				const res = await origReconcileAsync(files, cfg, resolver, opts);
+				if (!interceptedOnce) {
+					interceptedOnce = true;
+					// Cache is now 100% warm (docCache already updated notes/b.md!), and a trailing
+					// debounced refresh timer arrives before Pass 1 evaluates queries:
+					roster.notifyRefreshScheduled();
+					return { ...res, superseded: true };
+				}
+				return res;
+			},
+		);
+
+		// Pass 1 supersedes without firing onUpdate yet
+		await roster.nudge(1_700_000_000_000, { onlyIfChanged: true });
+		expect(updates).toHaveLength(0);
+
+		// Pass 2 runs with onlyIfChanged: true when docCache now reports changed=false (all hits!),
+		// yet dirtySinceLastCompletedPass guarantees Pass 2 still evaluates and delivers onUpdate!
+		await roster.nudge(1_700_000_000_000, { onlyIfChanged: true });
+		expect(updates).toHaveLength(1);
+		expect(updates[0]?.['shipped']?.map((m) => m.file.path).sort()).toEqual([
+			'notes/a.md',
+			'notes/b.md',
+		]);
+		roster.clear();
+	});
+
+	it('reconciles a bulk move of 7,600 notes in a 20,000-note vault with zero disk reads and sub-second latency', async () => {
+		const total = 20_000;
+		const movedCount = 7_600;
+		const now = 1_700_000_000_000;
+
+		interface BulkNote {
+			file: {
+				path: string;
+				name: string;
+				basename: string;
+				extension: string;
+				parent: { path: string };
+				stat: { ctime: number; mtime: number; size: number };
+			};
+			cache: CachedMetadata;
+		}
+
+		const notes: BulkNote[] = [];
+		const byPath = new Map<string, BulkNote>();
+		const byBasename = new Map<string, BulkNote>();
+		const resolvedLinks: Record<string, Record<string, number>> = {};
+
+		for (let i = 0; i < total; i++) {
+			const basename = `note-${i}`;
+			const name = `${basename}.md`;
+			const folder = i < movedCount ? 'Inbox' : 'Library';
+			const path = `${folder}/${name}`;
+			const targetBasename = `note-${(i + 1) % total}`;
+			const entry: BulkNote = {
+				file: {
+					path,
+					name,
+					basename,
+					extension: 'md',
+					parent: { path: folder },
+					stat: {
+						ctime: now - (i % 120) * 60_000,
+						mtime: now - (i % 60) * 60_000,
+						size: 128,
+					},
+				},
+				cache: {
+					frontmatter: {
+						status: i % 10 === 0 ? 'milestone' : 'routine',
+						due: '2026-11-20',
+					},
+					links: [
+						{
+							link: targetBasename,
+							original: `[[${targetBasename}]]`,
+							position: {} as never,
+						},
+					],
+				},
+			};
+			notes.push(entry);
+			byPath.set(path, entry);
+			byBasename.set(basename, entry);
+		}
+		for (let i = 0; i < total; i++) {
+			const srcPath = notes[i]!.file.path;
+			const dstPath = notes[(i + 1) % total]!.file.path;
+			resolvedLinks[srcPath] = { [dstPath]: 1 };
+		}
+
+		let cachedReadCalls = 0;
+		const app = {
+			vault: {
+				configDir: 'mock-config',
+				adapter: { read: async () => '{"types":{"due":"date"}}' },
+				getFiles: () => notes.map((n) => n.file),
+				getMarkdownFiles: () => notes.map((n) => n.file),
+				getFileByPath: (p: string) => byPath.get(p)?.file ?? null,
+				cachedRead: async () => {
+					cachedReadCalls++;
+					return '';
+				},
+			},
+			metadataCache: {
+				resolvedLinks,
+				unresolvedLinks: {},
+				getFileCache: (f: { path: string }) => byPath.get(f.path)?.cache ?? null,
+				getFirstLinkpathDest: (raw: string) => byBasename.get(raw)?.file ?? null,
+			},
+		} as unknown as App;
+
+		const bodyCache = new BodyScanCache(
+			app,
+			undefined,
+			new BodyScanIdbStore('bulk-move-perf', null),
+			() => now,
+		);
+		for (let i = 0; i < 500; i++) {
+			bodyCache.ingestFromText(notes[i]!.file, `[owner:: team-${i % 5}]`);
+		}
+
+		const backlinkIndex = new BacklinkIndex(app, () => false);
+		const docCache = new NormalizedDocumentCache(app, undefined, bodyCache);
+		const roster = new ActiveQueryRoster(app, undefined, backlinkIndex, docCache);
+
+		const initial = await runVaultQuery(
+			app,
+			{ movedMilestones: 'path:"Archive" [status: milestone]' },
+			{ timeZone: 'UTC', referenceTimeMs: now, cache: docCache, backlinkIndex },
+		);
+		expect(initial['movedMilestones']).toEqual([]);
+
+		const updates: VaultQueryResult[] = [];
+		roster.register(
+			{ movedMilestones: 'path:"Archive" [status: milestone]' },
+			{ timeZone: 'UTC' },
+			initial,
+			(res) => {
+				updates.push(res);
+			},
+		);
+
+		// Move 7,600 notes from Inbox/* to Archive/* in-place!
+		const nextResolved: Record<string, Record<string, number>> = {};
+		for (let i = 0; i < movedCount; i++) {
+			const n = notes[i]!;
+			const oldPath = n.file.path;
+			const newPath = `Archive/${n.file.name}`;
+			byPath.delete(oldPath);
+			n.file.path = newPath;
+			n.file.parent = { path: 'Archive' };
+			byPath.set(newPath, n);
+			bodyCache.rename(oldPath, newPath);
+			roster.handleFileRename(oldPath, newPath);
+		}
+		for (let i = 0; i < total; i++) {
+			nextResolved[notes[i]!.file.path] = { [notes[(i + 1) % total]!.file.path]: 1 };
+		}
+		(
+			app.metadataCache as { resolvedLinks: Record<string, Record<string, number>> }
+		).resolvedLinks = nextResolved;
+
+		const moveReconcileStart = performance.now();
+		await roster.nudge(now, { onlyIfChanged: true });
+		const moveReconcileElapsedMs = performance.now() - moveReconcileStart;
+
+		expect(cachedReadCalls).toBe(0);
+		expect(updates).toHaveLength(1);
+		expect(updates[0]?.['movedMilestones']).toHaveLength(760);
+		expect(bodyCache.getInlineProperties('Archive/note-0.md')[0]?.value).toBe('team-0');
+		expect(moveReconcileElapsedMs).toBeLessThan(1_500);
+		roster.clear();
+	});
+
+	it('continues evaluating remaining config groups when an earlier group aborts mid-pass', async () => {
+		const noteFile = {
+			path: 'notes/a.md',
+			name: 'a.md',
+			basename: 'a',
+			extension: 'md',
+			parent: { path: 'notes' },
+			stat: { ctime: 1_700_000_000_000, mtime: 1_700_000_000_000, size: 40 },
+		};
+		let noteCache: CachedMetadata = { frontmatter: {} };
+
+		let readCount = 0;
+		const group1Abort = new AbortController();
+
+		const app = {
+			vault: {
+				configDir: 'mock-config',
+				adapter: {
+					read: async () => {
+						readCount++;
+						if (readCount === 1) {
+							group1Abort.abort();
+						}
+						return '{"types":{}}';
+					},
+				},
+				getFiles: () => [noteFile],
+				getMarkdownFiles: () => [noteFile],
+				getFileByPath: (p: string) => (p === noteFile.path ? noteFile : null),
+			},
+			metadataCache: {
+				resolvedLinks: {},
+				unresolvedLinks: {},
+				getFileCache: () => noteCache,
+				getFirstLinkpathDest: () => null,
+			},
+		} as unknown as App;
+
+		const index = new BacklinkIndex(app, () => false);
+		const docCache = new NormalizedDocumentCache(app);
+		const roster = new ActiveQueryRoster(app, undefined, index, docCache);
+
+		const group1Updates: VaultQueryResult[] = [];
+		const group2Updates: VaultQueryResult[] = [];
+
+		roster.register(
+			{ shipped: '#ship' },
+			{ timeZone: 'UTC', signal: group1Abort.signal },
+			{ shipped: [] },
+			(res) => {
+				group1Updates.push(res);
+			},
+		);
+		roster.register(
+			{ shipped: '#ship' },
+			{ timeZone: 'America/New_York' },
+			{ shipped: [] },
+			(res) => {
+				group2Updates.push(res);
+			},
+		);
+
+		noteCache = { tags: [{ tag: '#ship', position: {} as never }] };
+		noteFile.stat = { ...noteFile.stat, mtime: noteFile.stat.mtime + 1 };
+
+		await roster.nudge(1_700_000_000_000, { onlyIfChanged: true });
+
+		expect(group1Updates).toHaveLength(0);
+		expect(group2Updates).toHaveLength(1);
+		expect(group2Updates[0]?.['shipped']?.map((m) => m.file.path)).toEqual(['notes/a.md']);
+		roster.clear();
 	});
 });

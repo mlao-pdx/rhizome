@@ -43,6 +43,7 @@ import {
 	type BacklinkSnapshot,
 	type CachedSnapshotSourceEntry,
 } from './backlink-index';
+import { createMemoizedLinkResolver } from './link-resolver-memo';
 import { markSensitive } from './logger-format';
 import type { DocumentCacheStats, NormalizedDocumentCache } from './normalized-document-cache';
 import {
@@ -509,21 +510,35 @@ export async function resolveGroupEngineConfig(
 interface PreparedVaultPass {
 	readonly backlinks: BacklinkSnapshot | undefined;
 	readonly stats: DocumentCacheStats | undefined;
+	readonly superseded: boolean;
+	readonly yielded: boolean;
 }
 
-function prepareVaultPass(
+async function prepareVaultPass(
 	cache: NormalizedDocumentCache | undefined,
 	options: VaultQueryOptions | undefined,
 	config: ResolvedEngineConfig,
 	resolveLinkPath: ResolveLinkPathFn,
 	files: readonly TFile[] | undefined,
-): PreparedVaultPass {
-	const stats =
-		options?.reconciledStats !== undefined
-			? options.reconciledStats
-			: cache !== undefined && files !== undefined
-				? cache.reconcile(files, config, resolveLinkPath).stats
-				: undefined;
+	clearLinkMemo: () => void,
+): Promise<PreparedVaultPass> {
+	let stats: DocumentCacheStats | undefined;
+	let superseded = false;
+	let yielded = false;
+	if (options?.reconciledStats !== undefined) {
+		stats = options.reconciledStats;
+	} else if (cache !== undefined && files !== undefined) {
+		const reconciled = await cache.reconcileAsync(files, config, resolveLinkPath, {
+			signal: options?.signal,
+			onYield: clearLinkMemo,
+		});
+		stats = reconciled.stats;
+		superseded = reconciled.superseded;
+		yielded = reconciled.yielded === true;
+		if (superseded) {
+			return { backlinks: options?.backlinks, stats, superseded: true, yielded };
+		}
+	}
 	let backlinks = options?.backlinks;
 	const index = options?.backlinkIndex;
 	if (backlinks === undefined && index !== undefined) {
@@ -532,7 +547,7 @@ function prepareVaultPass(
 		}
 		backlinks = index.snapshot();
 	}
-	return { backlinks, stats };
+	return { backlinks, stats, superseded: false, yielded };
 }
 
 /**
@@ -568,16 +583,29 @@ export async function runVaultQuery(
 		resolvedConfig = configResult.config;
 	}
 
-	const resolveLinkPath: ResolveLinkPathFn = (rawTarget, sourcePath) =>
-		app.metadataCache.getFirstLinkpathDest(rawTarget, sourcePath)?.path ?? null;
+	const linkMemo = createMemoizedLinkResolver(app);
+	const resolveLinkPath: ResolveLinkPathFn = linkMemo.resolveLinkPath;
 
 	const isIgnoredFile =
 		options?.isIgnoredFile ?? ((file: TFile) => defaultIsIgnoredFile(app, file));
 	const cache = options?.cache;
 	const preReconcileMs = Math.max(0, options?.reconcileDurationMs ?? 0);
 	const reconcileStartedAt = Date.now();
-	const vaultFiles = cache !== undefined ? app.vault.getMarkdownFiles() : undefined;
-	const prepared = prepareVaultPass(cache, options, resolvedConfig, resolveLinkPath, vaultFiles);
+	let vaultFiles = cache !== undefined ? app.vault.getMarkdownFiles() : undefined;
+	const prepared = await prepareVaultPass(
+		cache,
+		options,
+		resolvedConfig,
+		resolveLinkPath,
+		vaultFiles,
+		linkMemo.clear,
+	);
+	if (prepared.superseded) {
+		return {};
+	}
+	if (cache !== undefined && prepared.yielded) {
+		vaultFiles = app.vault.getMarkdownFiles();
+	}
 	const reconcileMs = preReconcileMs + Math.max(0, Date.now() - reconcileStartedAt);
 	const backlinks = prepared.backlinks;
 
