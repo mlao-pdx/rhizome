@@ -61,6 +61,7 @@ export class BodyScanCache {
 	private readonly logger: LoggerPort | undefined;
 	private readonly idb: BodyScanIdbStore;
 	private readonly nowFn: () => number;
+	private readonly isIgnoredPath: ((path: string) => boolean) | undefined;
 	private readonly store = new Map<string, BodyScanCacheEntry>();
 	private readonly pendingPuts = new Map<string, PersistedBodyScanRecord>();
 	private readonly pendingDeletes = new Set<string>();
@@ -78,11 +79,23 @@ export class BodyScanCache {
 		logger?: LoggerPort,
 		idbStore?: BodyScanIdbStore,
 		nowFn: () => number = () => Date.now(),
+		isIgnoredPath?: (path: string) => boolean,
 	) {
 		this.app = app;
 		this.logger = logger;
 		this.idb = idbStore ?? new BodyScanIdbStore(resolveDbName(app));
 		this.nowFn = nowFn;
+		this.isIgnoredPath = isIgnoredPath;
+	}
+
+	private isIgnoredEntry(
+		path: string,
+		cache?: CachedMetadata | ObsidianBodyScannerCacheInput | null,
+	): boolean {
+		return (
+			isIgnoredMetadata(cache as CachedMetadata | null | undefined) ||
+			this.isIgnoredPath?.(path) === true
+		);
 	}
 
 	get size(): number {
@@ -141,6 +154,10 @@ export class BodyScanCache {
 			if (wasRenamed) {
 				retiredOrigins.push(rec.path);
 			}
+			if (this.isIgnoredPath?.(targetPath) === true) {
+				retiredOrigins.push(targetPath);
+				continue;
+			}
 			const existing = this.store.get(targetPath);
 			if (existing !== undefined && existing.mtime >= rec.mtime) {
 				continue;
@@ -190,7 +207,7 @@ export class BodyScanCache {
 		if (this.disposed) {
 			return false;
 		}
-		if (isIgnoredMetadata(cache as CachedMetadata | null | undefined)) {
+		if (this.isIgnoredEntry(file.path, cache)) {
 			return this.delete(file.path);
 		}
 
@@ -317,6 +334,12 @@ export class BodyScanCache {
 			}
 		}
 
+		if (this.isIgnoredPath?.(newPath) === true) {
+			const removedOld = this.delete(oldPath);
+			const removedNew = this.delete(newPath);
+			return removedOld || removedNew;
+		}
+
 		const prev = this.store.get(oldPath);
 		const existingTarget = this.store.get(newPath);
 
@@ -388,7 +411,7 @@ export class BodyScanCache {
 				continue;
 			}
 			const cache = this.app.metadataCache.getFileCache(file);
-			if (isIgnoredMetadata(cache)) {
+			if (this.isIgnoredEntry(file.path, cache)) {
 				if (this.delete(file.path)) {
 					changed++;
 				}
@@ -441,7 +464,7 @@ export class BodyScanCache {
 					continue;
 				}
 				const cacheBefore = this.app.metadataCache.getFileCache(file);
-				if (isIgnoredMetadata(cacheBefore)) {
+				if (this.isIgnoredEntry(file.path, cacheBefore)) {
 					if (this.delete(file.path)) {
 						batchChanged = true;
 						changed++;

@@ -21,7 +21,7 @@ interface HostResolutionCacheEntry {
 	readonly cacheReady: boolean;
 	readonly cacheRevision: string;
 	readonly resolved: {
-		readonly hostDoc: NormalizedDocument | null;
+		readonly hostDoc: NormalizedDocument | null | undefined;
 		readonly cacheSignature: string;
 	};
 }
@@ -95,7 +95,7 @@ export function createRhizomeAnalysisCache(
 	const resolveHostDoc = (
 		view: EditorView,
 	): {
-		hostDoc: NormalizedDocument | null;
+		hostDoc: NormalizedDocument | null | undefined;
 		cacheSignature: string;
 	} => {
 		const hostFile = resolveEditorHostFile(view);
@@ -146,9 +146,12 @@ export function createRhizomeAnalysisCache(
 								[],
 								resolveLinkPath,
 							);
+				// When `documentCache.ensureFresh` returns `null` for a non-DO_NOT_INDEX_OR_QUERY note
+				// (such as a template file inside `templatesFolder`), leave `hostDoc` as `undefined`
+				// so `@this.*` queries inside templates are not flagged with missing-host warnings.
 				const withBacklinks =
 					hostDoc === null
-						? null
+						? undefined
 						: documentCache !== undefined && backlinkIndex !== undefined
 							? copyWithBacklinks(
 									hostDoc,

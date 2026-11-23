@@ -2,6 +2,7 @@ import {
 	DEFAULT_LAYOUTS_FOLDER,
 	DEFAULT_PARTIALS_FOLDER,
 	DEFAULT_TEMPLATES_FOLDER,
+	isNewNoteDefaultFolderRung,
 	normalizeTemplateFolderPath,
 } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
@@ -136,6 +137,9 @@ export function mergeSettings(defaults: RhizomeSettings, raw: unknown): RhizomeS
 			typeof candidate.layoutsFolder === 'string' ? candidate.layoutsFolder : undefined,
 			defaults.layoutsFolder ?? DEFAULT_LAYOUTS_FOLDER,
 		),
+		newNoteDefaultFolderRung: isNewNoteDefaultFolderRung(candidate.newNoteDefaultFolderRung)
+			? candidate.newNoteDefaultFolderRung
+			: defaults.newNoteDefaultFolderRung,
 		loggingEnabled:
 			typeof candidate.loggingEnabled === 'boolean'
 				? candidate.loggingEnabled

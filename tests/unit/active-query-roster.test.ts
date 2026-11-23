@@ -30,6 +30,7 @@ import {
 	RenderSentinelStore,
 } from '../../src/adapters/render-sentinel-store';
 import { runVaultQuery, type VaultQueryResult } from '../../src/adapters/vault-query-runner';
+import { createNormalizedFileInfo } from '../../src/core/search';
 import {
 	parsedTemplateReferencesHost,
 	parseRhizomeTemplatePass1,
@@ -2139,7 +2140,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 
 	it('hashVaultQueryMatch differentiates links by property attribution vs prose null', () => {
 		const baseMatch = {
-			file: {
+			file: createNormalizedFileInfo({
 				path: 'notes/a.md',
 				name: 'a.md',
 				basename: 'a',
@@ -2148,7 +2149,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 				created: '2026-01-01T00:00',
 				modified: '2026-01-01T00:00',
 				size: 42,
-			},
+			}),
 			aliases: [],
 			aliasLocations: [],
 			tags: [],

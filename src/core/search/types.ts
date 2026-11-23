@@ -181,6 +181,12 @@ export interface NormalizedFileInfo {
 	created: string; // Minute-grain ISO-8601 datetime ("YYYY-MM-DDTHH:mm") in normalization timeZone
 	modified: string; // Minute-grain ISO-8601 datetime ("YYYY-MM-DDTHH:mm") in normalization timeZone
 	size: number; // Safe integer >= 0 (bytes)
+	/** Non-enumerable alias of `extension` for Liquid / selector parity with `@this.file.ext`. */
+	readonly ext: string;
+	/** Non-enumerable alias of `created` for Liquid / selector parity with `@this.file.ctime`. */
+	readonly ctime: string;
+	/** Non-enumerable alias of `modified` for Liquid / selector parity with `@this.file.mtime`. */
+	readonly mtime: string;
 }
 
 export interface NormalizedHeading {

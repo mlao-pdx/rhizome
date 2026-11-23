@@ -97,6 +97,11 @@ export interface VaultQueryOptions {
 	readonly queryHostDocs?:
 		Readonly<Record<string, NormalizedDocument | null | undefined>> | undefined;
 	/**
+	 * Optional pre-evaluated query document path sets (from Pass 1.5 or earlier lazy Pass-2 waves)
+	 * seeded into `@query.<name>` resolution when evaluating deferred `@this.*` queries in `"newNote"` mode.
+	 */
+	readonly priorQueryPaths?: Readonly<Record<string, readonly string[]>> | undefined;
+	/**
 	 * Optional callback invoked by `ActiveQueryRoster.handleFileRename()` when the hosting note
 	 * at `sourcePath` is renamed.
 	 */
@@ -442,14 +447,17 @@ export function resolveHostDocument(
 	if (!file || (file as { deleted?: boolean }).deleted) {
 		return null;
 	}
+	const shouldIgnore =
+		isIgnoredFile ?? ((fileToCheck: TFile) => defaultIsIgnoredFile(app, fileToCheck));
 	const cacheInput = app.metadataCache.getFileCache(file);
 	if (
 		hasInternalRhizomeFlag(
 			cacheInput?.frontmatter,
 			INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
-		)
+		) ||
+		shouldIgnore(file)
 	) {
-		// Evict any previously cached entry when a host note gains DO_NOT_INDEX_OR_QUERY.
+		// Evict any previously cached entry when a host note gains DO_NOT_INDEX_OR_QUERY or enters a template folder.
 		cache?.delete(file.path);
 		return null;
 	}
@@ -457,8 +465,6 @@ export function resolveHostDocument(
 		resolveLinkPath ??
 		((rawTarget, linkSourcePath) =>
 			app.metadataCache.getFirstLinkpathDest?.(rawTarget, linkSourcePath)?.path ?? null);
-	const shouldIgnore =
-		isIgnoredFile ?? ((fileToCheck: TFile) => defaultIsIgnoredFile(app, fileToCheck));
 	if (cache !== undefined) {
 		const doc = cache.ensureFresh(file, config, effectiveResolveLinkPath);
 		if (doc === null) {
@@ -643,6 +649,13 @@ export async function runVaultQuery(
 			userKnownQueryNames.add(name);
 		}
 	}
+	if (options?.priorQueryPaths) {
+		for (const priorName of Object.keys(options.priorQueryPaths)) {
+			if (!priorName.startsWith('◊')) {
+				userKnownQueryNames.add(priorName);
+			}
+		}
+	}
 
 	const prelimCompiled: Array<{
 		readonly name: string;
@@ -824,7 +837,8 @@ export async function runVaultQuery(
 					hasInternalRhizomeFlag(
 						cacheEntry?.frontmatter,
 						INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
-					)
+					) ||
+					options?.isIgnoredFile?.(file) === true
 				) {
 					continue;
 				}
@@ -929,7 +943,8 @@ export async function runVaultQuery(
 					hasInternalRhizomeFlag(
 						cacheEntry?.frontmatter,
 						INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
-					)
+					) ||
+					options?.isIgnoredFile?.(file) === true
 				) {
 					continue;
 				}
@@ -1004,6 +1019,18 @@ export async function runVaultQuery(
 		const getBacklinksForDoc = (d: NormalizedDocument): readonly BacklinkRef[] =>
 			passDocByPath.get(d.file.path)?.getBacklinks() ?? EMPTY_BACKLINKS;
 		const priorQueryDocs = new Map<string, readonly NormalizedDocument[]>();
+		if (options?.priorQueryPaths) {
+			for (const [priorName, paths] of Object.entries(options.priorQueryPaths)) {
+				const resolvedDocs: NormalizedDocument[] = [];
+				for (const p of paths) {
+					const item = passDocByPath.get(p);
+					if (item) {
+						resolvedDocs.push(item.doc);
+					}
+				}
+				priorQueryDocs.set(priorName, resolvedDocs);
+			}
+		}
 
 		for (let w = 0; w < executionWaves.length; w++) {
 			const wave = executionWaves[w]!;

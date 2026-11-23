@@ -1,4 +1,5 @@
 import { FORBIDDEN_KEYS, isValidReferenceTimeMs, parseSingleTemporalAtom } from '@core/search';
+import { attachTemplateTargetState } from './template-target-state';
 import {
 	type HeadingContextState,
 	isBareRelativeTemporalAtom,
@@ -193,6 +194,8 @@ export function buildRhizomeTemplateContext(
 		configurable: false,
 		writable: false,
 	});
+
+	attachTemplateTargetState(root, referenceTimeMs, timeZone, runtimeContext);
 
 	const ensureDynamicTemporalKey = (target: Record<string, unknown>, prop: PropertyKey): void => {
 		if (typeof prop !== 'string' || prop in target || FORBIDDEN_KEYS.has(prop)) {

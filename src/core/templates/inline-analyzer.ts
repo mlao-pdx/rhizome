@@ -33,7 +33,7 @@ const INLINE_LIQUID_KEYWORDS: ReadonlySet<string> = new Set([
 ]);
 
 const INLINE_TOKEN_RE =
-	/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\|\s*[a-zA-Z_][a-zA-Z0-9_-]*)|([+-]?\d+(?:\.\d+)?)|([a-zA-Z_][a-zA-Z0-9_.-]*(?:\+\d+d?)?)/g;
+	/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\|\s*[a-zA-Z_][a-zA-Z0-9_-]*)|([+-]?\d+(?:\.\d+)?)|([a-zA-Z_\u25CA][a-zA-Z0-9_.\u25CA-]*(?:\+\d+d?)?)/g;
 
 function mapExprOffsetToRaw(exprOffsets: readonly number[], offset: number): number {
 	const maxIdx = exprOffsets.length - 1;

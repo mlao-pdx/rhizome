@@ -327,4 +327,31 @@ describe('analyzeRhizomeCodeBlock & findRhizomeCodeBlocks', () => {
 			explicitCutoff: false,
 		});
 	});
+
+	it('highlights targetPath, frontmatter, closed, active, template keywords, ◊.trigger variables, and reports QUERY_IN_LOOP_ERROR', () => {
+		const cfgRes = initEngineConfig({ timeZone: 'UTC', propertyTypes: {} });
+		expect(cfgRes.ok).toBe(true);
+		if (!cfgRes.ok) return;
+
+		const src = [
+			'{% targetPath template.folders.default active %}',
+			'{% frontmatter "today as created" %}',
+			'{{ ◊.trigger }}',
+			'{% for x in (1..2) %}{% query bad %}#work{% endquery %}{% endfor %}',
+		].join('\n');
+
+		const analysis = analyzeRhizomeCodeBlock(src, cfgRes.config, PINNED_REF_MS);
+		const tokenTextsByKind = (kind: string) =>
+			analysis.tokens
+				.filter((t) => t.kind === kind)
+				.map((t) => src.slice(t.startOffset, t.endOffset));
+
+		expect(tokenTextsByKind('liquid-keyword')).toEqual(
+			expect.arrayContaining(['targetPath', 'active', 'frontmatter', 'for', 'query']),
+		);
+		expect(tokenTextsByKind('liquid-variable')).toEqual(
+			expect.arrayContaining(['template.folders.default', '◊.trigger']),
+		);
+		expect(analysis.diagnostics.some((d) => d.code === 'QUERY_IN_LOOP_ERROR')).toBe(true);
+	});
 });

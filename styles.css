@@ -154,3 +154,84 @@
 	outline: 2px solid var(--background-modifier-border-focus);
 	outline-offset: 1px;
 }
+
+/* Run-once template picker & preflight error modals */
+.rhizome-template-picker-row {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.rhizome-template-picker-title-row {
+	align-items: center;
+	display: flex;
+	gap: var(--size-4-2, 8px);
+	justify-content: space-between;
+}
+
+.rhizome-template-picker-title {
+	font-weight: 500;
+}
+
+.rhizome-template-picker-badge {
+	background-color: var(--background-modifier-hover);
+	border-radius: var(--radius-s, 4px);
+	color: var(--text-muted);
+	font-size: var(--font-smallest, 11px);
+	padding: 1px 6px;
+}
+
+.rhizome-template-picker-folder {
+	color: var(--text-muted);
+	font-size: var(--font-smaller, 12px);
+}
+
+.rhizome-template-error-summary {
+	color: var(--text-muted);
+	margin-top: 0;
+}
+
+.rhizome-template-error-list {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-3, 12px);
+	margin-bottom: var(--size-4-3, 12px);
+	max-height: 55vh;
+	overflow-y: auto;
+}
+
+.rhizome-template-error-group {
+	background-color: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 8px);
+	padding: var(--size-4-3, 12px);
+}
+
+.rhizome-template-error-group-header {
+	color: var(--text-normal);
+	font-size: var(--font-smaller, 12px);
+	font-weight: 600;
+	margin-bottom: var(--size-4-2, 8px);
+}
+
+.rhizome-template-error-item + .rhizome-template-error-item {
+	border-top: 1px solid var(--background-modifier-border);
+	margin-top: var(--size-4-2, 8px);
+	padding-top: var(--size-4-2, 8px);
+}
+
+.rhizome-template-error-location {
+	color: var(--text-muted);
+	font-size: var(--font-smallest, 11px);
+	margin-left: auto;
+}
+
+.rhizome-template-error-snippet {
+	background-color: var(--code-background, var(--background-primary));
+	border-radius: var(--radius-s, 4px);
+	font-family: var(--font-monospace);
+	font-size: var(--font-smallest, 11px);
+	margin: var(--size-4-2, 8px) 0 0;
+	overflow-x: auto;
+	padding: var(--size-4-2, 8px);
+}

@@ -1,4 +1,97 @@
-import type { QueryExplainCutoff, SourceSpan } from '@core/search';
+import type {
+	BacklinkRef,
+	NormalizedAliasLocation,
+	NormalizedBlock,
+	NormalizedDocument,
+	NormalizedFileInfo,
+	NormalizedHeading,
+	NormalizedLink,
+	NormalizedPropertyLocation,
+	NormalizedTagLocation,
+	NormalizedTask,
+	QueryExplainCutoff,
+	ResolvedEngineConfig,
+	SourceSpan,
+} from '@core/search';
+
+/**
+ * Execution mode exposed at `◊.trigger` in the root Liquid template scope.
+ */
+export type TemplateTrigger = 'newNote' | 'atCursor' | 'dynamicCodeblock';
+
+/**
+ * Post-creation tab behavior for a `"newNote"` template block, controlled by `{% targetPath %}`.
+ */
+export type TemplateTargetTabMode = 'background' | 'active' | 'closed';
+
+/**
+ * Configurable starting rung on the graceful-degradation folder ladder for `template.folders.default`.
+ */
+export type NewNoteDefaultFolderRung =
+	'notebookNavigator' | 'obsidianFiles' | 'activeNote' | 'vaultRoot';
+
+export const NEW_NOTE_DEFAULT_FOLDER_RUNGS: readonly NewNoteDefaultFolderRung[] = Object.freeze([
+	'notebookNavigator',
+	'obsidianFiles',
+	'activeNote',
+	'vaultRoot',
+]);
+
+export function isNewNoteDefaultFolderRung(value: unknown): value is NewNoteDefaultFolderRung {
+	return (
+		typeof value === 'string' &&
+		(NEW_NOTE_DEFAULT_FOLDER_RUNGS as readonly string[]).includes(value)
+	);
+}
+
+/**
+ * Graceful-degradation folder ladder rungs exposed at `template.folders.*`.
+ * Each rung resolves to a vault-relative folder path (no leading/trailing `/`) or `""` for vault root.
+ */
+export interface TemplateFolderLadder {
+	readonly notebookNavigator: string;
+	readonly obsidianFiles: string;
+	readonly activeNote: string;
+	readonly default: string;
+}
+
+/**
+ * Normalized metadata snapshot of the source template note exposed under `template` in `"newNote"`
+ * and `"atCursor"` modes (`null` in `"dynamicCodeblock"` outside `templatesFolder`).
+ */
+export interface TemplateMetadataObject {
+	readonly file: NormalizedFileInfo;
+	readonly aliases: readonly string[];
+	readonly aliasLocations: readonly NormalizedAliasLocation[];
+	readonly tags: readonly string[];
+	readonly tagLocations: readonly NormalizedTagLocation[];
+	readonly cssclasses: readonly string[];
+	readonly headings: readonly NormalizedHeading[];
+	readonly links: readonly NormalizedLink[];
+	readonly embeds: readonly NormalizedLink[];
+	readonly blocks: readonly NormalizedBlock[];
+	readonly tasks: readonly NormalizedTask[];
+	readonly properties: Readonly<Record<string, unknown>>;
+	readonly propertyLocations: readonly NormalizedPropertyLocation[];
+	readonly backlinks: readonly BacklinkRef[];
+	readonly folders: TemplateFolderLadder;
+}
+
+/**
+ * Port interface for stateful per-invocation `{% targetPath %}` collision resolution across blocks.
+ */
+export interface TargetPathClaimPort {
+	claim(blockIndex: number, normalizedPath: string): string;
+}
+
+/**
+ * Options passed to `TemplateExecutionCallbacks.runQueries` when evaluating deferred `@this.*`
+ * queries lazily during Pass 2 in `"newNote"` mode.
+ */
+export interface TemplateLazyQueryOptions {
+	readonly hostDoc?: NormalizedDocument | null | undefined;
+	readonly priorQueryPaths?: Readonly<Record<string, readonly string[]>> | undefined;
+}
 
 /**
  * Metadata and source spans for a single `{% query <name> [explain] [cutoff: <int>] %} ... {% endquery %}`
@@ -24,7 +117,11 @@ export type TemplateDiagnosticCode =
 	| 'TEMPLATE_SYNTAX_ERROR'
 	| 'INVALID_QUERY_TAG_ARGS'
 	| 'INVALID_HEADING_TAG_ARGS'
+	| 'INVALID_TARGET_PATH_ARGS'
+	| 'INVALID_TARGET_PATH'
+	| 'INVALID_FRONTMATTER_TAG_ARGS'
 	| 'DUPLICATE_QUERY_NAME'
+	| 'QUERY_IN_LOOP_ERROR'
 	| 'TEMPLATE_RENDER_ERROR'
 	| 'INLINE_QUERY_SCOPE_UNAVAILABLE';
 
@@ -75,13 +172,20 @@ export interface TemplatePlatformFlags {
  * root globals (`vault`, `tz`, `language`, `platform.*`) and pin relative temporal literals.
  */
 export interface TemplateRuntimeContext {
-	readonly sourcePath?: string;
-	readonly referenceTimeMs?: number;
-	readonly timeZone?: string;
-	readonly vault?: string;
-	readonly language?: string;
-	readonly platform?: Partial<TemplatePlatformFlags>;
-	readonly headingLevel?: number;
+	readonly sourcePath?: string | undefined;
+	readonly referenceTimeMs?: number | undefined;
+	readonly timeZone?: string | undefined;
+	readonly vault?: string | undefined;
+	readonly language?: string | undefined;
+	readonly platform?: Partial<TemplatePlatformFlags> | undefined;
+	readonly headingLevel?: number | undefined;
+	readonly trigger?: TemplateTrigger | undefined;
+	readonly template?: TemplateMetadataObject | null | undefined;
+	readonly initialTargetPath?: string | undefined;
+	readonly blockIndex?: number | undefined;
+	readonly claimRegistry?: TargetPathClaimPort | undefined;
+	readonly resolvedConfig?: ResolvedEngineConfig | undefined;
+	readonly configDir?: string | null | undefined;
 }
 
 /**
@@ -90,8 +194,16 @@ export interface TemplateRuntimeContext {
  * without coupling `@core/templates` to Obsidian.
  */
 export interface TemplateExecutionCallbacks {
-	runQueries(queries: Readonly<Record<string, string>>): Promise<Record<string, unknown[]>>;
-	explainQuery(query: string, heading: string, cutoff?: QueryExplainCutoff): Promise<string>;
+	runQueries(
+		queries: Readonly<Record<string, string>>,
+		lazyOptions?: TemplateLazyQueryOptions,
+	): Promise<Record<string, unknown[]>>;
+	explainQuery(
+		query: string,
+		heading: string,
+		cutoff?: QueryExplainCutoff,
+		lazyOptions?: TemplateLazyQueryOptions,
+	): Promise<string>;
 	resolveHost?: (sourcePath: string) => Promise<object | null> | object | null;
 	readTemplateFile?: (vaultRelativePath: string) => Promise<string | null>;
 	folders?: TemplateFolderConfig;
@@ -106,4 +218,8 @@ export interface TemplateRenderResult {
 	readonly markdown: string;
 	readonly queries: readonly ExtractedQueryBlock[];
 	readonly diagnostics: readonly TemplateDiagnostic[];
+	readonly targetPath?: string | undefined;
+	readonly tabMode?: TemplateTargetTabMode | undefined;
+	readonly frontmatter?: Readonly<Record<string, unknown>> | undefined;
+	readonly hasFrontmatterMutations?: boolean | undefined;
 }

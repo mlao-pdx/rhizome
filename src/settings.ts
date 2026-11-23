@@ -10,11 +10,16 @@ import {
 	DEFAULT_LAYOUTS_FOLDER,
 	DEFAULT_PARTIALS_FOLDER,
 	DEFAULT_TEMPLATES_FOLDER,
+	isNewNoteDefaultFolderRung,
+	NEW_NOTE_DEFAULT_FOLDER_RUNGS,
+	type NewNoteDefaultFolderRung,
 } from '@core/templates';
 import type { LogLevel } from '@ports/logger-port';
 import { LEVEL_ORDER } from './adapters/logger-format';
 import { mergeSettings } from './adapters/plugin-data-store';
 import RhizomePlugin from './main';
+
+export { isNewNoteDefaultFolderRung, NEW_NOTE_DEFAULT_FOLDER_RUNGS, type NewNoteDefaultFolderRung };
 
 export interface RhizomeSettings {
 	/** Vault-relative folder path for LiquidJS top-level templates (`root`). */
@@ -23,6 +28,8 @@ export interface RhizomeSettings {
 	partialsFolder: string;
 	/** Vault-relative folder path for LiquidJS layouts (`{% layout %}`). */
 	layoutsFolder: string;
+	/** Starting rung on the graceful-degradation folder ladder for `template.folders.default`. */
+	newNoteDefaultFolderRung: NewNoteDefaultFolderRung;
 	/** Diagnostics: write logs to the vault. Off by default. */
 	loggingEnabled: boolean;
 	/** Diagnostics: minimum severity written once logging is enabled. */
@@ -33,6 +40,7 @@ export const DEFAULT_SETTINGS: RhizomeSettings = {
 	templatesFolder: DEFAULT_TEMPLATES_FOLDER,
 	partialsFolder: DEFAULT_PARTIALS_FOLDER,
 	layoutsFolder: DEFAULT_LAYOUTS_FOLDER,
+	newNoteDefaultFolderRung: 'notebookNavigator',
 	loggingEnabled: false,
 	logLevel: 'warn',
 };
@@ -136,6 +144,9 @@ export class RhizomeSettingTab extends PluginSettingTab {
 		});
 		await this.plugin.saveSettings();
 		if (key === 'templatesFolder' || key === 'partialsFolder' || key === 'layoutsFolder') {
+			this.plugin.handleTemplateFoldersChanged?.();
+		} else if (key === 'newNoteDefaultFolderRung') {
+			this.plugin.codeBlockRenderCache?.clear();
 			this.plugin.activeQueryRoster?.resetAll();
 		}
 		if (key === 'loggingEnabled' || key === 'logLevel') {
@@ -187,6 +198,21 @@ export class RhizomeSettingTab extends PluginSettingTab {
 							key: 'layoutsFolder',
 							defaultValue: DEFAULT_LAYOUTS_FOLDER,
 							placeholder: DEFAULT_LAYOUTS_FOLDER,
+						},
+					},
+					{
+						name: 'Default new-note folder',
+						desc: 'Highest-priority folder source used for new notes created from templates.',
+						control: {
+							type: 'dropdown',
+							key: 'newNoteDefaultFolderRung',
+							defaultValue: DEFAULT_SETTINGS.newNoteDefaultFolderRung,
+							options: {
+								notebookNavigator: 'Notebook Navigator selection',
+								obsidianFiles: 'Obsidian Files setting',
+								activeNote: 'Active note folder',
+								vaultRoot: 'Vault root',
+							},
 						},
 					},
 				],

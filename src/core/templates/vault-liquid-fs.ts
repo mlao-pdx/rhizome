@@ -219,6 +219,21 @@ export function isPathInTemplateFolders(
 }
 
 /**
+ * Checks whether a vault-relative file path resides specifically inside `templatesFolder`
+ * (used for template discovery and `"newNote"` Live Preview simulation).
+ */
+export function isPathInTemplatesFolder(
+	vaultPath: unknown,
+	config?: TemplateFolderConfig,
+): boolean {
+	if (typeof vaultPath !== 'string' || vaultPath.length === 0) {
+		return false;
+	}
+	const resolved = resolveTemplateFolders(config);
+	return isContainedInVaultFolder(resolved.templatesFolder, vaultPath, resolved.configDir);
+}
+
+/**
  * Creates a strictly sandboxed, vault-scoped LiquidJS `FS` implementation that:
  * - Never touches Node `fs` or browser `XMLHttpRequest`.
  * - Enforces containment inside the configured `templatesFolder`, `partialsFolder`, and `layoutsFolder`.

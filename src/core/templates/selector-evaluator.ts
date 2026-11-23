@@ -28,6 +28,16 @@ export interface ParsedPathSelector {
 	readonly outputSegments: readonly string[];
 	readonly outputKey: string;
 	readonly isNullLiteral?: boolean;
+	readonly hasLiteral?: boolean;
+	readonly literalValue?: unknown;
+}
+
+/**
+ * Options controlling literal source parsing and strict error reporting in selector parsers.
+ */
+export interface ParseSelectorOptions {
+	readonly allowLiterals?: boolean | undefined;
+	readonly strict?: boolean | undefined;
 }
 
 /**
@@ -209,11 +219,64 @@ function findFirstTopLevelPipe(raw: string): number {
 	return -1;
 }
 
+function tryParseDirectSelectorLiteral(
+	rawSourcePath: string,
+): { readonly matched: true; readonly value: unknown } | { readonly matched: false } {
+	if (rawSourcePath === 'true') {
+		return { matched: true, value: true };
+	}
+	if (rawSourcePath === 'false') {
+		return { matched: true, value: false };
+	}
+	if (/^[+-]?\d+(?:\.\d+)?$/.test(rawSourcePath)) {
+		const num = Number(rawSourcePath);
+		if (Number.isFinite(num)) {
+			return { matched: true, value: num === 0 ? 0 : num };
+		}
+	}
+	if (
+		rawSourcePath.length >= 2 &&
+		((rawSourcePath.startsWith('"') && rawSourcePath.endsWith('"')) ||
+			(rawSourcePath.startsWith("'") && rawSourcePath.endsWith("'")))
+	) {
+		const quoteChar = rawSourcePath[0]!;
+		let unescaped = '';
+		let escaped = false;
+		for (let i = 1; i < rawSourcePath.length - 1; i++) {
+			const ch = rawSourcePath[i]!;
+			if (escaped) {
+				if (ch === 'n') unescaped += '\n';
+				else if (ch === 'r') unescaped += '\r';
+				else if (ch === 't') unescaped += '\t';
+				else unescaped += ch;
+				escaped = false;
+				continue;
+			}
+			if (ch === '\\') {
+				escaped = true;
+				continue;
+			}
+			if (ch === quoteChar) {
+				// Unescaped quote inside means multiple tokens (not a single string literal).
+				return { matched: false };
+			}
+			unescaped += ch;
+		}
+		if (!escaped) {
+			return { matched: true, value: unescaped };
+		}
+	}
+	return { matched: false };
+}
+
 /**
  * Parses a single selector string of the form `<deep.path> [| <filterPipeline>] [as <target.deep.path>]`.
  * Returns `null` if the source path, filter pipeline, or target path is invalid or contains `FORBIDDEN_KEYS`.
  */
-export function parseSingleSelectorString(raw: string): ParsedPathSelector | null {
+export function parseSingleSelectorString(
+	raw: string,
+	options?: ParseSelectorOptions,
+): ParsedPathSelector | null {
 	const trimmed = raw.trim();
 	if (trimmed.length === 0) return null;
 
@@ -227,9 +290,31 @@ export function parseSingleSelectorString(raw: string): ParsedPathSelector | nul
 		return null;
 	}
 
-	const isSelfSelector = rawSourcePath === '.' || rawSourcePath === 'this';
-	const isNullLiteral = rawSourcePath === 'nil' || rawSourcePath === 'null';
-	const segments = isSelfSelector || isNullLiteral ? [] : splitCleanSegments(rawSourcePath);
+	const normalizedSourcePath =
+		options?.allowLiterals === true
+			? rawSourcePath.replace(
+					/^([a-zA-Z_][a-zA-Z0-9_-]*)\s*([+-])\s*(\d+[a-zA-Z]+)$/,
+					'$1$2$3',
+				)
+			: rawSourcePath;
+
+	const isSelfSelector = normalizedSourcePath === '.' || normalizedSourcePath === 'this';
+	const isNullLiteral = normalizedSourcePath === 'nil' || normalizedSourcePath === 'null';
+	const parsedLiteral =
+		!isSelfSelector && !isNullLiteral && options?.allowLiterals
+			? tryParseDirectSelectorLiteral(normalizedSourcePath)
+			: ({ matched: false } as const);
+
+	if (parsedLiteral.matched && targetPath === null) {
+		throw new Error(
+			`Literal selector '${trimmed}' requires an explicit 'as <target>' property name.`,
+		);
+	}
+
+	const segments =
+		isSelfSelector || isNullLiteral || parsedLiteral.matched
+			? []
+			: splitCleanSegments(normalizedSourcePath);
 	if (!segments) return null;
 
 	if (targetPath !== null) {
@@ -247,6 +332,9 @@ export function parseSingleSelectorString(raw: string): ParsedPathSelector | nul
 			outputSegments: Object.freeze(outputSegments),
 			outputKey,
 			...(isNullLiteral ? { isNullLiteral: true } : {}),
+			...(parsedLiteral.matched
+				? { hasLiteral: true, literalValue: parsedLiteral.value }
+				: {}),
 		});
 	}
 
@@ -268,7 +356,7 @@ export function parseSingleSelectorString(raw: string): ParsedPathSelector | nul
  * Splits a multi-selector string on top-level commas (outside quotes, parentheses,
  * and filter argument lists).
  */
-export function splitTopLevelSelectorList(raw: string): string[] {
+export function splitTopLevelSelectorList(raw: string, strict: boolean = false): string[] {
 	const results: string[] = [];
 	let quote: string | null = null;
 	let escaped = false;
@@ -276,6 +364,7 @@ export function splitTopLevelSelectorList(raw: string): string[] {
 	let inFilterWithColon = false;
 	let currentFilterName = '';
 	let filterArgCommasSeen = 0;
+	let sawTopLevelComma = false;
 	let start = 0;
 
 	for (let i = 0; i < raw.length; i++) {
@@ -317,7 +406,8 @@ export function splitTopLevelSelectorList(raw: string): string[] {
 				continue;
 			}
 			if (ch === ',') {
-				if (inFilterWithColon) {
+				const currentSlice = raw.slice(start, i);
+				if (inFilterWithColon && !hasExplicitTrailingAsClause(currentSlice)) {
 					const rest = raw.slice(i + 1).trimStart();
 					const nextCommaIdx = rest.indexOf(',');
 					const nextPipeIdx = findFirstTopLevelPipe(rest);
@@ -346,17 +436,21 @@ export function splitTopLevelSelectorList(raw: string): string[] {
 						filterArgCommasSeen < maxExtraCommas &&
 						(!hasNextPipe || boundIdx === -1) &&
 						!hasTrailingAsOrDir;
-					if (
-						stripDirChunk.startsWith('"') ||
-						stripDirChunk.startsWith("'") ||
-						NUMERIC_OR_LITERAL_ARG_RE.test(stripDirChunk) ||
-						isMultiArgContinuation
-					) {
+					const isLiteralFilterArg =
+						(stripDirChunk.startsWith('"') ||
+							stripDirChunk.startsWith("'") ||
+							NUMERIC_OR_LITERAL_ARG_RE.test(stripDirChunk)) &&
+						(!hasTrailingAsOrDir || filterArgCommasSeen < maxExtraCommas);
+					if (isLiteralFilterArg || isMultiArgContinuation) {
 						filterArgCommasSeen++;
 						continue;
 					}
 				}
-				const piece = raw.slice(start, i).trim();
+				sawTopLevelComma = true;
+				const piece = currentSlice.trim();
+				if (piece.length === 0 && strict) {
+					throw new Error("Unexpected empty selector before ',' in selector string.");
+				}
 				if (piece.length > 0) {
 					results.push(piece);
 				}
@@ -369,6 +463,9 @@ export function splitTopLevelSelectorList(raw: string): string[] {
 	}
 
 	const tail = raw.slice(start).trim();
+	if (tail.length === 0 && sawTopLevelComma && strict) {
+		throw new Error("Trailing ',' in selector string.");
+	}
 	if (tail.length > 0) {
 		results.push(tail);
 	}
@@ -381,14 +478,22 @@ export function splitTopLevelSelectorList(raw: string): string[] {
  * - Array arguments containing string selectors (e.g., `pick: keys_array`)
  * - LiquidJS named-argument `[alias, path]` 2-tuples when `alias` is a valid target path
  */
-export function parsePickOrAggSelectors(args: readonly unknown[]): ParsedPathSelector[] {
+export function parsePickOrAggSelectors(
+	args: readonly unknown[],
+	options?: ParseSelectorOptions,
+): ParsedPathSelector[] {
 	const selectors: ParsedPathSelector[] = [];
+	const strict = options?.strict === true;
 
 	const visitArg = (arg: unknown, allowNamedTuple: boolean): void => {
 		const u = unwrapLiquidValue(arg);
 		if (typeof u === 'string') {
-			for (const piece of splitTopLevelSelectorList(u)) {
-				const parsed = parseSingleSelectorString(piece);
+			const pieces = splitTopLevelSelectorList(u, strict);
+			if (strict && pieces.length === 0) {
+				throw new Error('Selector string cannot be empty.');
+			}
+			for (const piece of pieces) {
+				const parsed = parseSingleSelectorString(piece, options);
 				if (parsed) {
 					if (
 						parsed.isNullLiteral &&
@@ -399,6 +504,8 @@ export function parsePickOrAggSelectors(args: readonly unknown[]): ParsedPathSel
 						);
 					}
 					selectors.push(parsed);
+				} else if (strict) {
+					throw new Error(`Invalid selector '${piece}'.`);
 				}
 			}
 			return;
@@ -422,7 +529,10 @@ export function parsePickOrAggSelectors(args: readonly unknown[]): ParsedPathSel
 					!/\s+as\s+/i.test(rawVal) &&
 					(isQuotedKey || rawVal.includes('.') || rawVal.includes('|'))
 				) {
-					const parsed = parseSingleSelectorString(`${rawVal} as ${unquotedKey}`);
+					const parsed = parseSingleSelectorString(
+						`${rawVal} as ${unquotedKey}`,
+						options,
+					);
 					if (parsed) {
 						selectors.push(parsed);
 						return;
@@ -432,11 +542,20 @@ export function parsePickOrAggSelectors(args: readonly unknown[]): ParsedPathSel
 			for (const item of u) {
 				visitArg(item, false);
 			}
+			return;
+		}
+		if (strict) {
+			throw new Error(
+				'Selector argument must evaluate to a selector string or an array of selector strings.',
+			);
 		}
 	};
 
 	for (const arg of args) {
 		visitArg(arg, true);
+	}
+	if (strict && selectors.length === 0) {
+		throw new Error('At least one valid property selector is required.');
 	}
 	return selectors;
 }
@@ -506,6 +625,44 @@ function getCompiledFilterTokens(filterRaw: string): ReturnType<Tokenizer['readF
 }
 
 /**
+ * Evaluates a compiled Liquid filter pipeline (`filterRaw`) synchronously against `ctx`.
+ */
+export function runSelectorFilterPipeline(
+	rawVal: unknown,
+	filterRaw: string,
+	ctx: Context,
+	liquid?: Liquid,
+): unknown {
+	const filterTokens = getCompiledFilterTokens(filterRaw);
+	if (filterTokens.length === 0) {
+		return rawVal;
+	}
+	const effectiveLiquid = liquid ?? readContextLiquidInstance(ctx);
+	const ctxInternal = ctx as unknown as { sync?: boolean | undefined };
+	const prevSync = ctxInternal.sync;
+	ctxInternal.sync = true;
+	try {
+		let current: unknown = rawVal;
+		for (const token of filterTokens) {
+			const filterImpl: FilterImplOptions | undefined = effectiveLiquid
+				? effectiveLiquid.filters[token.name]
+				: (fallbackCustomFilters.get(token.name) ??
+					(filters as Record<string, FilterImplOptions | undefined>)[token.name]);
+			const filterInstance = new Filter(
+				token,
+				filterImpl,
+				(effectiveLiquid ?? { options: ctx.opts, filters }) as unknown as Liquid,
+			);
+			current = toValueSync(filterInstance.render(current, ctx));
+		}
+		const finalVal = unwrapLiquidValue(current);
+		return finalVal === undefined ? null : finalVal;
+	} finally {
+		ctxInternal.sync = prevSync;
+	}
+}
+
+/**
  * Evaluates a `ParsedPathSelector` against `item`: reads `readDeepPath(item, selector.segments)`
  * (or `null` when `selector.isNullLiteral === true`) and, when `selector.filterRaw !== null`,
  * runs the Liquid filter pipeline with `item` pushed onto the active `Context` so filter arguments
@@ -513,10 +670,17 @@ function getCompiledFilterTokens(filterRaw: string): ReturnType<Tokenizer['readF
  */
 export function evaluateSelectorOnItem(
 	item: unknown,
-	selector: Pick<ParsedPathSelector, 'segments' | 'filterRaw' | 'isNullLiteral'>,
+	selector: Pick<
+		ParsedPathSelector,
+		'segments' | 'filterRaw' | 'isNullLiteral' | 'hasLiteral' | 'literalValue'
+	>,
 	filterThis?: LiquidFilterThis | void,
 ): unknown {
-	const rawVal = selector.isNullLiteral ? null : readDeepPath(item, selector.segments);
+	const rawVal = selector.isNullLiteral
+		? null
+		: selector.hasLiteral
+			? selector.literalValue
+			: readDeepPath(item, selector.segments);
 	if (selector.filterRaw === null) {
 		return rawVal;
 	}
@@ -537,29 +701,11 @@ export function evaluateSelectorOnItem(
 
 	const unwrappedItem = unwrapLiquidValue(item);
 	const scopeFrame = isPlainRecord(unwrappedItem) ? unwrappedItem : { item: unwrappedItem };
-	const ctxInternal = ctx as unknown as { sync?: boolean | undefined };
-	const prevSync = ctxInternal.sync;
 
 	ctx.push(scopeFrame);
-	ctxInternal.sync = true;
 	try {
-		let current: unknown = rawVal;
-		for (const token of filterTokens) {
-			const filterImpl: FilterImplOptions | undefined = liquid
-				? liquid.filters[token.name]
-				: (fallbackCustomFilters.get(token.name) ??
-					(filters as Record<string, FilterImplOptions | undefined>)[token.name]);
-			const filterInstance = new Filter(
-				token,
-				filterImpl,
-				(liquid ?? { options: ctx.opts, filters }) as unknown as Liquid,
-			);
-			current = toValueSync(filterInstance.render(current, ctx));
-		}
-		const finalVal = unwrapLiquidValue(current);
-		return finalVal === undefined ? null : finalVal;
+		return runSelectorFilterPipeline(rawVal, selector.filterRaw, ctx, liquid);
 	} finally {
-		ctxInternal.sync = prevSync;
 		ctx.pop();
 	}
 }
@@ -656,6 +802,46 @@ export function writeDeepTargetValue(
 		promotedByContainer.set(current, promotedSet);
 	}
 	safeMergeKeyValue(current, promotedSet, leafKey, val);
+}
+
+/**
+ * Writes `val` into `rootOut` at `outputSegments` using copy-on-write spine cloning
+ * for intermediate objects and **last-executed-wins** direct replacement at `leafKey`.
+ */
+export function overwriteDeepTargetValue(
+	rootOut: Record<string, unknown>,
+	clonedContainers: Set<Record<string, unknown>>,
+	outputSegments: readonly string[],
+	val: unknown,
+): void {
+	if (outputSegments.length === 0) return;
+
+	let current = rootOut;
+	for (let i = 0; i < outputSegments.length - 1; i++) {
+		const seg = outputSegments[i]!;
+		if (FORBIDDEN_KEYS.has(seg)) return;
+
+		const existing = Object.prototype.hasOwnProperty.call(current, seg)
+			? unwrapLiquidValue(current[seg])
+			: undefined;
+		if (!isPlainRecord(existing)) {
+			const fresh: Record<string, unknown> = {};
+			current[seg] = fresh;
+			clonedContainers.add(fresh);
+			current = fresh;
+		} else if (!clonedContainers.has(existing)) {
+			const cloned = shallowClonePlainRecord(existing);
+			current[seg] = cloned;
+			clonedContainers.add(cloned);
+			current = cloned;
+		} else {
+			current = existing;
+		}
+	}
+
+	const leafKey = outputSegments[outputSegments.length - 1]!;
+	if (FORBIDDEN_KEYS.has(leafKey)) return;
+	current[leafKey] = val === undefined ? null : val;
 }
 
 /**

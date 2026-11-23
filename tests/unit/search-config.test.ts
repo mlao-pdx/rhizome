@@ -7,6 +7,7 @@ import {
 	substringStringMatch,
 	VALID_PROPERTY_TYPES_LIST,
 	VIRTUAL_FILE_KEYS_LIST,
+	createNormalizedFileInfo,
 	type NormalizedDocument,
 	type ObsidianPropertyType,
 	type ScopeDefinition,
@@ -15,7 +16,7 @@ import {
 function createFixtureDoc(): NormalizedDocument {
 	return {
 		normalizationFingerprint: '{"tz":"UTC","types":[]}',
-		file: {
+		file: createNormalizedFileInfo({
 			path: 'Projects/Active/Sprint-12.md',
 			name: 'Sprint-12.md',
 			basename: 'Sprint-12',
@@ -24,7 +25,7 @@ function createFixtureDoc(): NormalizedDocument {
 			created: '2023-11-14T22:13',
 			modified: '2023-11-14T22:13',
 			size: 2048,
-		},
+		}),
 		aliases: ['Q4 Sprint', 'Active Roadmap'],
 		aliasLocations: [
 			{

@@ -91,6 +91,7 @@ export class InlineHostResolver {
 	private readonly logger: LoggerPort | undefined;
 	private readonly backlinkIndex: BacklinkIndex | undefined;
 	private readonly documentCache: NormalizedDocumentCache | undefined;
+	private readonly isIgnoredFile: ((file: TFile) => boolean) | undefined;
 	private config: ResolvedEngineConfig = buildFallbackConfig({});
 	private configLoadPending = false;
 	private configLoaded = false;
@@ -106,11 +107,13 @@ export class InlineHostResolver {
 		logger?: LoggerPort,
 		backlinkIndex?: BacklinkIndex,
 		documentCache?: NormalizedDocumentCache,
+		isIgnoredFile?: (file: TFile) => boolean,
 	) {
 		this.app = app;
 		this.logger = logger;
 		this.backlinkIndex = backlinkIndex;
 		this.documentCache = documentCache;
+		this.isIgnoredFile = isIgnoredFile;
 	}
 
 	/** Number of distinct normalized `sourcePath` buckets with active inline subscribers. */
@@ -191,7 +194,11 @@ export class InlineHostResolver {
 
 		const cache = this.app.metadataCache.getFileCache(file);
 		if (
-			hasInternalRhizomeFlag(cache?.frontmatter, INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY)
+			hasInternalRhizomeFlag(
+				cache?.frontmatter,
+				INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,
+			) ||
+			this.isIgnoredFile?.(file) === true
 		) {
 			this.documentCache?.delete(file.path);
 			this.memoByPath.delete(normalized);
@@ -238,6 +245,7 @@ export class InlineHostResolver {
 		}
 
 		const isIgnored = (candidate: TFile): boolean =>
+			this.isIgnoredFile?.(candidate) === true ||
 			hasInternalRhizomeFlag(
 				this.app.metadataCache.getFileCache(candidate)?.frontmatter,
 				INTERNAL_RHIZOME_CODES.DO_NOT_INDEX_OR_QUERY,

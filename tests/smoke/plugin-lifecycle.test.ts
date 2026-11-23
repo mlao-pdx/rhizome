@@ -121,6 +121,7 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 			'Templates folder',
 			'Partials folder',
 			'Layouts folder',
+			'Default new-note folder',
 		]);
 
 		// Ordering invariant: the Diagnostics sub-page entry bar must always be the final item.
@@ -554,6 +555,17 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		expect(inlineCmd?.name).toBe('Insert inline expression');
 		expect(inlineCmd?.hotkeys).toBeUndefined();
 		expect(typeof inlineCmd?.editorCallback).toBe('function');
+
+		const createNoteCmd = mockPlugin.commands.find((c) => c.id === 'create-note-from-template');
+		expect(createNoteCmd).toBeDefined();
+		expect(createNoteCmd?.name).toBe('Create new note from template');
+		expect(createNoteCmd?.hotkeys).toBeUndefined();
+
+		const insertFromTplCmd = mockPlugin.commands.find((c) => c.id === 'insert-from-template');
+		expect(insertFromTplCmd).toBeDefined();
+		expect(insertFromTplCmd?.name).toBe('Insert from template');
+		expect(insertFromTplCmd?.hotkeys).toBeUndefined();
+		expect(typeof insertFromTplCmd?.editorCallback).toBe('function');
 
 		const unsub = plugin.inlineHostResolver.subscribe('notes/a.md', { onChange: () => {} });
 		expect(plugin.inlineHostResolver.activePathCount).toBe(1);

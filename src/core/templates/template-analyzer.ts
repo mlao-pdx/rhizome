@@ -106,6 +106,11 @@ const LIQUID_KEYWORDS: ReadonlySet<string> = new Set([
 	'endheading',
 	'promote',
 	'demote',
+	'targetPath',
+	'frontmatter',
+	'closed',
+	'active',
+	'template',
 	'for',
 	'endfor',
 	'if',
@@ -207,7 +212,7 @@ function scanLiquidTagInner(inner: string, baseOffset: number, out: CodeBlockTok
 	}
 
 	const tokenRe =
-		/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\|\s*[a-zA-Z_][a-zA-Z0-9_-]*)|([+-]?\d+(?:\.\d+)?)|([a-zA-Z_][a-zA-Z0-9_.-]*(?:\+\d+d?)?)/g;
+		/("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')|(\|\s*[a-zA-Z_][a-zA-Z0-9_-]*)|([+-]?\d+(?:\.\d+)?)|([a-zA-Z_\u25CA][a-zA-Z0-9_.\u25CA-]*(?:\+\d+d?)?)/g;
 	let match: RegExpExecArray | null;
 	while ((match = tokenRe.exec(inner)) !== null) {
 		const tokStart = baseOffset + match.index;

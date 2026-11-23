@@ -1,4 +1,5 @@
 import {
+	createNormalizedFileInfo,
 	getInternalFileEpochMs,
 	setInternalFileEpochMs,
 	validateFileStat,
@@ -177,7 +178,7 @@ export function rebindMovedDocument(
 			? prevDoc.file.modified
 			: formatEpochMsToMinuteIso(mtime, timeZone);
 
-	const file: NormalizedFileInfo = {
+	const file: NormalizedFileInfo = createNormalizedFileInfo({
 		path: tfile.path,
 		name: tfile.name,
 		basename: tfile.basename,
@@ -186,7 +187,7 @@ export function rebindMovedDocument(
 		created,
 		modified,
 		size,
-	};
+	});
 	setInternalFileEpochMs(file, { ctime, mtime });
 
 	const oldPath = prevDoc.file.path;

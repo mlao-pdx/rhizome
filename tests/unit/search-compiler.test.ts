@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	collectReferencedPropertyKeys,
 	compileQuery,
+	createNormalizedFileInfo,
 	initEngineConfig,
 	levenshteinDistance,
 	MAX_QUERY_LENGTH,
@@ -815,7 +816,7 @@ describe('Step 6: PreparedQuery & AST deep freeze (Conformance Test 16c)', () =>
 	it('emits non-blocking WARN_MISSING_THIS_VALUE and WARN_THIS_TYPE_MISMATCH when hostDoc is supplied while keeping executable: true', () => {
 		const hostDoc = {
 			normalizationFingerprint: config.normalizationFingerprint,
-			file: {
+			file: createNormalizedFileInfo({
 				path: 'Projects/Apollo.md',
 				name: 'Apollo.md',
 				basename: 'Apollo',
@@ -824,7 +825,7 @@ describe('Step 6: PreparedQuery & AST deep freeze (Conformance Test 16c)', () =>
 				created: '2026-10-20T09:00',
 				modified: '2026-10-22T15:30',
 				size: 512,
-			},
+			}),
 			aliases: [],
 			aliasLocations: [],
 			tags: ['space'],

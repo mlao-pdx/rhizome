@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	buildRegex101Url,
+	createNormalizedFileInfo,
 	describeScopeSemantics,
 	explainQuery,
 	formatDateIntervalWindow,
@@ -386,7 +387,7 @@ describe('explainQuery', () => {
 		const cfg = makeConfig({ propertyTypes: { priority: 'number' } });
 		const hostDoc = {
 			normalizationFingerprint: cfg.normalizationFingerprint,
-			file: {
+			file: createNormalizedFileInfo({
 				path: 'Projects/Host.md',
 				name: 'Host.md',
 				basename: 'Host',
@@ -395,7 +396,7 @@ describe('explainQuery', () => {
 				created: '2026-10-20T09:00',
 				modified: '2026-10-22T15:30',
 				size: 512,
-			},
+			}),
 			aliases: [],
 			aliasLocations: [],
 			tags: ['alpha', 'beta'],

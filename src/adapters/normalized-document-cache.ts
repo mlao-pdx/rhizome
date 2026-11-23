@@ -139,6 +139,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 	private readonly app: App;
 	private readonly logger: LoggerPort | undefined;
 	private readonly bodyScanCache: BodyScanCache | undefined;
+	private readonly isIgnoredFile: ((file: TFile) => boolean) | undefined;
 	private readonly store = new Map<string, CacheEntry>();
 	private readonly entriesByFile = new WeakMap<TFile, CacheEntry>();
 	private readonly metadataRevisions = new WeakMap<object, number>();
@@ -148,10 +149,20 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 	private ready = true;
 	private reconcileQueue: Promise<void> = Promise.resolve();
 
-	constructor(app: App, logger?: LoggerPort, bodyScanCache?: BodyScanCache) {
+	constructor(
+		app: App,
+		logger?: LoggerPort,
+		bodyScanCache?: BodyScanCache,
+		isIgnoredFile?: (file: TFile) => boolean,
+	) {
 		this.app = app;
 		this.logger = logger;
 		this.bodyScanCache = bodyScanCache;
+		this.isIgnoredFile = isIgnoredFile;
+	}
+
+	private isIgnoredNote(file: TFile, cache?: CachedMetadata | null): boolean {
+		return isIgnoredCache(cache) || this.isIgnoredFile?.(file) === true;
 	}
 
 	/** Number of stored entries. */
@@ -242,7 +253,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			return stored !== undefined;
 		}
 		const cache = this.app.metadataCache.getFileCache(file);
-		if (isIgnoredCache(cache)) {
+		if (this.isIgnoredNote(file, cache)) {
 			return stored !== undefined;
 		}
 		if (stored === undefined) {
@@ -265,7 +276,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			return null;
 		}
 		const cache = this.app.metadataCache.getFileCache(file);
-		if (isIgnoredCache(cache)) {
+		if (this.isIgnoredNote(file, cache)) {
 			this.delete(file.path);
 			return null;
 		}
@@ -560,7 +571,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 						continue;
 					}
 					cache = this.app.metadataCache.getFileCache(file);
-					if (isIgnoredCache(cache)) {
+					if (this.isIgnoredNote(file, cache)) {
 						if (this.store.has(item.expectedPath)) {
 							this.delete(item.expectedPath);
 							removedOnFailedUpdate++;
@@ -715,7 +726,7 @@ export class NormalizedDocumentCache implements DocumentCachePort<
 			if (cache === null) {
 				uncached++;
 			}
-			if (isIgnoredCache(cache)) {
+			if (this.isIgnoredNote(file, cache)) {
 				continue;
 			}
 

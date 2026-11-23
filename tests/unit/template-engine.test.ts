@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { QueryExplainCutoff } from '../../src/core/search';
+import { digestNormalizedDocument } from '../../src/core/cache/doc-digest';
+import {
+	createNormalizedFileInfo,
+	initEngineConfig,
+	normalizeObsidianMetadata,
+	type NormalizedDocument,
+	type QueryExplainCutoff,
+} from '../../src/core/search';
 import {
 	DEFAULT_QUERY_CUTOFF,
 	MAX_TEMPLATE_OUTPUT_CHARS,
@@ -1408,5 +1415,269 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		expect(overCapRes.ok).toBe(false);
 		expect(overCapRes.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
 		expect(overCapRes.diagnostics[0]?.issue).toContain('3.25 MiB');
+	});
+
+	it('exposes ◊.trigger, template vs null, and non-enumerable NormalizedFileInfo aliases (ext, ctime, mtime) without altering | json or digestNormalizedDocument', async () => {
+		const cfgRes = initEngineConfig({ timeZone: 'UTC', propertyTypes: {} });
+		expect(cfgRes.ok).toBe(true);
+		if (!cfgRes.ok) return;
+
+		const normDoc = normalizeObsidianMetadata(
+			{
+				path: 'Notes/Alpha.md',
+				name: 'Alpha.md',
+				basename: 'Alpha',
+				extension: 'md',
+				parent: { path: 'Notes' },
+				stat: {
+					ctime: Date.UTC(2026, 10, 20, 8, 15, 0),
+					mtime: Date.UTC(2026, 10, 23, 19, 3, 0),
+					size: 128,
+				},
+			},
+			{ frontmatter: {} },
+			cfgRes.config,
+		);
+
+		expect(normDoc.file.ext).toBe('md');
+		expect(normDoc.file.ctime).toBe('2026-11-20T08:15');
+		expect(normDoc.file.mtime).toBe('2026-11-23T19:03');
+		expect(Object.keys(normDoc.file)).toEqual([
+			'path',
+			'name',
+			'basename',
+			'extension',
+			'parent',
+			'created',
+			'modified',
+			'size',
+		]);
+
+		const plainDocWithoutAliases = {
+			...normDoc,
+			file: {
+				path: normDoc.file.path,
+				name: normDoc.file.name,
+				basename: normDoc.file.basename,
+				extension: normDoc.file.extension,
+				parent: normDoc.file.parent,
+				created: normDoc.file.created,
+				modified: normDoc.file.modified,
+				size: normDoc.file.size,
+			},
+		} as unknown as NormalizedDocument;
+		expect(digestNormalizedDocument(normDoc)).toBe(
+			digestNormalizedDocument(plainDocWithoutAliases),
+		);
+
+		const tplFileInfo = createNormalizedFileInfo({
+			path: '◊Rhizome/templates/Daily.md',
+			name: 'Daily.md',
+			basename: 'Daily',
+			extension: 'md',
+			parent: '◊Rhizome/templates',
+			created: '2026-11-01T00:00',
+			modified: '2026-11-01T00:00',
+			size: 64,
+		});
+
+		const source = [
+			'trigger={{ ◊.trigger }}',
+			'tpl={% if template %}{{ template.file.basename }}:{{ template.folders.default }}{% else %}NONE{% endif %}',
+			'{% query notes %}#work{% endquery %}',
+			'ext={{ query.notes[0].file.ext }}|ctime={{ query.notes[0].file.ctime }}|mtime={{ query.notes[0].file.mtime }}',
+			'picked={{ query.notes | pick: "file.ext, file.ctime, file.mtime" | json }}',
+			'json={{ query.notes[0].file | json }}',
+		].join('\n');
+
+		const dynRes = await renderRhizomeTemplate(source, {
+			runQueries: async () => ({ notes: [normDoc] }),
+			explainQuery: async () => '',
+		});
+		expect(dynRes.ok).toBe(true);
+		expect(dynRes.markdown).toContain('trigger=dynamicCodeblock');
+		expect(dynRes.markdown).toContain('tpl=NONE');
+		expect(dynRes.markdown).toContain('ext=md|ctime=2026-11-20T08:15|mtime=2026-11-23T19:03');
+		expect(dynRes.markdown).toContain(
+			'picked=[{"ext":"md","ctime":"2026-11-20T08:15","mtime":"2026-11-23T19:03"}]',
+		);
+		expect(dynRes.markdown).toContain(
+			'json={"path":"Notes/Alpha.md","name":"Alpha.md","basename":"Alpha","extension":"md","parent":"Notes","created":"2026-11-20T08:15","modified":"2026-11-23T19:03","size":128}',
+		);
+
+		const newNoteRes = await renderRhizomeTemplate(
+			'{{ ◊.trigger }}|{{ template.folders.default }}',
+			{
+				runQueries: async () => ({}),
+				explainQuery: async () => '',
+				runtimeContext: {
+					trigger: 'newNote',
+					template: {
+						file: tplFileInfo,
+						aliases: [],
+						aliasLocations: [],
+						tags: ['daily'],
+						tagLocations: [],
+						cssclasses: [],
+						headings: [],
+						links: [],
+						embeds: [],
+						blocks: [],
+						tasks: [],
+						properties: {},
+						propertyLocations: [],
+						backlinks: [],
+						folders: {
+							notebookNavigator: 'Journal',
+							obsidianFiles: 'Inbox',
+							activeNote: '',
+							default: 'Journal',
+						},
+					},
+				},
+			},
+		);
+		expect(newNoteRes.ok).toBe(true);
+		expect(newNoteRes.markdown).toBe('newNote|Journal');
+	});
+
+	it('evaluates static queries in Pass 1.5 and defers @this.* + transitive @query.* dependents to Pass 2 after {% targetPath %} and {% frontmatter %} in newNote mode', async () => {
+		const calls: Array<{
+			queries: Record<string, string>;
+			hostPath: string | null;
+			hostTags: readonly string[];
+			priorQueryPaths: Record<string, readonly string[]> | undefined;
+		}> = [];
+
+		const source = [
+			'{% query staticProjects cutoff: 1 %}#project{% endquery %}',
+			'{% targetPath "Areas/Work/Q4 Plan" %}',
+			'{% frontmatter "\'q4\' as tags" %}',
+			'{% query byThisTag %}tag:@this.tags AND [folder: = @this.file.parent]{% endquery %}',
+			'{% query downstream %}links -> @query.byThisTag AND links -> @query.staticProjects{% endquery %}',
+			'static={{ query.staticProjects.size }}|host={{ query.byThisTag[0].file.basename }}|down={{ query.downstream[0].file.basename }}',
+		].join('\n');
+
+		const res = await renderRhizomeTemplate(source, {
+			runQueries: async (qMap, lazyOpts) => {
+				calls.push({
+					queries: { ...qMap },
+					hostPath: lazyOpts?.hostDoc?.file.path ?? null,
+					hostTags: lazyOpts?.hostDoc?.tags ?? [],
+					priorQueryPaths: lazyOpts?.priorQueryPaths
+						? { ...lazyOpts.priorQueryPaths }
+						: undefined,
+				});
+				if ('staticProjects' in qMap) {
+					return {
+						staticProjects: [
+							{ file: { path: 'Projects/P1.md', basename: 'P1' } },
+							{ file: { path: 'Projects/P2.md', basename: 'P2' } },
+						],
+					};
+				}
+				if ('byThisTag' in qMap) {
+					return {
+						byThisTag: [{ file: { path: 'Areas/Work/Match1.md', basename: 'Match1' } }],
+					};
+				}
+				return {
+					downstream: [{ file: { path: 'Areas/Work/Down1.md', basename: 'Down1' } }],
+				};
+			},
+			explainQuery: async () => '',
+			runtimeContext: {
+				trigger: 'newNote',
+				timeZone: 'UTC',
+			},
+		});
+
+		expect(res.ok).toBe(true);
+		// staticProjects had cutoff: 1 so effective size is 1, while uncutQueryPaths preserved BOTH P1.md & P2.md!
+		expect(res.markdown).toContain('static=1|host=Match1|down=Down1');
+		expect(calls).toHaveLength(3);
+		expect(calls[0]).toEqual({
+			queries: { staticProjects: '#project' },
+			hostPath: null,
+			hostTags: [],
+			priorQueryPaths: undefined,
+		});
+		expect(calls[1]).toEqual({
+			queries: { byThisTag: 'tag:@this.tags AND [folder: = @this.file.parent]' },
+			hostPath: 'Areas/Work/Q4 Plan.md',
+			hostTags: ['q4'],
+			priorQueryPaths: {
+				staticProjects: ['Projects/P1.md', 'Projects/P2.md'],
+			},
+		});
+		expect(calls[2]).toEqual({
+			queries: {
+				downstream: 'links -> @query.byThisTag AND links -> @query.staticProjects',
+			},
+			hostPath: 'Areas/Work/Q4 Plan.md',
+			hostTags: ['q4'],
+			priorQueryPaths: {
+				staticProjects: ['Projects/P1.md', 'Projects/P2.md'],
+				byThisTag: ['Areas/Work/Match1.md'],
+			},
+		});
+	});
+
+	it('rejects {% query %} nested inside {% for %}, {% tablerow %}, or {% render ... for %} with QUERY_IN_LOOP_ERROR in Pass 1', async () => {
+		const forRes = await renderRhizomeTemplate(
+			'{% for i in (1..2) %}{% query q %}#work{% endquery %}{% endfor %}',
+			{
+				runQueries: async () => ({}),
+				explainQuery: async () => '',
+			},
+		);
+		expect(forRes.ok).toBe(false);
+		expect(forRes.diagnostics[0]?.code).toBe('QUERY_IN_LOOP_ERROR');
+
+		const tableRowRes = await renderRhizomeTemplate(
+			'{% tablerow i in (1..2) %}{% query q %}#work{% endquery %}{% endtablerow %}',
+			{
+				runQueries: async () => ({}),
+				explainQuery: async () => '',
+			},
+		);
+		expect(tableRowRes.ok).toBe(false);
+		expect(tableRowRes.diagnostics[0]?.code).toBe('QUERY_IN_LOOP_ERROR');
+
+		const renderForRes = await renderRhizomeTemplate('{% render "card" for items %}', {
+			runQueries: async () => ({}),
+			explainQuery: async () => '',
+			readTemplateFile: async (p) =>
+				p === '◊Rhizome/partials/card.md' ? '{% query q %}#work{% endquery %}' : null,
+		});
+		expect(renderForRes.ok).toBe(false);
+		expect(renderForRes.diagnostics[0]?.code).toBe('QUERY_IN_LOOP_ERROR');
+	});
+
+	it('seeds empty [] buckets and priorQueryPaths for lazy Pass-2 queries inside untaken conditionals in newNote mode', async () => {
+		let downstreamPriorPaths: Record<string, readonly string[]> | undefined;
+		const source = [
+			'{%- if false -%}{% query skipped %}tag:@this.tags{% endquery %}{%- endif -%}',
+			'{%- query downstream -%}links -> @query.skipped{%- endquery -%}',
+			'skipped={{ query.skipped.size }}|down={{ query.downstream.size }}',
+		].join('\n');
+
+		const res = await renderRhizomeTemplate(source, {
+			runQueries: async (qMap, lazyOpts) => {
+				if ('downstream' in qMap) {
+					downstreamPriorPaths = lazyOpts?.priorQueryPaths
+						? { ...lazyOpts.priorQueryPaths }
+						: undefined;
+					return { downstream: [] };
+				}
+				return {};
+			},
+			explainQuery: async () => '',
+			runtimeContext: { trigger: 'newNote', timeZone: 'UTC' },
+		});
+
+		expect(res.ok).toBe(true);
+		expect(res.markdown.trim()).toBe('skipped=0|down=0');
+		expect(downstreamPriorPaths).toEqual({ skipped: [] });
 	});
 });

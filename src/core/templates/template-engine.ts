@@ -1,8 +1,15 @@
 import { formatSourceCaretSnippet, type QueryExplainCutoff, type SourceSpan } from '@core/search';
 import { Liquid, LiquidError, Tag, type Template, toPromise } from 'liquidjs';
+import { registerFrontmatterTag } from './frontmatter-tag';
 import { registerHeadingTag } from './heading-filter';
 import { registerPayloadLiquidFilters } from './payload-filters';
 import { applyQueryCutoffs } from './query-cutoff';
+import {
+	extractMatchedDocumentPaths,
+	isRenderLoopTag,
+	partitionNewNoteQueries,
+	validateQueriesNotInLoop,
+} from './query-partitioner';
 import {
 	checkFilterOutputSize,
 	installBoundedTemplateRenderer,
@@ -19,11 +26,13 @@ import {
 	type QueryTagEnvironment,
 	registerQueryTag,
 } from './query-tag';
+import { registerTargetPathTag, TaggedTemplateDiagnosticError } from './target-path-tag';
 import {
 	buildRhizomeTemplateContext,
 	extractUserQueryMap,
 	HOST_QUERY_KEY,
 } from './template-context';
+import { readTemplateTargetState } from './template-target-state';
 import {
 	createRhizomeLiquidOperators,
 	installTemporalTokenizerExtensions,
@@ -35,6 +44,7 @@ import type {
 	TemplateDiagnosticCode,
 	TemplateExecutionCallbacks,
 	TemplateFolderConfig,
+	TemplateLazyQueryOptions,
 	TemplateRenderResult,
 	TemplateRuntimeContext,
 } from './types';
@@ -57,6 +67,13 @@ export function extractLiquidErrorDiagnostic(
 	fileSources?: ReadonlyMap<string, string>,
 	fallbackFile: string | null = null,
 ): TemplateDiagnostic {
+	if (err instanceof TaggedTemplateDiagnosticError) {
+		return err.templateDiagnostic;
+	}
+	if (LiquidError.is(err) && err.originalError instanceof TaggedTemplateDiagnosticError) {
+		return err.originalError.templateDiagnostic;
+	}
+
 	let span: SourceSpan | null = null;
 	let rawMessage = err instanceof Error ? err.message : String(err);
 	let externalFile: string | null = fallbackFile;
@@ -198,6 +215,8 @@ function buildRhizomeLiquidInstance(
 	installBoundedTemplateRenderer(liquid);
 	registerQueryTag(liquid, getBinding);
 	registerHeadingTag(liquid, getBinding);
+	registerTargetPathTag(liquid, getBinding);
+	registerFrontmatterTag(liquid, getBinding);
 	registerTemporalLiquidExtensions(liquid);
 	registerPayloadLiquidFilters(liquid);
 	return liquid;
@@ -317,6 +336,7 @@ function parseAndValidateRoot(
 	try {
 		templates = liquid.parse(maskQueryBlockBodies(source));
 		validateStaticPartialAndLayoutFilenames(source, env, templates, null);
+		validateQueriesNotInLoop(source, env, templates, null, false);
 	} catch (err: unknown) {
 		env.diagnostics.push(
 			extractLiquidErrorDiagnostic(
@@ -387,6 +407,7 @@ interface InspectableTag {
 	readonly name: string;
 	readonly token: Tag['token'];
 	readonly file?: unknown;
+	readonly forBinding?: unknown;
 	readonly templates?: Template[];
 	readonly branches?: unknown;
 	readonly elseTemplates?: Template[];
@@ -519,13 +540,27 @@ async function walkTemplateTreePass1(
 	templates: readonly Template[],
 	currentFile: string | null,
 	activeStack: Set<string>,
-	visitedFiles: Map<string, Template[]>,
+	visitedFiles: Map<string, { readonly templates: Template[]; readonly resolvedFile: string }>,
+	visitedDirectLoopFiles: Set<string>,
+	indirectLoopFiles: Map<
+		string,
+		{ readonly templates: Template[]; readonly resolvedFile: string }
+	>,
+	inDirectLoop: boolean = false,
+	inIndirectLoop: boolean = false,
 ): Promise<void> {
 	for (const tpl of templates) {
 		if (!(tpl instanceof Tag)) {
 			continue;
 		}
 		const tag = tpl as unknown as InspectableTag;
+
+		if (tag.name === 'query') {
+			if (inDirectLoop) {
+				validateQueriesNotInLoop(rootSource, parsed.env, [tpl], currentFile, true);
+			}
+			continue;
+		}
 
 		if (tag.name === 'layout' || tag.name === 'render') {
 			if (tag.name === 'layout' && Array.isArray(tag.templates)) {
@@ -537,6 +572,10 @@ async function walkTemplateTreePass1(
 					currentFile,
 					activeStack,
 					visitedFiles,
+					visitedDirectLoopFiles,
+					indirectLoopFiles,
+					inDirectLoop,
+					inIndirectLoop,
 				);
 			}
 
@@ -551,6 +590,8 @@ async function walkTemplateTreePass1(
 				continue;
 			}
 
+			const childDirectLoop = isRenderLoopTag(tag);
+			const childIndirectLoop = !childDirectLoop && (inDirectLoop || inIndirectLoop);
 			const canonicalKey = normalizeLookupCacheKey(tag.name, rawFile);
 			if (activeStack.has(canonicalKey)) {
 				const cycleChain = [...activeStack, canonicalKey].join(' -> ');
@@ -574,9 +615,41 @@ async function walkTemplateTreePass1(
 				continue;
 			}
 
-			const visitedTemplates = visitedFiles.get(canonicalKey);
-			if (visitedTemplates !== undefined) {
-				writeLiquidLookupAliasCache(parsed.liquid, tag.name, rawFile, visitedTemplates);
+			const visitedEntry = visitedFiles.get(canonicalKey);
+			if (visitedEntry !== undefined) {
+				writeLiquidLookupAliasCache(
+					parsed.liquid,
+					tag.name,
+					rawFile,
+					visitedEntry.templates,
+				);
+				if (childDirectLoop && !visitedDirectLoopFiles.has(canonicalKey)) {
+					visitedDirectLoopFiles.add(canonicalKey);
+					validateQueriesNotInLoop(
+						rootSource,
+						parsed.env,
+						visitedEntry.templates,
+						visitedEntry.resolvedFile,
+						true,
+					);
+				} else if (childIndirectLoop && !indirectLoopFiles.has(canonicalKey)) {
+					indirectLoopFiles.set(canonicalKey, visitedEntry);
+					activeStack.add(canonicalKey);
+					await walkTemplateTreePass1(
+						rootSource,
+						parsed,
+						resolvedFolders,
+						visitedEntry.templates,
+						visitedEntry.resolvedFile,
+						activeStack,
+						visitedFiles,
+						visitedDirectLoopFiles,
+						indirectLoopFiles,
+						false,
+						true,
+					);
+					activeStack.delete(canonicalKey);
+				}
 				continue;
 			}
 
@@ -647,6 +720,16 @@ async function walkTemplateTreePass1(
 					typeof firstTokFile === 'string' && firstTokFile.trim().length > 0
 						? firstTokFile.trim()
 						: normalizeTemplateLookupPath(targetFolder, rawFile, '.md');
+				const entry = {
+					templates: childTemplates,
+					resolvedFile: resolvedChildFile,
+				};
+				if (childDirectLoop) {
+					visitedDirectLoopFiles.add(canonicalKey);
+				} else if (childIndirectLoop) {
+					indirectLoopFiles.set(canonicalKey, entry);
+				}
+				visitedFiles.set(canonicalKey, entry);
 				await walkTemplateTreePass1(
 					rootSource,
 					parsed,
@@ -655,13 +738,17 @@ async function walkTemplateTreePass1(
 					resolvedChildFile,
 					activeStack,
 					visitedFiles,
+					visitedDirectLoopFiles,
+					indirectLoopFiles,
+					childDirectLoop,
+					childIndirectLoop,
 				);
-				visitedFiles.set(canonicalKey, childTemplates);
 			}
 			activeStack.delete(canonicalKey);
 			continue;
 		}
 
+		const nextDirectLoop = inDirectLoop || tag.name === 'for' || tag.name === 'tablerow';
 		const nestedTemplates = getInFileChildTemplates(tag);
 		if (nestedTemplates.length > 0) {
 			await walkTemplateTreePass1(
@@ -672,6 +759,10 @@ async function walkTemplateTreePass1(
 				currentFile,
 				activeStack,
 				visitedFiles,
+				visitedDirectLoopFiles,
+				indirectLoopFiles,
+				nextDirectLoop,
+				inIndirectLoop,
 			);
 		}
 	}
@@ -691,7 +782,15 @@ export async function parseRhizomeTemplatePass1Async(
 	if (parsed.templates !== null && parsed.env.diagnostics.length === 0) {
 		const resolvedFolders = resolveTemplateFolders(folders);
 		const activeStack = new Set<string>();
-		const visitedFiles = new Map<string, Template[]>();
+		const visitedFiles = new Map<
+			string,
+			{ readonly templates: Template[]; readonly resolvedFile: string }
+		>();
+		const visitedDirectLoopFiles = new Set<string>();
+		const indirectLoopFiles = new Map<
+			string,
+			{ readonly templates: Template[]; readonly resolvedFile: string }
+		>();
 		await walkTemplateTreePass1(
 			source,
 			parsed,
@@ -700,7 +799,26 @@ export async function parseRhizomeTemplatePass1Async(
 			null,
 			activeStack,
 			visitedFiles,
+			visitedDirectLoopFiles,
+			indirectLoopFiles,
+			false,
+			false,
 		);
+		if (indirectLoopFiles.size > 0 && parsed.env.queries.length > 0) {
+			const { lazyQueryNames } = partitionNewNoteQueries(parsed.env.queries);
+			if (lazyQueryNames.size > 0) {
+				for (const entry of indirectLoopFiles.values()) {
+					validateQueriesNotInLoop(
+						source,
+						parsed.env,
+						entry.templates,
+						entry.resolvedFile,
+						true,
+						lazyQueryNames,
+					);
+				}
+			}
+		}
 	}
 	parsed.env.pass1Complete = true;
 	return parsed;
@@ -722,8 +840,17 @@ export async function renderParsedRhizomeTemplate(
 	source: string,
 	parsed: ParsedRhizomeTemplate,
 	payload: Readonly<Record<string, unknown[]>>,
-	explainQuery: (query: string, heading: string, cutoff?: QueryExplainCutoff) => Promise<string>,
+	explainQuery: (
+		query: string,
+		heading: string,
+		cutoff?: QueryExplainCutoff,
+		lazyOptions?: TemplateLazyQueryOptions,
+	) => Promise<string>,
 	runtimeContext?: TemplateRuntimeContext,
+	lazyRunQueries?: (
+		queries: Readonly<Record<string, string>>,
+		lazyOptions?: TemplateLazyQueryOptions,
+	) => Promise<Record<string, unknown[]>>,
 ): Promise<TemplateRenderResult> {
 	const queries: readonly ExtractedQueryBlock[] = Object.freeze([...parsed.env.queries]);
 
@@ -745,16 +872,97 @@ export async function renderParsedRhizomeTemplate(
 	const previousRender = parsedTemplateRenderChains.get(parsed) ?? Promise.resolve();
 
 	const executePass2 = async (): Promise<TemplateRenderResult> => {
+		parsed.env.uncutQueryPaths.clear();
+		parsed.env.lazyCutoffCallouts.length = 0;
+		parsed.env.lazyQueryNames = null;
+		parsed.env.runLazyQuery = null;
+
 		try {
 			const safePayload: Readonly<Record<string, unknown[]>> =
 				payload && typeof payload === 'object' ? payload : Object.freeze({});
-			const { effectivePayload, calloutsMarkdown } = applyQueryCutoffs(
-				queries,
+			const isNewNoteLazyMode =
+				runtimeContext?.trigger === 'newNote' && typeof lazyRunQueries === 'function';
+			const partitioned = isNewNoteLazyMode ? partitionNewNoteQueries(queries) : null;
+			const pass15Queries = partitioned ? partitioned.staticQueries : queries;
+
+			for (const q of pass15Queries) {
+				if (Object.prototype.hasOwnProperty.call(safePayload, q.name)) {
+					parsed.env.uncutQueryPaths.set(
+						q.name,
+						extractMatchedDocumentPaths(safePayload[q.name]),
+					);
+				}
+			}
+
+			const { effectivePayload: baseEffectivePayload, calloutsMarkdown } = applyQueryCutoffs(
+				pass15Queries,
 				safePayload,
 				runtimeContext,
 			);
+			let effectivePayload = baseEffectivePayload;
+			if (partitioned && partitioned.lazyQueryNames.size > 0) {
+				const emptyFrozenRows: unknown[] = Object.freeze([]) as unknown as unknown[];
+				const seededPayload: Record<string, unknown[]> = Object.assign(
+					Object.create(null) as Record<string, unknown[]>,
+					baseEffectivePayload,
+				);
+				for (const lazyName of partitioned.lazyQueryNames) {
+					seededPayload[lazyName] = emptyFrozenRows;
+				}
+				effectivePayload = Object.freeze(seededPayload);
+			}
 			parsed.env.payload = extractUserQueryMap(effectivePayload);
 			parsed.env.explainQuery = explainQuery;
+
+			if (partitioned && partitioned.lazyQueryNames.size > 0 && lazyRunQueries) {
+				const queryBlockByName = new Map<string, ExtractedQueryBlock>();
+				for (const q of queries) {
+					queryBlockByName.set(q.name, q);
+				}
+				parsed.env.lazyQueryNames = partitioned.lazyQueryNames;
+				parsed.env.runLazyQuery = async (name, queryText, lazyOpts) => {
+					const rawRes = await lazyRunQueries(
+						Object.freeze({ [name]: queryText }),
+						lazyOpts,
+					);
+					if (
+						!rawRes ||
+						typeof rawRes !== 'object' ||
+						!Object.prototype.hasOwnProperty.call(rawRes, name)
+					) {
+						return {
+							matched: false,
+							rawRows: [],
+							effectiveRows: [],
+							calloutMarkdown: '',
+						};
+					}
+					const candidateRows = rawRes[name];
+					const rawRows = Array.isArray(candidateRows) ? candidateRows : [];
+					parsed.env.uncutQueryPaths.set(name, extractMatchedDocumentPaths(rawRows));
+					const qBlock = queryBlockByName.get(name);
+					if (!qBlock) {
+						return {
+							matched: true,
+							rawRows,
+							effectiveRows: rawRows,
+							calloutMarkdown: '',
+						};
+					}
+					const cutoffRes = applyQueryCutoffs(
+						[qBlock],
+						{ [name]: rawRows },
+						runtimeContext,
+					);
+					const effectiveRows = cutoffRes.effectivePayload[name] ?? rawRows;
+					return {
+						matched: true,
+						rawRows,
+						effectiveRows,
+						calloutMarkdown: cutoffRes.calloutsMarkdown,
+					};
+				};
+			}
 
 			const rootScope = buildRhizomeTemplateContext(effectivePayload, runtimeContext);
 			const renderedRaw: unknown = await parsed.liquid.render(templates, rootScope, {
@@ -763,19 +971,34 @@ export async function renderParsedRhizomeTemplate(
 				memoryLimit: TEMPLATE_MEMORY_LIMIT,
 			});
 			const renderedMarkdown = typeof renderedRaw === 'string' ? renderedRaw : '';
+			const allCallouts = [calloutsMarkdown, ...parsed.env.lazyCutoffCallouts]
+				.filter((s) => s.length > 0)
+				.join('\n\n');
 			const finalMarkdown =
-				calloutsMarkdown.length === 0
+				allCallouts.length === 0
 					? renderedMarkdown
 					: renderedMarkdown.trim().length === 0
-						? calloutsMarkdown
-						: `${calloutsMarkdown}\n\n${renderedMarkdown}`;
+						? allCallouts
+						: `${allCallouts}\n\n${renderedMarkdown}`;
 			checkFilterOutputSize(finalMarkdown.length);
+
+			const targetState = readTemplateTargetState(rootScope);
+			const newNoteFields =
+				targetState?.trigger === 'newNote'
+					? {
+							targetPath: targetState.targetPath,
+							tabMode: targetState.tabMode,
+							frontmatter: targetState.frontmatterSnapshot,
+							hasFrontmatterMutations: targetState.hasFrontmatterMutations,
+						}
+					: {};
 
 			return Object.freeze({
 				ok: true,
 				markdown: finalMarkdown,
 				queries,
 				diagnostics: Object.freeze([]),
+				...newNoteFields,
 			});
 		} catch (err: unknown) {
 			const renderDiag = extractLiquidErrorDiagnostic(
@@ -796,6 +1019,11 @@ export async function renderParsedRhizomeTemplate(
 				queries,
 				diagnostics: frozenDiags,
 			});
+		} finally {
+			parsed.env.lazyQueryNames = null;
+			parsed.env.runLazyQuery = null;
+			parsed.env.lazyCutoffCallouts.length = 0;
+			parsed.env.uncutQueryPaths.clear();
 		}
 	};
 
@@ -808,9 +1036,11 @@ export async function renderParsedRhizomeTemplate(
  * Executes a `rhizome` LiquidJS template in two passes:
  * 1. **Pass 1 (Static Parse & Extract):** Parses the Liquid AST across the root codeblock and any
  *    referenced `{% layout %}` / `{% render %}` files, validates `{% query <name> [explain] %}`
- *    blocks, and rejects duplicate `<name>` definitions or circular file references before touching the vault.
- * 2. **Pass 2 (Single-Pass Vault Query & Render):** Executes all extracted queries in a single
- *    `callbacks.runQueries` batch, then renders the Liquid template with the batch payload as root scope.
+ *    blocks, and rejects duplicate `<name>` definitions, loop-nested queries, or circular file
+ *    references before touching the vault.
+ * 2. **Pass 2 (Single-Pass / Hybrid Lazy Vault Query & Render):** Executes static queries in Pass 1.5
+ *    (and in `"newNote"` mode defers `@this.*` queries and their `@query.*` dependents to Pass 2),
+ *    then renders the Liquid template with the batch payload as root scope.
  */
 export async function renderRhizomeTemplate(
 	source: string,
@@ -838,13 +1068,19 @@ export async function renderRhizomeTemplate(
 	}
 
 	try {
+		const isNewNoteMode = callbacks.runtimeContext?.trigger === 'newNote';
+		const pass15Queries = isNewNoteMode
+			? partitionNewNoteQueries(queries).staticQueries
+			: queries;
+
 		const payload: Record<string, unknown[]> = Object.create(null) as Record<string, unknown[]>;
 		const queryMap = Object.create(null) as Record<string, string>;
-		for (const q of queries) {
+		for (const q of pass15Queries) {
 			queryMap[q.name] = q.query;
 		}
 		const sourcePath = callbacks.runtimeContext?.sourcePath;
-		const hasSourcePath = typeof sourcePath === 'string' && sourcePath.length > 0;
+		const hasSourcePath =
+			!isNewNoteMode && typeof sourcePath === 'string' && sourcePath.length > 0;
 		const hasQueries = Object.keys(queryMap).length > 0;
 
 		if (typeof callbacks.resolveHost === 'function') {
@@ -869,8 +1105,9 @@ export async function renderRhizomeTemplate(
 			source,
 			parsed,
 			payload,
-			(q, heading, cutoff) => callbacks.explainQuery(q, heading, cutoff),
+			(q, heading, cutoff, lazyOpts) => callbacks.explainQuery(q, heading, cutoff, lazyOpts),
 			callbacks.runtimeContext,
+			isNewNoteMode ? (qMap, lazyOpts) => callbacks.runQueries(qMap, lazyOpts) : undefined,
 		);
 	} catch (err: unknown) {
 		const renderDiag = extractLiquidErrorDiagnostic(

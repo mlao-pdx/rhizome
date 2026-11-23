@@ -59,6 +59,60 @@ export function setInternalFileEpochMs(
 	internalFileEpochMsMap.set(file, epochs);
 }
 
+export interface NormalizedFileInfoFields {
+	readonly path: string;
+	readonly name: string;
+	readonly basename: string;
+	readonly extension: string;
+	readonly parent: string;
+	readonly created: string;
+	readonly modified: string;
+	readonly size: number;
+}
+
+/**
+ * Constructs a `NormalizedFileInfo` object with `ext`, `ctime`, and `mtime` defined as
+ * non-enumerable own properties (`enumerable: false, configurable: false, writable: false`).
+ *
+ * @remarks
+ * (design, 2026-11-23) Non-enumerable own descriptors let LiquidJS (`ownPropertyOnly: true`) and
+ * `readDeepPath` (`Object.prototype.hasOwnProperty`) resolve `file.ext`, `file.ctime`, and
+ * `file.mtime` identically to `@this.file.*` without changing `Object.keys(file)`, `| json`,
+ * `| table`, or `digestNormalizedDocument`.
+ */
+export function createNormalizedFileInfo(fields: NormalizedFileInfoFields): NormalizedFileInfo {
+	const base = {
+		path: fields.path,
+		name: fields.name,
+		basename: fields.basename,
+		extension: fields.extension,
+		parent: fields.parent,
+		created: fields.created,
+		modified: fields.modified,
+		size: fields.size,
+	};
+	return Object.defineProperties(base, {
+		ext: {
+			value: fields.extension,
+			enumerable: false,
+			configurable: false,
+			writable: false,
+		},
+		ctime: {
+			value: fields.created,
+			enumerable: false,
+			configurable: false,
+			writable: false,
+		},
+		mtime: {
+			value: fields.modified,
+			enumerable: false,
+			configurable: false,
+			writable: false,
+		},
+	}) as NormalizedFileInfo;
+}
+
 export interface ObsidianLocInput {
 	readonly line: number;
 	readonly col: number;
@@ -909,7 +963,7 @@ export function normalizeObsidianMetadata(
 		};
 	});
 
-	const file: NormalizedFileInfo = {
+	const file: NormalizedFileInfo = createNormalizedFileInfo({
 		path: tfile.path,
 		name: tfile.name,
 		basename: tfile.basename,
@@ -918,7 +972,7 @@ export function normalizeObsidianMetadata(
 		created: formatEpochMsToMinuteIso(ctime, timeZone),
 		modified: formatEpochMsToMinuteIso(mtime, timeZone),
 		size,
-	};
+	});
 	setInternalFileEpochMs(file, { ctime, mtime });
 
 	return {

@@ -18,6 +18,10 @@ import {
 	RhizomeInlineSuggest,
 } from './adapters/rhizome-inline-suggest';
 import {
+	openCreateNoteFromTemplatePicker,
+	openInsertFromTemplatePicker,
+} from './adapters/template-runner';
+import {
 	explainVaultQuery,
 	runVaultQuery,
 	type VaultQueryCallback,
@@ -98,16 +102,26 @@ export default class RhizomePlugin extends Plugin {
 			version: this.manifest.version,
 		});
 
+		const isTemplateFolderNote = (path: unknown): boolean =>
+			isMarkdownPath(path) && isPathInTemplateFolders(path, this.getTemplateFolderConfig());
+
 		this.backlinkIndex = new BacklinkIndex(
 			this.app,
 			(file) => this.isIgnoredNote(file),
 			this.loggerAdapter,
 		);
-		this.bodyScanCache = new BodyScanCache(this.app, this.loggerAdapter);
+		this.bodyScanCache = new BodyScanCache(
+			this.app,
+			this.loggerAdapter,
+			undefined,
+			undefined,
+			(path) => isTemplateFolderNote(path),
+		);
 		this.documentCache = new NormalizedDocumentCache(
 			this.app,
 			this.loggerAdapter,
 			this.bodyScanCache,
+			(file) => this.isIgnoredNote(file),
 		);
 		this.documentCache.setReady(false);
 		this.codeBlockRenderCache = new CodeBlockRenderCache();
@@ -124,6 +138,7 @@ export default class RhizomePlugin extends Plugin {
 			this.loggerAdapter,
 			this.backlinkIndex,
 			this.documentCache,
+			(file) => this.isIgnoredNote(file),
 		);
 		this.register(() => this.activeQueryRoster.clear());
 		this.register(() => this.inlineHostResolver.dispose());
@@ -183,9 +198,6 @@ export default class RhizomePlugin extends Plugin {
 			}
 		});
 
-		const isTemplateFolderNote = (path: unknown): boolean =>
-			isMarkdownPath(path) && isPathInTemplateFolders(path, this.getTemplateFolderConfig());
-
 		const startupTasks: Array<Promise<void>> = [];
 		const markVaultReady = (): void => {
 			if (this.vaultReady) return;
@@ -241,13 +253,14 @@ export default class RhizomePlugin extends Plugin {
 					return;
 				}
 				const nextCache = cache ?? this.app.metadataCache.getFileCache(file);
-				const ignored = isDoNotIndexFrontmatter(nextCache);
+				const ignored =
+					isDoNotIndexFrontmatter(nextCache) || isTemplateFolderNote(file.path);
 				if (ignored) {
 					this.bodyScanCache.delete(file.path);
 				} else if (typeof data === 'string') {
 					this.bodyScanCache.ingestFromText(file, data, nextCache);
 				}
-				// Excluded notes (DO_NOT_INDEX_OR_QUERY, e.g. diagnostic logs) are ignored.
+				// Excluded notes (DO_NOT_INDEX_OR_QUERY or template folders) are ignored.
 				// Exception: if the note is currently present in documentCache, tracked as a
 				// backlink source, or actively subscribed by an inline host, allow through.
 				if (
@@ -276,10 +289,10 @@ export default class RhizomePlugin extends Plugin {
 				}
 				this.bodyScanCache.delete(file.path);
 				const lastCache = prevCache ?? this.app.metadataCache.getFileCache(file);
-				// Excluded notes (DO_NOT_INDEX_OR_QUERY) are ignored on deletion unless they are
+				// Excluded notes (DO_NOT_INDEX_OR_QUERY or template folders) are ignored on deletion unless they are
 				// still present in documentCache, backlinkIndex, or inlineHostResolver.
 				if (
-					isDoNotIndexFrontmatter(lastCache) &&
+					(isDoNotIndexFrontmatter(lastCache) || isTemplateFolderNote(file.path)) &&
 					this.documentCache.get(file.path) === undefined &&
 					!this.backlinkIndex.hasSource(file.path) &&
 					!this.inlineHostResolver.hasActivePath(file.path)
@@ -293,16 +306,29 @@ export default class RhizomePlugin extends Plugin {
 		this.registerEvent(
 			this.app.vault.on('rename', (file, oldPath) => {
 				if (typeof oldPath === 'string' && typeof file?.path === 'string') {
+					const movedOutOfTemplates =
+						isTemplateFolderNote(oldPath) && !isTemplateFolderNote(file.path);
+					const movedIntoTemplates = isTemplateFolderNote(file.path);
+					const wasCachedInDocumentStore =
+						this.documentCache.get(oldPath) !== undefined ||
+						this.documentCache.get(file.path) !== undefined;
 					this.bodyScanCache.rename(oldPath, file.path);
+					if (movedIntoTemplates) {
+						this.documentCache.delete(oldPath);
+						this.documentCache.delete(file.path);
+					} else if (movedOutOfTemplates) {
+						void this.bodyScanCache.reconcileVaultBodies(() => {
+							scheduleRefresh();
+						});
+					}
 					const renamedCache = getAbstractFileCache(this.app, file);
-					// Excluded notes (DO_NOT_INDEX_OR_QUERY) are ignored on rename unless oldPath
-					// or newPath is currently cached or tracked in backlinkIndex, in which case
-					// reconciliation must run to evict the stale entry.
+					// Excluded notes (DO_NOT_INDEX_OR_QUERY or template folders) are ignored on rename unless oldPath
+					// or newPath was cached in documentCache or tracked in backlinkIndex, in which case
+					// reconciliation must run to evict the stale entry and refresh active queries.
 					const untrackedIgnored =
 						isMarkdownPath(file.path) &&
-						isDoNotIndexFrontmatter(renamedCache) &&
-						this.documentCache.get(oldPath) === undefined &&
-						this.documentCache.get(file.path) === undefined &&
+						(isDoNotIndexFrontmatter(renamedCache) || movedIntoTemplates) &&
+						!wasCachedInDocumentStore &&
 						!this.backlinkIndex.hasSource(oldPath) &&
 						!this.backlinkIndex.hasSource(file.path);
 					this.activeQueryRoster.handleFileRename(oldPath, file.path, !untrackedIgnored);
@@ -369,6 +395,20 @@ export default class RhizomePlugin extends Plugin {
 		);
 		this.registerMarkdownPostProcessor((el, ctx) => processRhizomeInlineSpans(el, ctx, this));
 		this.registerEditorSuggest(new RhizomeInlineSuggest(this.app));
+		this.addCommand({
+			id: 'create-note-from-template',
+			name: 'Create new note from template',
+			callback: () => {
+				void openCreateNoteFromTemplatePicker(this);
+			},
+		});
+		this.addCommand({
+			id: 'insert-from-template',
+			name: 'Insert from template',
+			editorCallback: (editor, ctx) => {
+				void openInsertFromTemplatePicker(this, editor, ctx.file);
+			},
+		});
 		this.addCommand({
 			id: 'insert-inline-expression',
 			name: 'Insert inline expression',
@@ -443,7 +483,31 @@ export default class RhizomePlugin extends Plugin {
 	}
 
 	private isIgnoredNote(file: TFile): boolean {
-		return isDoNotIndexFrontmatter(getAbstractFileCache(this.app, file));
+		return (
+			isDoNotIndexFrontmatter(getAbstractFileCache(this.app, file)) ||
+			isPathInTemplateFolders(file.path, this.getTemplateFolderConfig())
+		);
+	}
+
+	handleTemplateFoldersChanged(): void {
+		const folderCfg = this.getTemplateFolderConfig();
+		if (this.documentCache) {
+			for (const cachedPath of [...this.documentCache.keys()]) {
+				if (isPathInTemplateFolders(cachedPath, folderCfg)) {
+					this.documentCache.delete(cachedPath);
+				}
+			}
+		}
+		this.codeBlockRenderCache?.clear();
+		this.backlinkIndex?.dispose();
+		this.activeQueryRoster?.markVaultDirty();
+		void this.bodyScanCache?.reconcileVaultBodies(() => {
+			this.activeQueryRoster?.markVaultDirty();
+			this.activeQueryRoster?.resetAll();
+			this.inlineHostResolver?.notifyIndexRebuilt();
+		});
+		this.activeQueryRoster?.resetAll();
+		this.inlineHostResolver?.notifyIndexRebuilt();
 	}
 
 	getTemplateFolderConfig(): TemplateFolderConfig {

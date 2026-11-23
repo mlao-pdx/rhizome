@@ -15,7 +15,8 @@ import {
 	TypeGuards,
 } from 'liquidjs';
 import { DEFAULT_QUERY_CUTOFF } from './query-cutoff';
-import type { ExtractedQueryBlock, TemplateDiagnostic } from './types';
+import { readTemplateTargetState } from './template-target-state';
+import type { ExtractedQueryBlock, TemplateDiagnostic, TemplateLazyQueryOptions } from './types';
 
 /**
  * Valid `<name>` identifier pattern for `{% query <name> [explain] [cutoff: <int>] %}`.
@@ -436,15 +437,38 @@ export interface SeenQueryDefinition {
  * Mutable parse/render state shared across `{% query %}` tags within a single
  * `renderRhizomeTemplate` or `analyzeRhizomeCodeBlock` invocation.
  */
+const QUERY_REF_IN_TEXT_RE = /@query\.([a-zA-Z_][a-zA-Z0-9_-]*)/g;
+
 export interface QueryTagEnvironment {
 	readonly seenNames: Map<string, SeenQueryDefinition>;
 	readonly fileSources: Map<string, string>;
 	readonly queries: ExtractedQueryBlock[];
 	readonly diagnostics: TemplateDiagnostic[];
+	readonly uncutQueryPaths: Map<string, readonly string[]>;
+	readonly lazyCutoffCallouts: string[];
+	lazyQueryNames: ReadonlySet<string> | null;
+	runLazyQuery:
+		| ((
+				name: string,
+				queryText: string,
+				lazyOptions: TemplateLazyQueryOptions,
+		  ) => Promise<{
+				readonly matched: boolean;
+				readonly rawRows: unknown[];
+				readonly effectiveRows: unknown[];
+				readonly calloutMarkdown: string;
+		  }>)
+		| null;
 	pass1Complete: boolean;
 	payload: Readonly<Record<string, unknown[]>>;
 	explainQuery:
-		((query: string, heading: string, cutoff?: QueryExplainCutoff) => Promise<string>) | null;
+		| ((
+				query: string,
+				heading: string,
+				cutoff?: QueryExplainCutoff,
+				lazyOptions?: TemplateLazyQueryOptions,
+		  ) => Promise<string>)
+		| null;
 }
 
 /**
@@ -456,6 +480,10 @@ export function createQueryTagEnvironment(): QueryTagEnvironment {
 		fileSources: new Map<string, string>(),
 		queries: [],
 		diagnostics: [],
+		uncutQueryPaths: new Map<string, readonly string[]>(),
+		lazyCutoffCallouts: [],
+		lazyQueryNames: null,
+		runLazyQuery: null,
 		pass1Complete: false,
 		payload: Object.freeze({}),
 		explainQuery: null,
@@ -661,9 +689,68 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 			);
 		}
 
-		public async render(_ctx: Context, emitter: Emitter): Promise<void> {
+		public async render(ctx: Context, emitter: Emitter): Promise<void> {
 			const env = this.env;
-			if (this.queryName === null || !env.explainQuery) {
+			if (this.queryName === null) {
+				return;
+			}
+
+			let lazyOptions: TemplateLazyQueryOptions | undefined;
+			if (env.lazyQueryNames?.has(this.queryName) && env.runLazyQuery) {
+				const state = readTemplateTargetState(ctx);
+				const priorQueryPaths: Record<string, readonly string[]> = {};
+				for (const [k, v] of env.uncutQueryPaths) {
+					if (k !== this.queryName) {
+						priorQueryPaths[k] = v;
+					}
+				}
+				QUERY_REF_IN_TEXT_RE.lastIndex = 0;
+				let refMatch: RegExpExecArray | null;
+				while ((refMatch = QUERY_REF_IN_TEXT_RE.exec(this.queryText)) !== null) {
+					const refName = refMatch[1];
+					if (
+						refName &&
+						refName !== this.queryName &&
+						env.seenNames.has(refName) &&
+						!(refName in priorQueryPaths)
+					) {
+						priorQueryPaths[refName] = Object.freeze([]);
+					}
+				}
+				lazyOptions = {
+					hostDoc: state?.virtualDoc ?? null,
+					priorQueryPaths,
+				};
+				const lazyRes = await env.runLazyQuery(this.queryName, this.queryText, lazyOptions);
+				if (lazyRes.matched) {
+					const nextPayload = Object.assign(
+						Object.create(null) as Record<string, unknown[]>,
+						env.payload,
+					);
+					nextPayload[this.queryName] = lazyRes.effectiveRows;
+					const frozenPayload = Object.freeze(nextPayload);
+					env.payload = frozenPayload;
+					if (state !== null) {
+						state.rootRecord['query'] = frozenPayload;
+					}
+					if (lazyRes.calloutMarkdown.length > 0) {
+						env.lazyCutoffCallouts.push(lazyRes.calloutMarkdown);
+					}
+				} else {
+					const nextPayload = Object.assign(
+						Object.create(null) as Record<string, unknown[]>,
+						env.payload,
+					);
+					delete nextPayload[this.queryName];
+					const frozenPayload = Object.freeze(nextPayload);
+					env.payload = frozenPayload;
+					if (state !== null) {
+						state.rootRecord['query'] = frozenPayload;
+					}
+				}
+			}
+
+			if (!env.explainQuery) {
 				return;
 			}
 			const hasPayloadKey = Object.prototype.hasOwnProperty.call(env.payload, this.queryName);
@@ -672,6 +759,7 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 					this.queryText,
 					`Query Explain Plan: ${this.queryName}`,
 					Object.freeze({ value: this.cutoff, explicit: this.explicitCutoff }),
+					lazyOptions,
 				);
 				const trimmed = markdown.trim();
 				if (trimmed.length > 0) {

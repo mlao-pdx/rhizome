@@ -17,7 +17,11 @@
  */
 
 import { StateEffect, StateField } from '@codemirror/state';
-import { installGlobalObsidianDomHelpers } from './mock-dom';
+import {
+	installGlobalObsidianDomHelpers,
+	MockElement,
+	type MockDomElementOptions,
+} from './mock-dom';
 
 // Obsidian plugin code schedules timers through `window` and constructs DOM nodes via
 // global `createEl`/`createDiv`/`createSpan`; Node-based tests have neither by default.
@@ -160,25 +164,37 @@ export class Notice {
 
 export const openedModals: Modal[] = [];
 
+class ModalContentElement extends MockElement {
+	private readonly ownerModal: Modal;
+
+	constructor(ownerModal: Modal) {
+		super('div');
+		this.ownerModal = ownerModal;
+	}
+
+	override empty(): void {
+		this.ownerModal.paragraphs.length = 0;
+		super.empty();
+	}
+
+	override createEl(tag: string, options?: MockDomElementOptions | string): MockElement {
+		if (options && typeof options === 'object' && options.text !== undefined) {
+			this.ownerModal.paragraphs.push(options.text);
+		}
+		return super.createEl(tag, options);
+	}
+}
+
 export class Modal {
 	app: unknown;
 	title = '';
 	isOpen = false;
 	readonly paragraphs: string[] = [];
-	contentEl = {
-		empty: () => {
-			this.paragraphs.length = 0;
-		},
-		createEl: (_tag: string, options?: { text?: string }) => {
-			if (options?.text !== undefined) {
-				this.paragraphs.push(options.text);
-			}
-			return {};
-		},
-	};
+	contentEl: ModalContentElement;
 
 	constructor(app: unknown) {
 		this.app = app;
+		this.contentEl = new ModalContentElement(this);
 	}
 
 	setTitle(title: string): this {
@@ -200,6 +216,26 @@ export class Modal {
 		this.isOpen = false;
 		this.onClose();
 	}
+}
+
+export class FuzzySuggestModal<T> extends Modal {
+	placeholder = '';
+
+	setPlaceholder(placeholder: string): void {
+		this.placeholder = placeholder;
+	}
+
+	getItems(): T[] {
+		return [];
+	}
+
+	getItemText(_item: T): string {
+		return '';
+	}
+
+	renderSuggestion(_item: { item: T }, _el: HTMLElement): void {}
+
+	onChooseItem(_item: T, _evt: MouseEvent | KeyboardEvent): void {}
 }
 
 export class PluginSettingTab {
@@ -432,6 +468,11 @@ export class TAbstractFile {
 	path = '';
 }
 
+export class TFolder extends TAbstractFile {
+	name = '';
+	children: TAbstractFile[] = [];
+}
+
 export class TFile extends TAbstractFile {
 	name = '';
 	basename = '';
@@ -439,6 +480,15 @@ export class TFile extends TAbstractFile {
 	parent: { path: string } | null = null;
 	stat = { ctime: 0, mtime: 0, size: 0 };
 	deleted?: boolean;
+}
+
+export class MarkdownView {
+	file: TFile | null = null;
+	editor: {
+		setCursor?: (pos: { line: number; ch: number }) => void;
+		getCursor?: (pos?: string) => { line: number; ch: number };
+		replaceSelection?: (text: string) => void;
+	} = {};
 }
 
 /**

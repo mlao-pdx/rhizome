@@ -6,13 +6,17 @@ import {
 	normalizePath,
 	Platform,
 } from 'obsidian';
-import { hasInternalRhizomeFlag, INTERNAL_RHIZOME_CODES } from '@core/search';
+import { hasInternalRhizomeFlag, initEngineConfig, INTERNAL_RHIZOME_CODES } from '@core/search';
 import {
+	isPathInTemplatesFolder,
 	parsedTemplateHasLoopTag,
 	parsedTemplateReferencesHost,
 	parseRhizomeTemplatePass1Async,
+	partitionNewNoteQueries,
 	renderParsedRhizomeTemplate,
 	resolveCodeBlockHeadingLevel,
+	TargetPathClaimRegistry,
+	type TemplateFolderConfig,
 	type TemplateRenderResult,
 	type TemplateRuntimeContext,
 } from '@core/templates';
@@ -41,6 +45,11 @@ import {
 } from './codeblock-render-cache';
 import { markSensitive } from './logger-format';
 import { computeCodeBlockSentinelHash } from './render-sentinel-store';
+import {
+	buildTemplateMetadataSnapshot,
+	createVaultDirectoryChildrenLookup,
+} from './template-folder-ladder';
+import { loadVaultPropertyTypes } from './vault-query-logging';
 import { resolveDefaultTimeZone, type VaultQueryResult } from './vault-query-runner';
 
 export {
@@ -56,6 +65,21 @@ export {
 	resolveCodeBlockHeadingLevel,
 };
 
+function lookupVaultMarkdownFile(
+	plugin: RhizomePlugin,
+	vaultRelativePath: string,
+): ReturnType<typeof plugin.app.vault.getMarkdownFiles>[number] | undefined {
+	const normalized = normalizePath(vaultRelativePath);
+	const vaultWithLookup = plugin.app.vault as {
+		getFileByPath?: (
+			path: string,
+		) => ReturnType<typeof plugin.app.vault.getMarkdownFiles>[number] | null;
+	};
+	return typeof vaultWithLookup.getFileByPath === 'function'
+		? (vaultWithLookup.getFileByPath(normalized) ?? undefined)
+		: plugin.app.vault.getMarkdownFiles().find((f) => f.path === normalized);
+}
+
 function lookupHostHeadingLevel(
 	plugin: RhizomePlugin,
 	sourcePath: string,
@@ -70,16 +94,7 @@ function lookupHostHeadingLevel(
 	if (typeof lineStart !== 'number' || !Number.isFinite(lineStart) || lineStart <= 0) {
 		return 0;
 	}
-	const normalized = normalizePath(sourcePath);
-	const vaultWithLookup = plugin.app.vault as {
-		getFileByPath?: (
-			path: string,
-		) => ReturnType<typeof plugin.app.vault.getMarkdownFiles>[number] | null;
-	};
-	const matchedFile =
-		typeof vaultWithLookup.getFileByPath === 'function'
-			? (vaultWithLookup.getFileByPath(normalized) ?? undefined)
-			: plugin.app.vault.getMarkdownFiles().find((f) => f.path === normalized);
+	const matchedFile = lookupVaultMarkdownFile(plugin, sourcePath);
 	if (!matchedFile) {
 		return 0;
 	}
@@ -106,6 +121,48 @@ function buildRuntimeContext(
 		language,
 		platform: Platform,
 		headingLevel: lookupHostHeadingLevel(plugin, sourcePath, ctx, el),
+		trigger: 'dynamicCodeblock',
+		template: null,
+	};
+}
+
+async function buildNewNotePreviewRuntimeContext(
+	plugin: RhizomePlugin,
+	referenceTimeMs: number,
+	sourcePath: string,
+	ctx: MarkdownPostProcessorContext,
+	el: HTMLElement,
+	folderConfig: TemplateFolderConfig,
+): Promise<TemplateRuntimeContext> {
+	const base = buildRuntimeContext(plugin, referenceTimeMs, sourcePath, ctx, el);
+	const timeZone = base.timeZone ?? resolveDefaultTimeZone();
+	const vaultTypes = await loadVaultPropertyTypes(plugin.app, plugin.loggerAdapter);
+	const cfgRes = initEngineConfig({ timeZone, propertyTypes: vaultTypes });
+	const fallbackRes = cfgRes.ok
+		? cfgRes
+		: initEngineConfig({ timeZone: 'UTC', propertyTypes: {} });
+	const resolvedConfig = fallbackRes.ok ? fallbackRes.config : undefined;
+	const templateFile = lookupVaultMarkdownFile(plugin, sourcePath);
+	const templateMeta =
+		templateFile && resolvedConfig
+			? await buildTemplateMetadataSnapshot(
+					plugin.app,
+					templateFile,
+					folderConfig,
+					plugin.settings.newNoteDefaultFolderRung ?? 'notebookNavigator',
+					resolvedConfig,
+				)
+			: null;
+	const claimRegistry = new TargetPathClaimRegistry(
+		createVaultDirectoryChildrenLookup(plugin.app),
+	);
+	return {
+		...base,
+		trigger: 'newNote',
+		template: templateMeta,
+		claimRegistry,
+		...(resolvedConfig !== undefined ? { resolvedConfig } : {}),
+		configDir: plugin.app.vault.configDir,
 	};
 }
 
@@ -565,15 +622,26 @@ export async function processRhizomeCodeBlock(
 			return;
 		}
 
+		const isTemplatePreview =
+			currentSourcePath.length > 0 &&
+			isPathInTemplatesFolder(currentSourcePath, folderConfig);
 		const queries = parsed.env.queries;
+		const pass15Queries = isTemplatePreview
+			? partitionNewNoteQueries(queries).staticQueries
+			: queries;
 		const queryMap = Object.create(null) as Record<string, string>;
-		for (const q of queries) {
+		for (const q of pass15Queries) {
 			queryMap[q.name] = q.query;
 		}
 		const frozenQueryMap = Object.freeze(queryMap);
-		const hasQueries = Object.keys(queryMap).length > 0;
+		const hasPass15Queries = Object.keys(queryMap).length > 0;
+		const hasAnyQueries = queries.length > 0;
+		const effectiveReferencesHost = isTemplatePreview ? false : referencesHost;
 
-		if ((hasQueries || referencesHost) && typeof plugin.waitForVaultReady === 'function') {
+		if (
+			(hasAnyQueries || effectiveReferencesHost || isTemplatePreview) &&
+			typeof plugin.waitForVaultReady === 'function'
+		) {
 			await plugin.waitForVaultReady(cycleSignal);
 			if (outerAbortController.signal.aborted || cycleSignal.aborted) {
 				return;
@@ -589,18 +657,21 @@ export async function processRhizomeCodeBlock(
 			}
 			const generation = ++renderGeneration;
 			const updateStartedAt = Date.now();
-			const runtimeCtx = buildRuntimeContext(
-				plugin,
-				updateStartedAt,
-				currentSourcePath,
-				ctx,
-				el,
-			);
+			const runtimeCtx = isTemplatePreview
+				? await buildNewNotePreviewRuntimeContext(
+						plugin,
+						updateStartedAt,
+						currentSourcePath,
+						ctx,
+						el,
+						folderConfig,
+					)
+				: buildRuntimeContext(plugin, updateStartedAt, currentSourcePath, ctx, el);
 			const currentHeadingLevel = runtimeCtx.headingLevel ?? 0;
 			const currentTemplateRev = plugin.activeQueryRoster?.templateRevision ?? 0;
 			const currentStateRev = plugin.activeQueryRoster?.stateRevision ?? 0;
 			const payloadHash = hashVaultQueryResult(newPayload, {
-				includeHost: referencesHost,
+				includeHost: effectiveReferencesHost,
 				headingLevel: currentHeadingLevel,
 			});
 
@@ -608,14 +679,30 @@ export async function processRhizomeCodeBlock(
 				source,
 				parsed,
 				newPayload,
-				(query, heading, cutoff) =>
+				(query, heading, cutoff, lazyOpts) =>
 					plugin.explainQuery(query, {
 						referenceTimeMs: updateStartedAt,
 						heading,
 						...(cutoff !== undefined ? { cutoff } : {}),
-						...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
+						...(lazyOpts?.hostDoc !== undefined
+							? { hostDoc: lazyOpts.hostDoc }
+							: !isTemplatePreview && currentSourcePath.length > 0
+								? { sourcePath: currentSourcePath }
+								: {}),
 					}),
 				runtimeCtx,
+				isTemplatePreview
+					? (lazyMap, lazyOpts) =>
+							plugin.query(lazyMap, {
+								referenceTimeMs: updateStartedAt,
+								...(lazyOpts?.hostDoc !== undefined
+									? { hostDoc: lazyOpts.hostDoc }
+									: {}),
+								...(lazyOpts?.priorQueryPaths !== undefined
+									? { priorQueryPaths: lazyOpts.priorQueryPaths }
+									: {}),
+							})
+					: undefined,
 			);
 			if (
 				outerAbortController.signal.aborted ||
@@ -625,6 +712,7 @@ export async function processRhizomeCodeBlock(
 				return;
 			}
 			const canCacheUpdate =
+				!isTemplatePreview &&
 				(updatedResult.ok || isRuntimeRenderErrorResult(updatedResult)) &&
 				currentTemplateRev === templateRevision &&
 				allExtractedQueriesExecutable(parsed, newPayload);
@@ -659,7 +747,7 @@ export async function processRhizomeCodeBlock(
 		const initialGeneration = ++renderGeneration;
 		const initialHeadingLevel = resolveCurrentHeadingLevel();
 		const onUnchangedPayload = (stateRev: number, unchangedPayloadHash: string): void => {
-			if (outerAbortController.signal.aborted || cycleSignal.aborted) {
+			if (outerAbortController.signal.aborted || cycleSignal.aborted || isTemplatePreview) {
 				return;
 			}
 			renderCache?.advanceStateRevision(
@@ -678,22 +766,26 @@ export async function processRhizomeCodeBlock(
 			onReset,
 			onSourcePathRename,
 			onUnchangedPayload,
-			includeHostInHash: referencesHost,
+			includeHostInHash: effectiveReferencesHost,
 			headingLevel: resolveCurrentHeadingLevel,
-			...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
+			...(!isTemplatePreview && currentSourcePath.length > 0
+				? { sourcePath: currentSourcePath }
+				: {}),
 		};
-		const mountOnUpdate = hasQueries || currentSourcePath.length > 0 ? onUpdate : undefined;
+		const mountOnUpdate = hasAnyQueries || currentSourcePath.length > 0 ? onUpdate : undefined;
 
 		const currentTemplateRevAtMount = plugin.activeQueryRoster?.templateRevision ?? 0;
 		const stateRevisionBeforeQuery = plugin.activeQueryRoster?.stateRevision ?? 0;
-		const remountHit = renderCache?.getRemountHit(
-			currentSourcePath,
-			source,
-			initialHeadingLevel,
-			folderConfig,
-			currentTemplateRevAtMount,
-			stateRevisionBeforeQuery,
-		);
+		const remountHit = !isTemplatePreview
+			? renderCache?.getRemountHit(
+					currentSourcePath,
+					source,
+					initialHeadingLevel,
+					folderConfig,
+					currentTemplateRevAtMount,
+					stateRevisionBeforeQuery,
+				)
+			: undefined;
 		if (remountHit !== undefined) {
 			plugin.activeQueryRoster?.register(
 				frozenQueryMap,
@@ -721,7 +813,7 @@ export async function processRhizomeCodeBlock(
 				return null;
 			}
 			let initialPayload: VaultQueryResult;
-			if (!hasQueries && !referencesHost) {
+			if (!hasPass15Queries && !effectiveReferencesHost) {
 				initialPayload = Object.freeze({});
 				plugin.activeQueryRoster?.register(
 					frozenQueryMap,
@@ -740,20 +832,24 @@ export async function processRhizomeCodeBlock(
 				return null;
 			}
 			const totalRecords = countExtractedQueryRecords(parsed, initialPayload);
-			const runtimeCtx = buildRuntimeContext(
-				plugin,
-				referenceTimeMs,
-				currentSourcePath,
-				ctx,
-				el,
-			);
+			const runtimeCtx = isTemplatePreview
+				? await buildNewNotePreviewRuntimeContext(
+						plugin,
+						referenceTimeMs,
+						currentSourcePath,
+						ctx,
+						el,
+						folderConfig,
+					)
+				: buildRuntimeContext(plugin, referenceTimeMs, currentSourcePath, ctx, el);
 			const currentHeadingLevel = runtimeCtx.headingLevel ?? 0;
 			const liveTemplateRev = plugin.activeQueryRoster?.templateRevision ?? 0;
 			const templateRevStillMatches = liveTemplateRev === templateRevision;
 			const currentStateRev = plugin.activeQueryRoster?.stateRevision ?? 0;
-			const allExecutable = allExtractedQueriesExecutable(parsed, initialPayload);
+			const allExecutable =
+				!isTemplatePreview && allExtractedQueriesExecutable(parsed, initialPayload);
 			const payloadHash = hashVaultQueryResult(initialPayload, {
-				includeHost: referencesHost,
+				includeHost: effectiveReferencesHost,
 				headingLevel: currentHeadingLevel,
 			});
 			const cachedByPayload =
@@ -817,14 +913,30 @@ export async function processRhizomeCodeBlock(
 				source,
 				parsed,
 				initialPayload,
-				(query, heading, cutoff) =>
+				(query, heading, cutoff, lazyOpts) =>
 					plugin.explainQuery(query, {
 						referenceTimeMs,
 						heading,
 						...(cutoff !== undefined ? { cutoff } : {}),
-						...(currentSourcePath.length > 0 ? { sourcePath: currentSourcePath } : {}),
+						...(lazyOpts?.hostDoc !== undefined
+							? { hostDoc: lazyOpts.hostDoc }
+							: !isTemplatePreview && currentSourcePath.length > 0
+								? { sourcePath: currentSourcePath }
+								: {}),
 					}),
 				runtimeCtx,
+				isTemplatePreview
+					? (lazyMap, lazyOpts) =>
+							plugin.query(lazyMap, {
+								referenceTimeMs,
+								...(lazyOpts?.hostDoc !== undefined
+									? { hostDoc: lazyOpts.hostDoc }
+									: {}),
+								...(lazyOpts?.priorQueryPaths !== undefined
+									? { priorQueryPaths: lazyOpts.priorQueryPaths }
+									: {}),
+							})
+					: undefined,
 			);
 			const liquidMs = Math.max(0, Date.now() - renderStartedAt);
 
@@ -856,25 +968,26 @@ export async function processRhizomeCodeBlock(
 			};
 		};
 
-		const flight = renderCache
-			? renderCache.getOrRunInFlight(
-					{
-						sourcePath: currentSourcePath,
-						source,
-						headingLevel: initialHeadingLevel,
-						folders: folderConfig,
-						templateRevision: currentTemplateRevAtMount,
-						stateRevision: stateRevisionBeforeQuery,
-					},
-					cycleSignal,
-					executeInitialQueryAndPass2,
-				)
-			: {
-					promise: executeInitialQueryAndPass2(
-						() => !outerAbortController.signal.aborted && !cycleSignal.aborted,
-					),
-					isLeader: true,
-				};
+		const flight =
+			renderCache && !isTemplatePreview
+				? renderCache.getOrRunInFlight(
+						{
+							sourcePath: currentSourcePath,
+							source,
+							headingLevel: initialHeadingLevel,
+							folders: folderConfig,
+							templateRevision: currentTemplateRevAtMount,
+							stateRevision: stateRevisionBeforeQuery,
+						},
+						cycleSignal,
+						executeInitialQueryAndPass2,
+					)
+				: {
+						promise: executeInitialQueryAndPass2(
+							() => !outerAbortController.signal.aborted && !cycleSignal.aborted,
+						),
+						isLeader: true,
+					};
 
 		const shared = await flight.promise;
 		if (

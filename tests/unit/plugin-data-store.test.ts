@@ -7,6 +7,7 @@ const DEFAULTS: RhizomeSettings = {
 	templatesFolder: '◊Rhizome/templates',
 	partialsFolder: '◊Rhizome/partials',
 	layoutsFolder: '◊Rhizome/layouts',
+	newNoteDefaultFolderRung: 'notebookNavigator',
 	loggingEnabled: false,
 	logLevel: 'warn',
 };
@@ -69,6 +70,16 @@ describe('PluginDataStore.loadSettings', () => {
 			partialsFolder: '◊Rhizome/partials',
 			layoutsFolder: '◊Rhizome/layouts',
 		});
+	});
+
+	it('preserves valid newNoteDefaultFolderRung values and falls back to notebookNavigator when invalid', async () => {
+		const valid = createStore({ settings: { newNoteDefaultFolderRung: 'activeNote' } });
+		expect((await valid.store.loadSettings()).newNoteDefaultFolderRung).toBe('activeNote');
+
+		const invalid = createStore({ settings: { newNoteDefaultFolderRung: 'unknownRung' } });
+		expect((await invalid.store.loadSettings()).newNoteDefaultFolderRung).toBe(
+			'notebookNavigator',
+		);
 	});
 });
 
