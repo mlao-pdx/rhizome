@@ -20,7 +20,6 @@ import {
 	registerQueryTag,
 } from './query-tag';
 import {
-	buildHostNoteQuery,
 	buildRhizomeTemplateContext,
 	extractUserQueryMap,
 	HOST_QUERY_KEY,
@@ -839,19 +838,30 @@ export async function renderRhizomeTemplate(
 	}
 
 	try {
-		let payload: Record<string, unknown[]> = Object.create(null) as Record<string, unknown[]>;
+		const payload: Record<string, unknown[]> = Object.create(null) as Record<string, unknown[]>;
 		const queryMap = Object.create(null) as Record<string, string>;
-		const sourcePath = callbacks.runtimeContext?.sourcePath;
-		if (typeof sourcePath === 'string' && sourcePath.length > 0) {
-			queryMap[HOST_QUERY_KEY] = buildHostNoteQuery(sourcePath);
-		}
 		for (const q of queries) {
 			queryMap[q.name] = q.query;
 		}
-		if (Object.keys(queryMap).length > 0) {
+		const sourcePath = callbacks.runtimeContext?.sourcePath;
+		const hasSourcePath = typeof sourcePath === 'string' && sourcePath.length > 0;
+		const hasQueries = Object.keys(queryMap).length > 0;
+
+		if (typeof callbacks.resolveHost === 'function') {
+			if (hasQueries) {
+				const rawPayload = await callbacks.runQueries(Object.freeze(queryMap));
+				if (rawPayload && typeof rawPayload === 'object') {
+					Object.assign(payload, rawPayload);
+				}
+			}
+			if (hasSourcePath) {
+				const hostMatch = await callbacks.resolveHost(sourcePath);
+				payload[HOST_QUERY_KEY] = hostMatch ? [hostMatch] : [];
+			}
+		} else if (hasQueries || hasSourcePath) {
 			const rawPayload = await callbacks.runQueries(Object.freeze(queryMap));
 			if (rawPayload && typeof rawPayload === 'object') {
-				payload = rawPayload;
+				Object.assign(payload, rawPayload);
 			}
 		}
 

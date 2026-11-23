@@ -21,3 +21,5 @@ export * from './heading-filter';
 export * from './template-context';
 export * from './template-engine';
 export * from './template-analyzer';
+export * from './inline-expression';
+export * from './inline-analyzer';

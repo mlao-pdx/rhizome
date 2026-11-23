@@ -8,17 +8,31 @@ import {
 	type ViewUpdate,
 } from '@codemirror/view';
 import type { App } from 'obsidian';
-import type { CodeBlockTokenKind } from '@core/templates';
+import { analyzeInlineRhizomeSpan, type CodeBlockTokenKind } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import type { BacklinkIndex } from '../backlink-index';
+import type { InlineHostResolver } from '../inline-host-resolver';
 import type { NormalizedDocumentCache } from '../normalized-document-cache';
 import { loadVaultPropertyTypes } from '../vault-query-logging';
 import { buildFallbackConfig, createRhizomeAnalysisCache } from './rhizome-analysis-cache';
 import { findRhizomeCodeBlocks } from './rhizome-code-blocks';
+import {
+	createInlineLivePreviewExtension,
+	getInlineLivePreviewDecorations,
+	hostInlineRefreshEffect,
+	setCompositionFrozenEffect,
+} from './rhizome-inline-live-preview';
+import { findRhizomeInlineSpans } from './rhizome-inline-spans';
 import { createRhizomeLintExtension } from './rhizome-lint';
 
 export { findRhizomeCodeBlocks, type FencedRhizomeBlock } from './rhizome-code-blocks';
 export { resolveEditorHostFile } from './rhizome-analysis-cache';
+export {
+	findRhizomeInlineSpans,
+	getCachedRhizomeInlineSpans,
+	type ScannedInlineSpan,
+} from './rhizome-inline-spans';
+export { getInlineLivePreviewDecorations, hostInlineRefreshEffect, setCompositionFrozenEffect };
 
 const TOKEN_DECORATIONS: Readonly<Record<CodeBlockTokenKind, Decoration>> = {
 	'liquid-delimiter': Decoration.mark({ class: 'cm-rhizome-tok-liquid-delimiter' }),
@@ -50,6 +64,8 @@ export function createRhizomeEditorExtension(
 	logger?: LoggerPort,
 	backlinkIndex?: BacklinkIndex,
 	documentCache?: NormalizedDocumentCache,
+	inlineHostResolver?: InlineHostResolver,
+	waitForVaultReady?: (signal?: AbortSignal) => Promise<void>,
 ): Extension {
 	let refreshPending = false;
 	const activeViews = new Set<EditorView>();
@@ -90,7 +106,14 @@ export function createRhizomeEditorExtension(
 				const configChanged = update.transactions.some((tr) =>
 					tr.effects.some((e) => e.is(configRefreshEffect)),
 				);
-				if (update.docChanged || update.viewportChanged || configChanged) {
+				const prevInlineDecos = getInlineLivePreviewDecorations(update.startState);
+				const nextInlineDecos = getInlineLivePreviewDecorations(update.state);
+				if (
+					update.docChanged ||
+					update.viewportChanged ||
+					configChanged ||
+					prevInlineDecos !== nextInlineDecos
+				) {
 					this.decorations = this.computeDecorations(update.view);
 				}
 			}
@@ -105,7 +128,8 @@ export function createRhizomeEditorExtension(
 				const winTo =
 					visible.length > 0 ? visible[visible.length - 1]!.to : view.state.doc.length;
 				const blocks = findRhizomeCodeBlocks(view.state.doc, winFrom, winTo);
-				if (blocks.length === 0) {
+				const inlineSpans = findRhizomeInlineSpans(view.state.doc, winFrom, winTo);
+				if (blocks.length === 0 && inlineSpans.length === 0) {
 					return Decoration.none;
 				}
 
@@ -123,7 +147,34 @@ export function createRhizomeEditorExtension(
 					}
 				}
 
-				return Decoration.set(ranges, true);
+				if (inlineSpans.length > 0) {
+					const replacedDecos = getInlineLivePreviewDecorations(view.state);
+					for (const span of inlineSpans) {
+						let isReplaced = false;
+						replacedDecos.between(span.spanFrom, span.spanTo, (from, to) => {
+							if (from <= span.spanFrom && to >= span.spanTo) {
+								isReplaced = true;
+								return false;
+							}
+							return undefined;
+						});
+						if (isReplaced) {
+							continue;
+						}
+						const inlineAnalysis = analyzeInlineRhizomeSpan(span.rawInterior, {
+							unescapeTablePipes: span.unescapeTablePipes,
+						});
+						for (const tok of inlineAnalysis.tokens) {
+							const from = span.interiorFrom + tok.startOffset;
+							const to = span.interiorFrom + tok.endOffset;
+							if (to > from && to <= view.state.doc.length) {
+								ranges.push(TOKEN_DECORATIONS[tok.kind].range(from, to));
+							}
+						}
+					}
+				}
+
+				return ranges.length === 0 ? Decoration.none : Decoration.set(ranges, true);
 			}
 		},
 		{
@@ -131,11 +182,23 @@ export function createRhizomeEditorExtension(
 		},
 	);
 
-	return [
+	const extensions: Extension[] = [];
+	if (inlineHostResolver) {
+		extensions.push(
+			createInlineLivePreviewExtension(
+				app,
+				inlineHostResolver,
+				configRefreshEffect,
+				waitForVaultReady,
+			),
+		);
+	}
+	extensions.push(
 		highlighterPlugin,
 		createRhizomeLintExtension(
 			(source, view) => analysisCache.getCachedAnalysis(source, view),
 			configRefreshEffect,
 		),
-	];
+	);
+	return extensions;
 }

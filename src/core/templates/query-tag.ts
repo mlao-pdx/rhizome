@@ -104,6 +104,13 @@ export function parseQueryTagArgs(
 	const parts = trimmed.split(/\s+/);
 	const rawName = parts[0] ?? '';
 
+	if (rawName === 'this') {
+		return fail(
+			"Reserved keyword 'this' cannot be used as a query variable name.",
+			"Choose a different variable name (for example '{% query current %}'); 'this' is reserved for the hosting note.",
+		);
+	}
+
 	if (rawName === 'explain') {
 		return fail(
 			"Reserved keyword 'explain' cannot be used as a query variable name.",

@@ -16,10 +16,15 @@
  * grow — do not pre-build mock surface for unused Obsidian APIs.
  */
 
-// Obsidian plugin code schedules timers through `window`; Node-based tests have no window.
+import { StateEffect, StateField } from '@codemirror/state';
+import { installGlobalObsidianDomHelpers } from './mock-dom';
+
+// Obsidian plugin code schedules timers through `window` and constructs DOM nodes via
+// global `createEl`/`createDiv`/`createSpan`; Node-based tests have neither by default.
 if (typeof window === 'undefined') {
 	(global as { window?: unknown }).window = global;
 }
+installGlobalObsidianDomHelpers();
 
 export class Plugin {
 	app: unknown;
@@ -27,6 +32,10 @@ export class Plugin {
 	readonly registeredCleanups: Array<() => unknown> = [];
 	readonly registeredEvents: unknown[] = [];
 	readonly settingTabs: unknown[] = [];
+	readonly postProcessors: Array<(el: HTMLElement, ctx: unknown) => unknown> = [];
+	readonly editorSuggests: unknown[] = [];
+	readonly commands: unknown[] = [];
+	readonly editorExtensions: unknown[] = [];
 
 	constructor(app: unknown, manifest: unknown) {
 		this.app = app;
@@ -50,9 +59,25 @@ export class Plugin {
 		_handler: (source: string, el: HTMLElement, ctx: unknown) => unknown,
 	): void {}
 
-	addCommand(_command: unknown): void {}
+	registerMarkdownPostProcessor(
+		postProcessor: (el: HTMLElement, ctx: unknown) => unknown,
+	): unknown {
+		this.postProcessors.push(postProcessor);
+		return postProcessor;
+	}
 
-	registerEditorExtension(_extension: unknown): void {}
+	registerEditorSuggest(editorSuggest: unknown): void {
+		this.editorSuggests.push(editorSuggest);
+	}
+
+	addCommand(command: unknown): unknown {
+		this.commands.push(command);
+		return command;
+	}
+
+	registerEditorExtension(extension: unknown): void {
+		this.editorExtensions.push(extension);
+	}
 
 	async loadData(): Promise<unknown> {
 		return undefined;
@@ -319,11 +344,89 @@ export const Platform = {
 
 export class App {}
 
+export function setTooltip(el: HTMLElement, tooltip: string): void {
+	if (el && typeof el.setAttribute === 'function') {
+		el.setAttribute('data-tooltip', tooltip);
+	}
+}
+
+export class EditorSuggest<T> {
+	app: unknown;
+	context: {
+		editor: unknown;
+		file: unknown;
+		start: { line: number; ch: number };
+		end: { line: number; ch: number };
+		query: string;
+	} | null = null;
+	limit = 20;
+	isOpen = false;
+
+	constructor(app: unknown) {
+		this.app = app;
+	}
+
+	open(): void {
+		this.isOpen = true;
+	}
+
+	close(): void {
+		this.isOpen = false;
+	}
+
+	onTrigger(_cursor: unknown, _editor: unknown, _file: unknown): unknown {
+		return null;
+	}
+
+	getSuggestions(_context: unknown): T[] | Promise<T[]> {
+		return [];
+	}
+
+	renderSuggestion(_value: T, _el: HTMLElement): void {}
+
+	selectSuggestion(_value: T, _evt: MouseEvent | KeyboardEvent): void {}
+}
+
 /**
- * Runtime sentinel for Obsidian's `editorInfoField` state field. Tests that need to simulate
- * per-editor host resolution use this identity with a fake `EditorView.state.field()`.
+ * Helper effect allowing CodeMirror 6 tests to toggle `editorLivePreviewField` dynamically.
  */
-export const editorInfoField = { id: 'editorInfoField' };
+export const setMockLivePreviewEffect = StateEffect.define<boolean>();
+
+/**
+ * Stand-in for Obsidian's `editorLivePreviewField` (`StateField<boolean>`).
+ */
+export const editorLivePreviewField = StateField.define<boolean>({
+	create: () => false,
+	update(value, tr) {
+		for (const eff of tr.effects) {
+			if (eff.is(setMockLivePreviewEffect)) {
+				return eff.value;
+			}
+		}
+		return value;
+	},
+});
+
+/**
+ * Helper effect allowing CodeMirror 6 tests to update `editorInfoField` dynamically.
+ */
+export const setMockEditorInfoEffect = StateEffect.define<{ file: TFile | null }>();
+
+/**
+ * Stand-in for Obsidian's `editorInfoField` state field (`StateField<{ file: TFile | null }>`),
+ * usable both in real `EditorState` instances and via reference equality in fake `state.field()` mocks.
+ */
+export const editorInfoField = StateField.define<{ file: TFile | null }>({
+	create: () => ({ file: null }),
+	update(value, tr) {
+		for (const eff of tr.effects) {
+			if (eff.is(setMockEditorInfoEffect)) {
+				return eff.value;
+			}
+		}
+		return value;
+	},
+});
 
 export class TAbstractFile {
 	path = '';

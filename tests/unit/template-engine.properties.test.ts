@@ -14,6 +14,7 @@ const validQueryNameArb = fc
 	.stringMatching(/^[a-zA-Z_][a-zA-Z0-9_]{0,12}$/)
 	.filter(
 		(name) =>
+			name !== 'this' &&
 			name !== 'explain' &&
 			name !== 'cutoff' &&
 			name !== '__proto__' &&

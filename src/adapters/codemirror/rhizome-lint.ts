@@ -1,8 +1,13 @@
 import { type Diagnostic, linter } from '@codemirror/lint';
 import type { Extension, StateEffectType, Text } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import type { CodeBlockAnalysis, CodeBlockDiagnosticSpan } from '@core/templates';
+import {
+	analyzeInlineRhizomeSpan,
+	type CodeBlockAnalysis,
+	type CodeBlockDiagnosticSpan,
+} from '@core/templates';
 import { findRhizomeCodeBlocks } from './rhizome-code-blocks';
+import { findRhizomeInlineSpans } from './rhizome-inline-spans';
 
 function renderDiagnosticItemDom(diag: CodeBlockDiagnosticSpan): HTMLElement {
 	const item = createDiv({
@@ -54,6 +59,28 @@ export function buildRhizomeLintDiagnostics(
 		}
 	}
 
+	for (const span of findRhizomeInlineSpans(doc)) {
+		const inlineAnalysis = analyzeInlineRhizomeSpan(span.rawInterior, {
+			unescapeTablePipes: span.unescapeTablePipes,
+		});
+		for (const diag of inlineAnalysis.diagnostics) {
+			const from = span.interiorFrom + diag.startOffset;
+			const to = Math.min(doc.length, Math.max(from + 1, span.interiorFrom + diag.endOffset));
+			if (to <= from) {
+				continue;
+			}
+			diagnostics.push({
+				from,
+				to,
+				severity: diag.severity,
+				source: 'rhizome',
+				message: diag.issue,
+				renderMessage: () => renderDiagnosticItemDom(diag),
+			});
+		}
+	}
+
+	diagnostics.sort((a, b) => a.from - b.from || a.to - b.to);
 	return diagnostics;
 }
 

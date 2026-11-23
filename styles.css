@@ -110,3 +110,47 @@
 	gap: var(--size-4-2, 8px);
 	margin-top: var(--size-4-2, 8px);
 }
+
+/* Inline `◊ ...` expressions */
+.rhizome-inline-output {
+	display: inline;
+}
+
+.rhizome-inline-output-block {
+	display: block;
+	margin-block: var(--p-spacing, 0.5em);
+}
+
+.rhizome-inline-empty {
+	border-radius: var(--radius-s, 4px);
+	color: var(--text-faint);
+	cursor: text;
+	display: inline-block;
+	font-family: var(--font-monospace);
+	font-size: var(--font-smaller);
+	padding-inline: 2px;
+	user-select: none;
+}
+
+.rhizome-inline-empty:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-muted);
+}
+
+.rhizome-inline-error {
+	background-color: var(--background-modifier-error-hover);
+	border: 1px solid var(--background-modifier-error);
+	border-radius: var(--radius-s, 4px);
+	color: var(--text-error);
+	cursor: pointer;
+	display: inline-block;
+	font-family: var(--font-monospace);
+	font-size: var(--font-smaller);
+	padding-inline: 4px;
+	user-select: none;
+}
+
+.rhizome-inline-error:focus-visible {
+	outline: 2px solid var(--background-modifier-border-focus);
+	outline-offset: 1px;
+}

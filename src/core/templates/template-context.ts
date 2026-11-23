@@ -1,9 +1,4 @@
-import {
-	encodeDoubleQuoted,
-	FORBIDDEN_KEYS,
-	isValidReferenceTimeMs,
-	parseSingleTemporalAtom,
-} from '@core/search';
+import { FORBIDDEN_KEYS, isValidReferenceTimeMs, parseSingleTemporalAtom } from '@core/search';
 import {
 	type HeadingContextState,
 	isBareRelativeTemporalAtom,
@@ -20,14 +15,6 @@ import type { TemplatePlatformFlags, TemplateRuntimeContext } from './types';
  * All `'◊'`-prefixed keys are stripped from the user-facing `query.*` namespace.
  */
 export const HOST_QUERY_KEY = '◊host';
-
-/**
- * Builds the exact virtual-property search query matching a single vault note by its
- * vault-relative `sourcePath` (`[file.path: = "<escaped>"]`).
- */
-export function buildHostNoteQuery(sourcePath: string): string {
-	return `[file.path: = ${encodeDoubleQuoted(sourcePath)}]`;
-}
 
 const DEFAULT_PLATFORM_FLAGS: TemplatePlatformFlags = Object.freeze({
 	isDesktop: true,

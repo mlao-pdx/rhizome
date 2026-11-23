@@ -25,7 +25,8 @@ export type TemplateDiagnosticCode =
 	| 'INVALID_QUERY_TAG_ARGS'
 	| 'INVALID_HEADING_TAG_ARGS'
 	| 'DUPLICATE_QUERY_NAME'
-	| 'TEMPLATE_RENDER_ERROR';
+	| 'TEMPLATE_RENDER_ERROR'
+	| 'INLINE_QUERY_SCOPE_UNAVAILABLE';
 
 /**
  * Pure POJO diagnostic describing a template-level syntax, argument, duplicate-name,
@@ -91,6 +92,7 @@ export interface TemplateRuntimeContext {
 export interface TemplateExecutionCallbacks {
 	runQueries(queries: Readonly<Record<string, string>>): Promise<Record<string, unknown[]>>;
 	explainQuery(query: string, heading: string, cutoff?: QueryExplainCutoff): Promise<string>;
+	resolveHost?: (sourcePath: string) => Promise<object | null> | object | null;
 	readTemplateFile?: (vaultRelativePath: string) => Promise<string | null>;
 	folders?: TemplateFolderConfig;
 	runtimeContext?: TemplateRuntimeContext;

@@ -220,6 +220,13 @@ export function decodeQueryReference(rawTokenText: string): DecodedQueryReferenc
 	const afterPrefix = rawTokenText.slice(7); // After '@query.'
 	const firstDot = afterPrefix.indexOf('.');
 	const rawQueryName = firstDot === -1 ? afterPrefix : afterPrefix.slice(0, firstDot);
+	if (rawQueryName === 'this') {
+		return {
+			ok: false,
+			issue: `Reserved keyword "this" cannot be used as a query name in "${rawTokenText}".`,
+			hint: 'Use "@this" or "@this.<field>" to reference the hosting note directly; "this" cannot be used as a query name.',
+		};
+	}
 	if (
 		!VALID_QUERY_REF_NAME_RE.test(rawQueryName) ||
 		rawQueryName === 'explain' ||

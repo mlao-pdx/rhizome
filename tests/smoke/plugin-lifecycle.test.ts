@@ -529,6 +529,73 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it('registers inline post-processor, EditorSuggest, and insert-inline-expression command without default hotkeys, and disposes inlineHostResolver on cleanup', async () => {
+		const plugin = createPlugin();
+		await plugin.onload();
+
+		expect(plugin.inlineHostResolver).toBeDefined();
+		const mockPlugin = plugin as unknown as {
+			postProcessors: unknown[];
+			editorSuggests: unknown[];
+			commands: Array<{
+				id: string;
+				name: string;
+				hotkeys?: unknown;
+				editorCallback?: unknown;
+			}>;
+			registeredCleanups: Array<() => unknown>;
+		};
+
+		expect(mockPlugin.postProcessors).toHaveLength(1);
+		expect(mockPlugin.editorSuggests).toHaveLength(1);
+		const inlineCmd = mockPlugin.commands.find((c) => c.id === 'insert-inline-expression');
+		expect(inlineCmd).toBeDefined();
+		expect(inlineCmd?.name).toBe('Insert inline expression');
+		expect(inlineCmd?.hotkeys).toBeUndefined();
+		expect(typeof inlineCmd?.editorCallback).toBe('function');
+
+		const unsub = plugin.inlineHostResolver.subscribe('notes/a.md', { onChange: () => {} });
+		expect(plugin.inlineHostResolver.activePathCount).toBe(1);
+
+		// Verify `metadataCache.on('resolve')` forwards link resolution to `inlineHostResolver.notifyLinksResolved`
+		const hostTarget = makeTFile('notes/target.md');
+		const linkSource = makeTFile('notes/source.md');
+		const resolvedLinks: Record<string, Record<string, number>> = {
+			'notes/source.md': {},
+		};
+		const linkApp = createMockApp({
+			files: [hostTarget, linkSource],
+			fileCache: { 'notes/target.md': {}, 'notes/source.md': {} },
+			resolvedLinks,
+		});
+		const linkPlugin = new RhizomePlugin(
+			linkApp as App,
+			createMockManifest() as PluginManifest,
+		);
+		await linkPlugin.onload();
+		(
+			linkApp as { metadataCache: { trigger: (e: string, ...a: unknown[]) => void } }
+		).metadataCache.trigger('resolved');
+
+		let targetChanges = 0;
+		linkPlugin.inlineHostResolver.subscribe('notes/target.md', {
+			onChange: () => {
+				targetChanges++;
+			},
+		});
+		resolvedLinks['notes/source.md'] = { 'notes/target.md': 1 };
+		(
+			linkApp as { metadataCache: { trigger: (e: string, ...a: unknown[]) => void } }
+		).metadataCache.trigger('resolve', linkSource);
+		expect(targetChanges).toBe(1);
+
+		for (const cleanup of mockPlugin.registeredCleanups) {
+			cleanup();
+		}
+		expect(plugin.inlineHostResolver.activePathCount).toBe(0);
+		unsub();
+	});
 });
 
 function makeTFile(path: string): TFile {

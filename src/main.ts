@@ -6,11 +6,17 @@ import { BacklinkIndex } from './adapters/backlink-index';
 import { BodyScanCache } from './adapters/body-scan-cache';
 import { CodeBlockRenderCache } from './adapters/codeblock-render-cache';
 import { createRhizomeEditorExtension } from './adapters/codemirror/rhizome-editor-extension';
+import { InlineHostResolver } from './adapters/inline-host-resolver';
 import { NormalizedDocumentCache } from './adapters/normalized-document-cache';
 import { ObsidianLoggerAdapter } from './adapters/obsidian-logger-adapter';
 import { PluginDataStore } from './adapters/plugin-data-store';
 import { RenderSentinelStore } from './adapters/render-sentinel-store';
 import { processRhizomeCodeBlock } from './adapters/rhizome-codeblock';
+import { processRhizomeInlineSpans } from './adapters/rhizome-inline-postprocessor';
+import {
+	insertInlineExpressionAtSelection,
+	RhizomeInlineSuggest,
+} from './adapters/rhizome-inline-suggest';
 import {
 	explainVaultQuery,
 	runVaultQuery,
@@ -56,6 +62,7 @@ export default class RhizomePlugin extends Plugin {
 	loggerAdapter!: ObsidianLoggerAdapter;
 	dataStore!: PluginDataStore;
 	activeQueryRoster!: ActiveQueryRoster;
+	inlineHostResolver!: InlineHostResolver;
 	backlinkIndex!: BacklinkIndex;
 	bodyScanCache!: BodyScanCache;
 	documentCache!: NormalizedDocumentCache;
@@ -112,7 +119,14 @@ export default class RhizomePlugin extends Plugin {
 			this.backlinkIndex,
 			this.documentCache,
 		);
+		this.inlineHostResolver = new InlineHostResolver(
+			this.app,
+			this.loggerAdapter,
+			this.backlinkIndex,
+			this.documentCache,
+		);
 		this.register(() => this.activeQueryRoster.clear());
+		this.register(() => this.inlineHostResolver.dispose());
 		this.register(() => this.backlinkIndex.dispose());
 		this.register(() => this.bodyScanCache.dispose());
 		this.register(() => this.documentCache.clear());
@@ -179,6 +193,7 @@ export default class RhizomePlugin extends Plugin {
 			this.documentCache.setReady(true);
 			this.backlinkIndex.dispose();
 			this.activeQueryRoster.markVaultDirty();
+			this.inlineHostResolver.notifyIndexRebuilt();
 			for (const wake of [...this.vaultReadyWaiters]) {
 				wake();
 			}
@@ -191,13 +206,19 @@ export default class RhizomePlugin extends Plugin {
 					const hydrated = await this.bodyScanCache.hydrateFromIndexedDB();
 					if (hydrated > 0) {
 						this.activeQueryRoster.markVaultDirty();
+						this.inlineHostResolver.notifyIndexRebuilt();
 						if (this.activeQueryRoster.size > 0) {
 							scheduleRefresh();
 						}
 					}
+					let bodiesReconciled = false;
 					await this.bodyScanCache.reconcileVaultBodies(() => {
+						bodiesReconciled = true;
 						scheduleRefresh();
 					});
+					if (bodiesReconciled) {
+						this.inlineHostResolver.notifyIndexRebuilt();
+					}
 				})(),
 			);
 		};
@@ -227,15 +248,17 @@ export default class RhizomePlugin extends Plugin {
 					this.bodyScanCache.ingestFromText(file, data, nextCache);
 				}
 				// Excluded notes (DO_NOT_INDEX_OR_QUERY, e.g. diagnostic logs) are ignored.
-				// Exception: if the note is currently present in documentCache or tracked as a
-				// backlink source, allow the event through so reconciliation evicts it.
+				// Exception: if the note is currently present in documentCache, tracked as a
+				// backlink source, or actively subscribed by an inline host, allow through.
 				if (
 					ignored &&
 					this.documentCache.get(file.path) === undefined &&
-					!this.backlinkIndex.hasSource(file.path)
+					!this.backlinkIndex.hasSource(file.path) &&
+					!this.inlineHostResolver.hasActivePath(file.path)
 				) {
 					return;
 				}
+				this.inlineHostResolver.notifyMetadataChanged(file.path);
 				scheduleRefresh();
 			}),
 		);
@@ -254,14 +277,16 @@ export default class RhizomePlugin extends Plugin {
 				this.bodyScanCache.delete(file.path);
 				const lastCache = prevCache ?? this.app.metadataCache.getFileCache(file);
 				// Excluded notes (DO_NOT_INDEX_OR_QUERY) are ignored on deletion unless they are
-				// still present in documentCache or backlinkIndex and need eviction.
+				// still present in documentCache, backlinkIndex, or inlineHostResolver.
 				if (
 					isDoNotIndexFrontmatter(lastCache) &&
 					this.documentCache.get(file.path) === undefined &&
-					!this.backlinkIndex.hasSource(file.path)
+					!this.backlinkIndex.hasSource(file.path) &&
+					!this.inlineHostResolver.hasActivePath(file.path)
 				) {
 					return;
 				}
+				this.inlineHostResolver.notifyMetadataChanged(file.path);
 				scheduleRefresh();
 			}),
 		);
@@ -285,6 +310,7 @@ export default class RhizomePlugin extends Plugin {
 						this.backlinkIndex.notifyRename();
 						scheduleRefresh();
 					}
+					this.inlineHostResolver.notifyFileRename(oldPath, file.path);
 				}
 				if (isTemplateFolderNote(file?.path) || isTemplateFolderNote(oldPath)) {
 					scheduleTemplateReset();
@@ -316,6 +342,7 @@ export default class RhizomePlugin extends Plugin {
 				) {
 					return;
 				}
+				this.inlineHostResolver.notifyLinksResolved();
 				scheduleRefresh();
 			}),
 		);
@@ -340,12 +367,23 @@ export default class RhizomePlugin extends Plugin {
 		this.registerMarkdownCodeBlockProcessor('rhizome', (source, el, ctx) =>
 			processRhizomeCodeBlock(source, el, ctx, this),
 		);
+		this.registerMarkdownPostProcessor((el, ctx) => processRhizomeInlineSpans(el, ctx, this));
+		this.registerEditorSuggest(new RhizomeInlineSuggest(this.app));
+		this.addCommand({
+			id: 'insert-inline-expression',
+			name: 'Insert inline expression',
+			editorCallback: (editor) => {
+				insertInlineExpressionAtSelection(editor);
+			},
+		});
 		this.registerEditorExtension(
 			createRhizomeEditorExtension(
 				this.app,
 				this.loggerAdapter,
 				this.backlinkIndex,
 				this.documentCache,
+				this.inlineHostResolver,
+				(signal) => this.waitForVaultReady(signal),
 			),
 		);
 
@@ -386,6 +424,7 @@ export default class RhizomePlugin extends Plugin {
 			this.activeQueryRoster.markVaultDirty();
 		});
 		this.activeQueryRoster.resetAll();
+		this.inlineHostResolver.notifyIndexRebuilt();
 	}
 
 	override onunload() {

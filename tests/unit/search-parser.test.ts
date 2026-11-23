@@ -996,6 +996,8 @@ describe('Literal Decoders, RegExp Validator, deepFreezeAST, normalizeAST & coll
 			'tag:@query.123.tags',
 			'tag:@query.tasks..basename',
 			'tag:@query.tasks.properties.__proto__',
+			'links -> @query.this',
+			'tag:@query.this.tags',
 		];
 
 		for (const q of invalidCases) {

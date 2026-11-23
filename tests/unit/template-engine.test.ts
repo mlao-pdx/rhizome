@@ -966,10 +966,36 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		expect(res.ok).toBe(true);
 		expect(capturedBatches).toHaveLength(1);
-		expect(capturedBatches[0]).toEqual({
-			'◊host': '[file.path: = "Notes/ZeroQueryHost.md"]',
-		});
+		expect(capturedBatches[0]).toEqual({});
 		expect(res.markdown).toBe('Host=ZeroQueryHost | Prop=reference');
+
+		// Also verify resolveHost seam populates ◊host directly without calling runQueries when zero queries exist
+		let runQueriesCalls = 0;
+		const resolvedHostPaths: string[] = [];
+		const directRes = await renderRhizomeTemplate(
+			'Host={{ this.file.basename }} | Prop={{ this.properties.category }}',
+			{
+				runQueries: async () => {
+					runQueriesCalls++;
+					return {};
+				},
+				resolveHost: (sp) => {
+					resolvedHostPaths.push(sp);
+					return {
+						file: { basename: 'DirectHost' },
+						properties: { category: 'direct' },
+					};
+				},
+				explainQuery: async () => '',
+				runtimeContext: {
+					sourcePath: 'Notes/DirectHost.md',
+				},
+			},
+		);
+		expect(directRes.ok).toBe(true);
+		expect(runQueriesCalls).toBe(0);
+		expect(resolvedHostPaths).toEqual(['Notes/DirectHost.md']);
+		expect(directRes.markdown).toBe('Host=DirectHost | Prop=direct');
 	});
 
 	it('evaluates recursive parenthesized filtered expressions in filter args, tags, conditionals, and trailing property/index chains', async () => {
@@ -1193,6 +1219,9 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		});
 
 		const invalidInputs = [
+			'this',
+			'this explain',
+			'this cutoff: 10',
 			'cutoff',
 			'cutoff: 10',
 			'cutoff=10',
