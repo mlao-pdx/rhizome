@@ -5,7 +5,6 @@ import {
 	initEngineConfig,
 	normalizeObsidianMetadata,
 	type NormalizedDocument,
-	type QueryExplainCutoff,
 } from '../../src/core/search';
 import {
 	DEFAULT_QUERY_CUTOFF,
@@ -18,13 +17,12 @@ import {
 } from '../../src/core/templates';
 
 describe('renderRhizomeTemplate & {% query %} tag', () => {
-	it('batches multiple {% query %} blocks into a single runQueries call and binds results in root Liquid scope', async () => {
+	it('batches multiple {% query %} blocks into a single runQueries call and binds results in root Liquid scope with zero inline tag emission', async () => {
 		const runQueries = vi.fn(async (queries: Readonly<Record<string, string>>) => ({
 			tasks: [{ file: { basename: 'Task A' } }, { file: { basename: 'Task B' } }],
 			emptyList: [],
 			_echo: Object.keys(queries),
 		}));
-		const explainQuery = vi.fn(async (q: string, heading: string) => `# ${heading}\n${q}`);
 
 		const template = [
 			'{%- query tasks -%}',
@@ -38,7 +36,7 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'Empty ({{ query.emptyList.size }})',
 		].join('\n');
 
-		const res = await renderRhizomeTemplate(template, { runQueries, explainQuery });
+		const res = await renderRhizomeTemplate(template, { runQueries });
 		expect(res.ok).toBe(true);
 		expect(res.diagnostics).toEqual([]);
 		expect(res.queries).toHaveLength(2);
@@ -47,50 +45,53 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			tasks: '\n  tag:task [status: = "open"]\n',
 			emptyList: '\n  tag:none\n',
 		});
-		expect(explainQuery).not.toHaveBeenCalled();
 		expect(res.markdown).toContain('Tasks (2):');
 		expect(res.markdown).toContain('- Task A');
 		expect(res.markdown).toContain('- Task B');
 		expect(res.markdown).toContain('Empty (0)');
 	});
 
-	it('enforces the Missing vs. Empty Payload Contract for explain and failed queries', async () => {
+	it('enforces the Unified Error Contract on query compilation/DAG failures in production and [] fallback in allowFailedQueries mode', async () => {
 		const runQueries = vi.fn(async () => ({
-			validWithExplain: [{ file: { basename: 'Note 1' } }],
-			// 'brokenQuery' is intentionally omitted from payload to simulate compilation failure
+			validQuery: [{ file: { basename: 'Note 1' } }],
 		}));
-		const explainQuery = vi.fn(
-			async (q: string, heading: string) => `# ${heading}\nExplained: ${q.trim()}`,
-		);
 
 		const template = [
-			'{% query validWithExplain explain %}',
+			'{% query validQuery %}',
 			'  tag:project',
 			'{% endquery %}',
-			'Count: {{ query.validWithExplain.size }}',
+			'Count: {{ query.validQuery.size }}',
 			'{% query brokenQuery %}',
 			'  [invalid_syntax',
 			'{% endquery %}',
-			'After broken: {{ query.brokenQuery.size | default: 0 }}',
+			'After broken: {{ query.brokenQuery.size }}',
 		].join('\n');
 
-		const res = await renderRhizomeTemplate(template, { runQueries, explainQuery });
-		expect(res.ok).toBe(true);
-		expect(runQueries).toHaveBeenCalledTimes(1);
-		expect(explainQuery).toHaveBeenCalledTimes(2);
-		expect(res.markdown).toContain('# Query Explain Plan: validWithExplain');
-		expect(res.markdown).toContain('Explained: tag:project');
-		expect(res.markdown).toContain('Count: 1');
-		expect(res.markdown).toContain('# Query Explain Plan: brokenQuery');
-		expect(res.markdown).toContain('Explained: [invalid_syntax');
-		expect(res.markdown).toContain('After broken: 0');
+		const res = await renderRhizomeTemplate(template, { runQueries });
+		expect(res.ok).toBe(false);
+		expect(runQueries).not.toHaveBeenCalled();
+		expect(res.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
+		expect(res.markdown).toContain('> [!danger] Query Error: `SYNTAX_ERROR`');
+		expect(res.markdown).not.toContain('Count: 1');
+
+		const parsed = parseRhizomeTemplatePass1(template);
+		const sampleRes = await renderParsedRhizomeTemplate(
+			template,
+			parsed,
+			{ validQuery: [{ file: { basename: 'Note 1' } }] },
+			undefined,
+			undefined,
+			{ allowFailedQueries: true },
+		);
+		expect(sampleRes.ok).toBe(true);
+		expect(sampleRes.markdown).toContain('Count: 1');
+		expect(sampleRes.markdown).toContain('After broken: 0');
 	});
 
 	it('tracks nested {% comment %}...{% endcomment %} inside {% query %} so inner {% endquery %} does not close the block', async () => {
 		const runQueries = vi.fn(async () => ({
 			q: [{ file: { basename: 'Matched' } }],
 		}));
-		const explainQuery = vi.fn(async () => '');
 
 		const template = [
 			'{% query q %}',
@@ -99,41 +100,35 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'Found: {{ query.q.size }}',
 		].join('\n');
 
-		const res = await renderRhizomeTemplate(template, { runQueries, explainQuery });
+		const res = await renderRhizomeTemplate(template, { runQueries });
 		expect(res.ok).toBe(true);
 		expect(res.queries).toHaveLength(1);
 		expect(res.queries[0]?.query).toContain('{% endquery %}');
 		expect(res.markdown.trim()).toBe('Found: 1');
 	});
 
-	it('allows {% endquery %} to close a query block when an inner {% comment %} is unclosed so SearchLexer can report SYNTAX_ERROR', async () => {
+	it('allows {% endquery %} to close a query block when an inner {% comment %} is unclosed so SearchLexer reports SYNTAX_ERROR cleanly', async () => {
 		const runQueries = vi.fn(async () => ({}));
-		const explainQuery = vi.fn(
-			async (q: string, heading: string) => `# ${heading}\n${q.trim()}`,
-		);
 
 		const template = [
 			'{% query unclosedCommentQuery %}',
 			'  tag:work {% comment %} forgot endcomment',
 			'{% endquery %}',
-			'Still renders template footer',
+			'Footer omitted on query syntax error',
 		].join('\n');
 
-		const res = await renderRhizomeTemplate(template, { runQueries, explainQuery });
-		expect(res.ok).toBe(true);
-		expect(runQueries).toHaveBeenCalledTimes(1);
-		expect(explainQuery).toHaveBeenCalledTimes(1);
-		expect(res.markdown).toContain('# Query Explain Plan: unclosedCommentQuery');
-		expect(res.markdown).toContain('Still renders template footer');
+		const res = await renderRhizomeTemplate(template, { runQueries });
+		expect(res.ok).toBe(false);
+		expect(res.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
+		expect(res.markdown).toContain('> [!danger] Query Error: `SYNTAX_ERROR`');
 	});
 
-	it('short-circuits with 0 vault scans and renders [!danger] callouts on duplicate query names, invalid tag args, or Liquid syntax errors', async () => {
+	it('short-circuits with 0 vault scans and renders [!danger] callouts on duplicate query names, retired explain args, invalid tag args, or Liquid syntax errors', async () => {
 		const runQueries = vi.fn(async () => ({}));
-		const explainQuery = vi.fn(async () => '');
 
 		const duplicateRes = await renderRhizomeTemplate(
 			'{% query tasks %}tag:a{% endquery %}\n{% query tasks %}tag:b{% endquery %}',
-			{ runQueries, explainQuery },
+			{ runQueries },
 		);
 		expect(duplicateRes.ok).toBe(false);
 		expect(duplicateRes.diagnostics[0]?.code).toBe('DUPLICATE_QUERY_NAME');
@@ -145,15 +140,23 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const badArgsRes = await renderRhizomeTemplate('{% query explain %}tag:a{% endquery %}', {
 			runQueries,
-			explainQuery,
 		});
 		expect(badArgsRes.ok).toBe(false);
 		expect(badArgsRes.diagnostics[0]?.code).toBe('INVALID_QUERY_TAG_ARGS');
+		expect(badArgsRes.diagnostics[0]?.hint).toContain('rhizome-sample');
+		expect(runQueries).not.toHaveBeenCalled();
+
+		const retiredExplainFlagRes = await renderRhizomeTemplate(
+			'{% query tasks explain %}tag:a{% endquery %}',
+			{ runQueries },
+		);
+		expect(retiredExplainFlagRes.ok).toBe(false);
+		expect(retiredExplainFlagRes.diagnostics[0]?.code).toBe('INVALID_QUERY_TAG_ARGS');
+		expect(retiredExplainFlagRes.diagnostics[0]?.hint).toContain('rhizome-sample');
 		expect(runQueries).not.toHaveBeenCalled();
 
 		const extraArgsRes = await renderRhizomeTemplate('{% query a b c %}tag:a{% endquery %}', {
 			runQueries,
-			explainQuery,
 		});
 		expect(extraArgsRes.ok).toBe(false);
 		expect(extraArgsRes.diagnostics[0]?.code).toBe('INVALID_QUERY_TAG_ARGS');
@@ -161,7 +164,7 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const syntaxErrRes = await renderRhizomeTemplate(
 			'{% query a %}tag:a{% endquery %}\n{% if unclosed %}',
-			{ runQueries, explainQuery },
+			{ runQueries },
 		);
 		expect(syntaxErrRes.ok).toBe(false);
 		expect(syntaxErrRes.diagnostics[0]?.code).toBe('TEMPLATE_SYNTAX_ERROR');
@@ -176,28 +179,28 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			quotedBraces: queries['quotedBraces']?.includes('{{hello')
 				? [{ file: { basename: 'Braced' } }]
 				: [],
-			// 'strayBrace' fails query compilation so it is omitted from payload
 		}));
-		const explainQuery = vi.fn(async (q: string, heading: string) => `# ${heading}\nRaw:${q}`);
 
-		const res = await renderRhizomeTemplate(
-			'{% query strayBrace %}{{% endquery %}\n{% query quotedBraces %}"{{hello"{% endquery %}\nMatched: {{ query.quotedBraces.size }}',
-			{ runQueries, explainQuery },
+		const validShieldedRes = await renderRhizomeTemplate(
+			'{% query quotedBraces %}file:"{{hello"{% endquery %}\nMatched: {{ query.quotedBraces.size }}',
+			{ runQueries },
 		);
-		expect(res.ok).toBe(true);
-		expect(res.queries).toHaveLength(2);
-		expect(res.queries[0]?.query).toBe('{');
-		expect(res.queries[1]?.query).toBe('"{{hello"');
-		expect(res.markdown).toContain('# Query Explain Plan: strayBrace');
-		expect(res.markdown).toContain('Matched: 1');
+		expect(validShieldedRes.ok).toBe(true);
+		expect(validShieldedRes.queries[0]?.query).toBe('file:"{{hello"');
+		expect(validShieldedRes.markdown).toContain('Matched: 1');
+
+		const strayBraceRes = await renderRhizomeTemplate(
+			'{% query strayBrace %}{{% endquery %}\n{% query quotedBraces %}file:"{{hello"{% endquery %}',
+			{ runQueries },
+		);
+		expect(strayBraceRes.ok).toBe(false);
+		expect(strayBraceRes.queries).toHaveLength(2);
+		expect(strayBraceRes.queries[0]?.query).toBe('{');
+		expect(strayBraceRes.queries[1]?.query).toBe('file:"{{hello"');
+		expect(strayBraceRes.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
 	});
 
 	it('does not swallow {% endquery %} when an unclosed inner {% comment %} is followed by an outer {% comment %}...{% endcomment %}', async () => {
-		const runQueries = vi.fn(async () => ({}));
-		const explainQuery = vi.fn(
-			async (q: string, heading: string) => `# ${heading}\n${q.trim()}`,
-		);
-
 		const template = [
 			'{% query q %}',
 			'  tag:work {% comment %} unclosed inside query',
@@ -207,12 +210,21 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'Footer text',
 		].join('\n');
 
-		const res = await renderRhizomeTemplate(template, { runQueries, explainQuery });
-		expect(res.ok).toBe(true);
-		expect(res.markdown).toContain('# Query Explain Plan: q');
-		expect(res.markdown).toContain('Visible text between blocks');
-		expect(res.markdown).toContain('Footer text');
-		expect(res.markdown).not.toContain('outer closed comment');
+		const parsed = parseRhizomeTemplatePass1(template);
+		expect(parsed.env.diagnostics).toEqual([]);
+		expect(parsed.env.queries).toHaveLength(1);
+		const sampleRes = await renderParsedRhizomeTemplate(
+			template,
+			parsed,
+			{},
+			undefined,
+			undefined,
+			{ allowFailedQueries: true },
+		);
+		expect(sampleRes.ok).toBe(true);
+		expect(sampleRes.markdown).toContain('Visible text between blocks');
+		expect(sampleRes.markdown).toContain('Footer text');
+		expect(sampleRes.markdown).not.toContain('outer closed comment');
 	});
 
 	it('resolves static partials and layouts inside configured vault folders while blocking path traversal, URLs, and ◊InternalRhizome 001 notes', async () => {
@@ -233,7 +245,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			tasks: [{ file: { basename: 'Alpha' } }, { file: { basename: 'Beta' } }],
 			inner: [{ file: { basename: 'Gamma' } }],
 		}));
-		const explainQuery = vi.fn(async () => '');
 
 		const validTemplate = [
 			"{% layout 'frame' %}",
@@ -243,7 +254,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const okRes = await renderRhizomeTemplate(validTemplate, {
 			runQueries,
-			explainQuery,
 			readTemplateFile,
 		});
 		expect(okRes.ok).toBe(true);
@@ -262,7 +272,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		for (const tpl of blockedPaths) {
 			const blockedRes = await renderRhizomeTemplate(tpl, {
 				runQueries,
-				explainQuery,
 				readTemplateFile,
 			});
 			expect(blockedRes.ok).toBe(false);
@@ -273,7 +282,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const nestedQueryInPartial = await renderRhizomeTemplate("{% render 'nested-query' %}", {
 			runQueries,
-			explainQuery,
 			readTemplateFile,
 		});
 		expect(nestedQueryInPartial.ok).toBe(true);
@@ -283,10 +291,10 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		expect(nestedQueryInPartial.markdown).toContain('Inner=1');
 	});
 
-	it('supports multi-level (3+ deep) partials and layouts with {% query %} blocks, explain flags, query body masking, and flat {{ query.<name> }} namespace', async () => {
+	it('supports multi-level (3+ deep) partials and layouts with {% query %} blocks, query body masking, flat {{ query.<name> }} namespace, and file-accurate query error provenance', async () => {
 		const mockVaultFiles: Record<string, string> = {
 			'◊Rhizome/layouts/outer-layout.md': [
-				'{%- query layoutQ -%}tag:layout "{{masked"{%- endquery -%}',
+				'{%- query layoutQ -%}tag:layout file:"{{masked"{%- endquery -%}',
 				'LAYOUT[{{ query.layoutQ.first.file.basename }}|{{ query.leafQ.first.file.basename }}]:',
 				'{% block %}{% endblock %}',
 			].join('\n'),
@@ -295,11 +303,11 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 				'L1({{ query.p1Q.size }})->{% render "level2", passedFromRoot: rootVal %}',
 			].join('\n'),
 			'◊Rhizome/partials/level2.md': [
-				'{%- query p2Q explain -%}tag:p2{%- endquery -%}',
+				'{%- query p2Q cutoff: 500 -%}tag:p2{%- endquery -%}',
 				'L2({{ passedFromRoot }},{{ query.p2Q.size }})->{% render "level3" %}',
 			].join('\n'),
 			'◊Rhizome/partials/level3.md': [
-				'{%- query leafQ -%}{{%- endquery -%}',
+				'{%- query leafQ -%}tag:leaf{%- endquery -%}',
 				'L3(root={{ query.rootQ.size }},layout={{ query.layoutQ.size }},p1={{ query.p1Q.size }})',
 			].join('\n'),
 		};
@@ -315,12 +323,9 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 				layoutQ: [{ file: { basename: 'LayoutDoc' } }],
 				p1Q: [{ file: { basename: 'P1DocA' } }, { file: { basename: 'P1DocB' } }],
 				p2Q: [{ file: { basename: 'P2Doc' } }],
-				// leafQ omitted to simulate query syntax error on `{` and trigger explain fallback
+				leafQ: [{ file: { basename: 'LeafDoc' } }],
 			};
 		});
-		const explainQuery = vi.fn(
-			async (q: string, heading: string) => `[EXPLAIN:${heading}:${q.trim()}]`,
-		);
 
 		const rootSource = [
 			"{% layout 'outer-layout' %}",
@@ -330,7 +335,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const res = await renderRhizomeTemplate(rootSource, {
 			runQueries,
-			explainQuery,
 			readTemplateFile,
 		});
 
@@ -340,8 +344,8 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			rootQ: 'tag:root',
 			p1Q: 'tag:p1',
 			p2Q: 'tag:p2',
-			leafQ: '{',
-			layoutQ: 'tag:layout "{{masked"',
+			leafQ: 'tag:leaf',
+			layoutQ: 'tag:layout file:"{{masked"',
 		});
 		expect(res.queries.map((q) => ({ name: q.name, file: q.file }))).toEqual([
 			{ name: 'rootQ', file: null },
@@ -350,13 +354,22 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			{ name: 'leafQ', file: '◊Rhizome/partials/level3.md' },
 			{ name: 'layoutQ', file: '◊Rhizome/layouts/outer-layout.md' },
 		]);
-		expect(explainQuery).toHaveBeenCalledTimes(2);
-		expect(res.markdown).toContain('LAYOUT[LayoutDoc|]:');
+		expect(res.markdown).toContain('LAYOUT[LayoutDoc|LeafDoc]:');
 		expect(res.markdown).toContain('L1(2)->');
-		expect(res.markdown).toContain('[EXPLAIN:Query Explain Plan: p2Q:tag:p2]');
 		expect(res.markdown).toContain('L2(hello,1)->');
-		expect(res.markdown).toContain('[EXPLAIN:Query Explain Plan: leafQ:{]');
 		expect(res.markdown).toContain('L3(root=1,layout=1,p1=2)');
+
+		// Broken query inside nested partial reports file provenance and short-circuits
+		mockVaultFiles['◊Rhizome/partials/level3.md'] =
+			'{%- query leafQ -%}[broken{%- endquery -%}';
+		const errRes = await renderRhizomeTemplate(rootSource, {
+			runQueries,
+			readTemplateFile,
+		});
+		expect(errRes.ok).toBe(false);
+		expect(errRes.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
+		expect(errRes.diagnostics[0]?.file).toBe('◊Rhizome/partials/level3.md');
+		expect(errRes.markdown).toContain("in '◊Rhizome/partials/level3.md'");
 	});
 
 	it('handles diamond partial inclusion (including mixed .md extensions) and {% render %} inside {% for %} loops without false DUPLICATE_QUERY_NAME errors', async () => {
@@ -373,7 +386,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		const runQueries = vi.fn(async () => ({
 			sharedQ: [{ file: { basename: 'S1' } }, { file: { basename: 'S2' } }],
 		}));
-		const explainQuery = vi.fn(async () => '');
 
 		const template = [
 			'{% render "branch-a" %}',
@@ -383,7 +395,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const res = await renderRhizomeTemplate(template, {
 			runQueries,
-			explainQuery,
 			readTemplateFile,
 		});
 
@@ -407,12 +418,11 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			async (vaultPath: string) => mockVaultFiles[vaultPath] ?? null,
 		);
 		const runQueries = vi.fn(async () => ({}));
-		const explainQuery = vi.fn(async () => '');
 
 		// 1. Root + partial collision
 		const rootVsPartial = await renderRhizomeTemplate(
 			'{% query dup %}tag:root{% endquery %}\n{% render "p-one" %}',
-			{ runQueries, explainQuery, readTemplateFile },
+			{ runQueries, readTemplateFile },
 		);
 		expect(rootVsPartial.ok).toBe(false);
 		expect(rootVsPartial.diagnostics).toHaveLength(1);
@@ -429,7 +439,7 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		// 2. Partial + partial collision
 		const partialVsPartial = await renderRhizomeTemplate(
 			'{% render "p-one" %}\n{% render "p-two" %}',
-			{ runQueries, explainQuery, readTemplateFile },
+			{ runQueries, readTemplateFile },
 		);
 		expect(partialVsPartial.ok).toBe(false);
 		expect(partialVsPartial.diagnostics).toHaveLength(1);
@@ -455,11 +465,9 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			async (vaultPath: string) => mockVaultFiles[vaultPath] ?? null,
 		);
 		const runQueries = vi.fn(async () => ({}));
-		const explainQuery = vi.fn(async () => '');
 
 		const abCycle = await renderRhizomeTemplate('{% render "cycle-a" %}', {
 			runQueries,
-			explainQuery,
 			readTemplateFile,
 		});
 		expect(abCycle.ok).toBe(false);
@@ -473,7 +481,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const selfCycle = await renderRhizomeTemplate('{% render "self-cycle" %}', {
 			runQueries,
-			explainQuery,
 			readTemplateFile,
 		});
 		expect(selfCycle.ok).toBe(false);
@@ -483,11 +490,10 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 	it('rejects dynamic variable filenames in {% render %} and {% layout %} and rejects deprecated {% include %}', async () => {
 		const runQueries = vi.fn(async () => ({}));
-		const explainQuery = vi.fn(async () => '');
 
 		const dynamicRender = await renderRhizomeTemplate(
 			"{% assign p = 'row' %}\n{% render p %}",
-			{ runQueries, explainQuery },
+			{ runQueries },
 		);
 		expect(dynamicRender.ok).toBe(false);
 		expect(dynamicRender.diagnostics[0]?.code).toBe('TEMPLATE_SYNTAX_ERROR');
@@ -498,7 +504,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const interpolatedLayout = await renderRhizomeTemplate('{% layout "frames/{{ kind }}" %}', {
 			runQueries,
-			explainQuery,
 		});
 		expect(interpolatedLayout.ok).toBe(false);
 		expect(interpolatedLayout.diagnostics[0]?.code).toBe('TEMPLATE_SYNTAX_ERROR');
@@ -508,14 +513,12 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const layoutNoneRes = await renderRhizomeTemplate('{% layout none %}Plain body', {
 			runQueries,
-			explainQuery,
 		});
 		expect(layoutNoneRes.ok).toBe(true);
 		expect(layoutNoneRes.markdown).toBe('Plain body');
 
 		const deprecatedInclude = await renderRhizomeTemplate("{% include 'row' %}", {
 			runQueries,
-			explainQuery,
 		});
 		expect(deprecatedInclude.ok).toBe(false);
 		expect(deprecatedInclude.diagnostics[0]?.code).toBe('TEMPLATE_SYNTAX_ERROR');
@@ -568,7 +571,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			],
 			myFirstQuery: [{ file: { basename: 'Task 1' } }, { file: { basename: 'Task 2' } }],
 		}));
-		const explainQuery = vi.fn(async () => '');
 
 		const template = [
 			'{%- query myFirstQuery -%}tag:task{%- endquery -%}',
@@ -587,7 +589,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const res = await renderRhizomeTemplate(template, {
 			runQueries,
-			explainQuery,
 			runtimeContext: {
 				referenceTimeMs: Date.UTC(2026, 9, 31, 8, 33, 0, 0),
 				timeZone: 'UTC',
@@ -663,10 +664,9 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 				{ file: { basename: 'OldNote', created: '2026-10-20T07:00' } },
 			],
 		}));
-		const explainQuery = vi.fn(async () => '');
 
 		const template = [
-			'{%- query notes -%}* {%- endquery -%}',
+			'{%- query notes -%} {%- endquery -%}',
 			'year={{ thisyear }}',
 			'lastyear={{ lastyear }}',
 			'nextyear={{ nextyear }}',
@@ -704,7 +704,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const res = await renderRhizomeTemplate(template, {
 			runQueries,
-			explainQuery,
 			runtimeContext: {
 				referenceTimeMs: refMs,
 				timeZone: 'UTC',
@@ -751,7 +750,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		const refMs = Date.UTC(2026, 9, 31, 8, 39, 0, 0);
 		const res = await renderRhizomeTemplate('{{ today..yesterday }}', {
 			runQueries: async () => ({}),
-			explainQuery: async () => '',
 			runtimeContext: {
 				referenceTimeMs: refMs,
 				timeZone: 'UTC',
@@ -800,7 +798,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		for (const tc of invalidCases) {
 			const res = await renderRhizomeTemplate(tc.source, {
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 				runtimeContext: {
 					referenceTimeMs: refMs,
 					timeZone: 'UTC',
@@ -820,7 +817,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'{% assign emptyStr = "" %}[{% for x in (missingA..missingB) %}{{ x }}{% endfor %}][{% for x in (emptyStr..2) %}{{ x }}{% endfor %}][{% for x in (false..2) %}{{ x }}{% endfor %}]',
 			{
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 				runtimeContext: {
 					referenceTimeMs: refMs,
 					timeZone: 'UTC',
@@ -835,7 +831,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'{{ (nil | default: properties.missing..false) }}',
 			{
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 				runtimeContext: {
 					referenceTimeMs: refMs,
 					timeZone: 'UTC',
@@ -865,7 +860,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		for (const source of spacedRangeCases) {
 			const spacedRes = await renderRhizomeTemplate(source, {
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 				runtimeContext: {
 					referenceTimeMs: refMs,
 					timeZone: 'UTC',
@@ -904,7 +898,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 						},
 					],
 				}),
-				explainQuery: async () => '',
 				runtimeContext: {
 					sourcePath: 'EpochNote.md',
 					referenceTimeMs: refMs,
@@ -933,7 +926,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			].join('\n'),
 			{
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 				runtimeContext: {
 					referenceTimeMs: refMs,
 					timeZone: 'Invalid/TimeZone_Identifier',
@@ -964,7 +956,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 						],
 					};
 				},
-				explainQuery: async () => '',
 				runtimeContext: {
 					sourcePath: 'Notes/ZeroQueryHost.md',
 				},
@@ -993,7 +984,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 						properties: { category: 'direct' },
 					};
 				},
-				explainQuery: async () => '',
 				runtimeContext: {
 					sourcePath: 'Notes/DirectHost.md',
 				},
@@ -1034,7 +1024,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 						{ file: { basename: 'Alpha', stat: { mtime: 200 } } },
 					],
 				}),
-				explainQuery: async () => '',
 				runtimeContext: {
 					sourcePath: 'ReadMe.md',
 				},
@@ -1060,7 +1049,7 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		const refMs = Date.UTC(2026, 9, 31, 14, 5, 9, 123);
 		const res = await renderRhizomeTemplate(
 			[
-				'{%- query notes -%}* {%- endquery -%}',
+				'{%- query notes -%} {%- endquery -%}',
 				'm_iso={{ this.file.modified | date: "YYYY-MM-DD HH:mm:ss.SSS" }}',
 				'm_human={{ today | date: "dddd, MMMM Do YYYY" }}',
 				'm_escaped={{ now | date: "[Today is] ddd, MMM D [at] h:mm A" }}',
@@ -1106,7 +1095,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 					],
 					notes: [{ file: { basename: 'Alpha', modified: refMs } }],
 				}),
-				explainQuery: async () => '',
 				runtimeContext: {
 					sourcePath: 'Daily/2026-10-31.md',
 					referenceTimeMs: refMs,
@@ -1171,62 +1159,46 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		expect(parseQueryTagArgs('tasks', dummySpan)).toEqual({
 			ok: true,
 			name: 'tasks',
-			explain: false,
-			cutoff: 5_000,
-			explicitCutoff: false,
-		});
-		expect(parseQueryTagArgs('tasks explain', dummySpan)).toEqual({
-			ok: true,
-			name: 'tasks',
-			explain: true,
 			cutoff: 5_000,
 			explicitCutoff: false,
 		});
 		expect(parseQueryTagArgs('tasks cutoff: 500', dummySpan)).toEqual({
 			ok: true,
 			name: 'tasks',
-			explain: false,
 			cutoff: 500,
 			explicitCutoff: true,
 		});
 		expect(parseQueryTagArgs('tasks cutoff:500', dummySpan)).toEqual({
 			ok: true,
 			name: 'tasks',
-			explain: false,
 			cutoff: 500,
 			explicitCutoff: true,
 		});
-		expect(parseQueryTagArgs('tasks explain cutoff: 0', dummySpan)).toEqual({
+		expect(parseQueryTagArgs('tasks cutoff: 0', dummySpan)).toEqual({
 			ok: true,
 			name: 'tasks',
-			explain: true,
-			cutoff: 0,
-			explicitCutoff: true,
-		});
-		expect(parseQueryTagArgs('tasks cutoff:0 explain', dummySpan)).toEqual({
-			ok: true,
-			name: 'tasks',
-			explain: true,
 			cutoff: 0,
 			explicitCutoff: true,
 		});
 		expect(parseQueryTagArgs('tasks cutoff: 1', dummySpan)).toEqual({
 			ok: true,
 			name: 'tasks',
-			explain: false,
 			cutoff: 1,
 			explicitCutoff: true,
 		});
 		expect(parseQueryTagArgs('tasks cutoff: 9007199254740991', dummySpan)).toEqual({
 			ok: true,
 			name: 'tasks',
-			explain: false,
 			cutoff: Number.MAX_SAFE_INTEGER,
 			explicitCutoff: true,
 		});
 
 		const invalidInputs = [
 			'this',
+			'explain',
+			'tasks explain',
+			'tasks explain cutoff: 0',
+			'tasks cutoff:0 explain',
 			'this explain',
 			'this cutoff: 10',
 			'cutoff',
@@ -1273,7 +1245,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			defaultSource,
 			defaultParsed,
 			payload5001,
-			async () => '',
 			{ sourcePath: 'Dashboards/Overview.md' },
 		);
 		expect(defaultRes.ok).toBe(true);
@@ -1293,12 +1264,9 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		// Exact 5,000 boundary does NOT emit a warning callout
 		const exact5000 = raw5001.slice(0, 5_000);
-		const exactRes = await renderParsedRhizomeTemplate(
-			defaultSource,
-			defaultParsed,
-			{ items: exact5000 },
-			async () => '',
-		);
+		const exactRes = await renderParsedRhizomeTemplate(defaultSource, defaultParsed, {
+			items: exact5000,
+		});
 		expect(exactRes.ok).toBe(true);
 		expect(exactRes.markdown).not.toContain('[!warning]-');
 		expect(exactRes.markdown).toContain('Count=5000');
@@ -1308,7 +1276,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'{% query items cutoff: 0 %}#item{% endquery %}Count={{ query.items.size }}';
 		const unlimitedRes = await renderRhizomeTemplate(unlimitedSource, {
 			runQueries: async () => ({ items: raw5001 }),
-			explainQuery: async () => '',
 		});
 		expect(unlimitedRes.ok).toBe(true);
 		expect(unlimitedRes.markdown).toBe('Count=5001');
@@ -1325,7 +1292,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 				beta: Array.from({ length: 1_234 }, () => ({})),
 				Alpha: [{}, {}, {}, {}],
 			}),
-			explainQuery: async () => '',
 		});
 		expect(multiRes.ok).toBe(true);
 		expect(multiRes.markdown.endsWith('\n\n')).toBe(false);
@@ -1343,7 +1309,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 		const partialSource = "{% render 'row-query' %}{{ query.shared.size }}";
 		const partialRes = await renderRhizomeTemplate(partialSource, {
 			runQueries: async () => ({ shared: [1, 2, 3] }),
-			explainQuery: async () => '',
 			readTemplateFile: async (path) =>
 				path === '◊Rhizome/partials/row-query.md'
 					? '\n\n{% query shared cutoff: 2 %}#s{% endquery %}'
@@ -1360,7 +1325,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'{% query q cutoff: 1 %}#x{% endquery %}',
 			{
 				runQueries: async () => ({ q: [1, 2] }),
-				explainQuery: async () => '',
 				runtimeContext: { sourcePath: 'Notes/Bad[1]#2|x.md' },
 			},
 		);
@@ -1369,48 +1333,11 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'> Defined inline in this codeblock in `Notes/Bad[1]#2|x.md` (line 1).',
 		);
 
-		// 5. Explain Plan receives QueryExplainCutoff for both explicit explain and failed-query auto-explain
-		const capturedCutoffs: Array<{ heading: string; cutoff: QueryExplainCutoff | undefined }> =
-			[];
-		const explainSource = [
-			'{% query defExplain explain %}#a{% endquery %}',
-			'{% query customExplain explain cutoff: 25 %}#b{% endquery %}',
-			'{% query failedAuto cutoff: 0 %}[bad{% endquery %}',
-		].join('\n');
-		const explainRes = await renderRhizomeTemplate(explainSource, {
-			runQueries: async () => ({
-				defExplain: [],
-				customExplain: [],
-				// failedAuto omitted -> auto-explain
-			}),
-			explainQuery: async (_q, heading, cutoff) => {
-				capturedCutoffs.push({ heading, cutoff });
-				return `EXPLAIN(${heading})`;
-			},
-		});
-		expect(explainRes.ok).toBe(true);
-		expect(explainRes.markdown).not.toContain('[!warning]-');
-		expect(capturedCutoffs).toEqual([
-			{
-				heading: 'Query Explain Plan: defExplain',
-				cutoff: { value: 5_000, explicit: false },
-			},
-			{
-				heading: 'Query Explain Plan: customExplain',
-				cutoff: { value: 25, explicit: true },
-			},
-			{
-				heading: 'Query Explain Plan: failedAuto',
-				cutoff: { value: 0, explicit: true },
-			},
-		]);
-
-		// 6. Combined callout + rendered body respects MAX_TEMPLATE_OUTPUT_CHARS (3.25 MiB)
+		// 5. Combined callout + rendered body respects MAX_TEMPLATE_OUTPUT_CHARS (3.25 MiB)
 		const nearLimitBody = 'a'.repeat(MAX_TEMPLATE_OUTPUT_CHARS - 50);
 		const nearLimitSource = '{% query q cutoff: 1 %}#x{% endquery %}{{ query.q[0] }}';
 		const overCapRes = await renderRhizomeTemplate(nearLimitSource, {
 			runQueries: async () => ({ q: [nearLimitBody, 'second'] }),
-			explainQuery: async () => '',
 		});
 		expect(overCapRes.ok).toBe(false);
 		expect(overCapRes.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
@@ -1492,7 +1419,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const dynRes = await renderRhizomeTemplate(source, {
 			runQueries: async () => ({ notes: [normDoc] }),
-			explainQuery: async () => '',
 		});
 		expect(dynRes.ok).toBe(true);
 		expect(dynRes.markdown).toContain('trigger=dynamicCodeblock');
@@ -1509,7 +1435,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'{{ ◊.trigger }}|{{ template.folders.default }}',
 			{
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 				runtimeContext: {
 					trigger: 'newNote',
 					template: {
@@ -1585,7 +1510,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 					downstream: [{ file: { path: 'Areas/Work/Down1.md', basename: 'Down1' } }],
 				};
 			},
-			explainQuery: async () => '',
 			runtimeContext: {
 				trigger: 'newNote',
 				timeZone: 'UTC',
@@ -1628,7 +1552,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'{% for i in (1..2) %}{% query q %}#work{% endquery %}{% endfor %}',
 			{
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 			},
 		);
 		expect(forRes.ok).toBe(false);
@@ -1638,7 +1561,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 			'{% tablerow i in (1..2) %}{% query q %}#work{% endquery %}{% endtablerow %}',
 			{
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 			},
 		);
 		expect(tableRowRes.ok).toBe(false);
@@ -1646,7 +1568,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 
 		const renderForRes = await renderRhizomeTemplate('{% render "card" for items %}', {
 			runQueries: async () => ({}),
-			explainQuery: async () => '',
 			readTemplateFile: async (p) =>
 				p === '◊Rhizome/partials/card.md' ? '{% query q %}#work{% endquery %}' : null,
 		});
@@ -1672,7 +1593,6 @@ describe('renderRhizomeTemplate & {% query %} tag', () => {
 				}
 				return {};
 			},
-			explainQuery: async () => '',
 			runtimeContext: { trigger: 'newNote', timeZone: 'UTC' },
 		});
 

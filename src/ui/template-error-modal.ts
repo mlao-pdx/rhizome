@@ -35,7 +35,7 @@ function resolveFirstOffendingTemplateLine(groups: readonly TemplateBlockErrorGr
 }
 
 /**
- * Modal displayed when preflighting a `"newNote"` or `"atCursor"` template fails,
+ * Modal displayed when preflighting a `"newNote"` template fails,
  * reporting per-block diagnostics and offering a one-click jump to the template file.
  */
 export class TemplateErrorModal extends Modal {

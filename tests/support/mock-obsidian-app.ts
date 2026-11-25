@@ -37,6 +37,10 @@ export class Plugin {
 	readonly registeredEvents: unknown[] = [];
 	readonly settingTabs: unknown[] = [];
 	readonly postProcessors: Array<(el: HTMLElement, ctx: unknown) => unknown> = [];
+	readonly codeBlockProcessors = new Map<
+		string,
+		(source: string, el: HTMLElement, ctx: unknown) => unknown
+	>();
 	readonly editorSuggests: unknown[] = [];
 	readonly commands: unknown[] = [];
 	readonly editorExtensions: unknown[] = [];
@@ -59,9 +63,11 @@ export class Plugin {
 	}
 
 	registerMarkdownCodeBlockProcessor(
-		_language: string,
-		_handler: (source: string, el: HTMLElement, ctx: unknown) => unknown,
-	): void {}
+		language: string,
+		handler: (source: string, el: HTMLElement, ctx: unknown) => unknown,
+	): void {
+		this.codeBlockProcessors.set(language, handler);
+	}
 
 	registerMarkdownPostProcessor(
 		postProcessor: (el: HTMLElement, ctx: unknown) => unknown,
@@ -580,6 +586,10 @@ export function createMockApp(options: MockAppOptions = {}): unknown {
 		trigger: metadataEvents.trigger,
 	};
 	return {
+		loadLocalStorage: () => 'en',
+		fileManager: {
+			getNewFileParent: () => ({ path: '' }),
+		},
 		vault: {
 			configDir: 'mock-config',
 			adapter: new FileSystemAdapter(),
@@ -587,6 +597,8 @@ export function createMockApp(options: MockAppOptions = {}): unknown {
 			getFiles: () => files,
 			getMarkdownFiles: () => markdownFiles,
 			getFileByPath: (path: string) =>
+				files.find((file) => (file as { path?: string }).path === path) ?? null,
+			getAbstractFileByPath: (path: string) =>
 				files.find((file) => (file as { path?: string }).path === path) ?? null,
 			on: vaultEvents.on,
 			trigger: vaultEvents.trigger,
@@ -600,6 +612,52 @@ export function createMockApp(options: MockAppOptions = {}): unknown {
 			revealLeaf: async () => {},
 		},
 	};
+}
+
+/** Minimal YAML serializer stand-in for `stringifyYaml` imported from `'obsidian'`. */
+export function stringifyYaml(value: unknown): string {
+	const formatScalar = (v: unknown): string => {
+		if (v === null || v === undefined) return 'null';
+		if (typeof v === 'boolean' || typeof v === 'number') return String(v);
+		if (typeof v === 'string') return JSON.stringify(v);
+		return JSON.stringify(v);
+	};
+	const renderNode = (node: unknown, indent: string): string[] => {
+		if (Array.isArray(node)) {
+			if (node.length === 0) return [`${indent}[]`];
+			return node.flatMap((item) => {
+				if (item && typeof item === 'object' && !Array.isArray(item)) {
+					const sub = renderNode(item, `${indent}  `);
+					return sub.map((l, idx) => (idx === 0 ? `${indent}- ${l.trimStart()}` : l));
+				}
+				return [`${indent}- ${formatScalar(item)}`];
+			});
+		}
+		if (node && typeof node === 'object') {
+			const keys = Object.keys(node);
+			if (keys.length === 0) return [`${indent}{}`];
+			const out: string[] = [];
+			for (const k of keys) {
+				const child = (node as Record<string, unknown>)[k];
+				if (Array.isArray(child)) {
+					if (child.length === 0) {
+						out.push(`${indent}${k}: []`);
+					} else {
+						out.push(`${indent}${k}:`);
+						out.push(...renderNode(child, `${indent}  `));
+					}
+				} else if (child && typeof child === 'object') {
+					out.push(`${indent}${k}:`);
+					out.push(...renderNode(child, `${indent}  `));
+				} else {
+					out.push(`${indent}${k}: ${formatScalar(child)}`);
+				}
+			}
+			return out;
+		}
+		return [`${indent}${formatScalar(node)}`];
+	};
+	return `${renderNode(value, '').join('\n')}\n`;
 }
 
 /** A minimal `manifest` value sufficient to construct `RhizomePlugin`. */

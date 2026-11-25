@@ -133,7 +133,9 @@ async function prepareTemplateSession(
 
 	const blocks = extractTopLevelRhizomeBlocks(templateText);
 	if (blocks.length === 0) {
-		new Notice(`No top-level \`\`\`rhizome codeblocks found in "${templateFile.path}".`);
+		new Notice(
+			`No top-level \`\`\`rhizome or \`\`\`rhizome-sample codeblocks found in "${templateFile.path}".`,
+		);
 		return null;
 	}
 
@@ -247,14 +249,6 @@ export async function executeCreateNoteFromTemplate(
 					...(lazyOpts?.priorQueryPaths !== undefined
 						? { priorQueryPaths: lazyOpts.priorQueryPaths }
 						: {}),
-				}),
-			explainQuery: (q, heading, cutoff, lazyOpts) =>
-				plugin.explainQuery(q, {
-					timeZone: session.timeZone,
-					referenceTimeMs: session.referenceTimeMs,
-					heading,
-					...(cutoff !== undefined ? { cutoff } : {}),
-					...(lazyOpts?.hostDoc !== undefined ? { hostDoc: lazyOpts.hostDoc } : {}),
 				}),
 			runtimeContext: {
 				sourcePath: templateFile.path,
@@ -378,9 +372,10 @@ export async function executeCreateNoteFromTemplate(
 }
 
 /**
- * Executes `"atCursor"` mode on `templateFile`: preflights all top-level `rhizome` blocks in
- * memory against the real `hostFile` (`this`), aborts without touching `editor` if any block fails,
- * and otherwise inserts all rendered blocks joined by `\n\n` via `editor.replaceSelection(...)`.
+ * Executes `"atCursor"` mode on `templateFile`: renders all top-level `rhizome` and `rhizome-sample`
+ * blocks in memory against the real `hostFile` (`this`), collecting rendered Markdown (including
+ * inline `[!danger]` error callouts if any block fails) and inserting all blocks joined by `\n\n`
+ * in a single `editor.replaceSelection(...)` call so one Undo reverts the entire insertion.
  */
 export async function executeInsertFromTemplate(
 	plugin: RhizomePlugin,
@@ -436,14 +431,6 @@ export async function executeInsertFromTemplate(
 					referenceTimeMs: session.referenceTimeMs,
 					...(hostPath.length > 0 ? { sourcePath: hostPath } : {}),
 				}),
-			explainQuery: (q, heading, cutoff) =>
-				plugin.explainQuery(q, {
-					timeZone: session.timeZone,
-					referenceTimeMs: session.referenceTimeMs,
-					heading,
-					...(cutoff !== undefined ? { cutoff } : {}),
-					...(hostPath.length > 0 ? { sourcePath: hostPath } : {}),
-				}),
 			runtimeContext: {
 				sourcePath: hostPath,
 				referenceTimeMs: session.referenceTimeMs,
@@ -460,6 +447,7 @@ export async function executeInsertFromTemplate(
 			},
 		});
 
+		renderedBlocks.push(res.markdown);
 		if (!res.ok) {
 			errorGroups.push({
 				blockIndex: i,
@@ -469,31 +457,25 @@ export async function executeInsertFromTemplate(
 				source: block.source,
 				diagnostics: res.diagnostics,
 			});
-		} else {
-			renderedBlocks.push(res.markdown);
 		}
-	}
-
-	if (errorGroups.length > 0) {
-		plugin.loggerAdapter?.log(
-			'warn',
-			`Aborted insert-from-template execution due to preflight errors: ${markSensitive(templateFile.path)}`,
-			{
-				source: 'template.run',
-				trigger: 'atCursor',
-				errorBlocks: errorGroups.length,
-			},
-		);
-		new TemplateErrorModal(plugin.app, {
-			title: 'Cannot insert template',
-			templateFile,
-			errorGroups,
-		}).open();
-		return { ok: false, insertedMarkdown: '', errorGroups };
 	}
 
 	const joinedMarkdown = renderedBlocks.join('\n\n');
 	editor.replaceSelection(joinedMarkdown);
+
+	if (errorGroups.length > 0) {
+		plugin.loggerAdapter?.log(
+			'warn',
+			`Inserted template with inline error callouts from ${markSensitive(templateFile.path)}`,
+			{
+				source: 'template.run',
+				trigger: 'atCursor',
+				count: renderedBlocks.length,
+				errorBlocks: errorGroups.length,
+			},
+		);
+		return { ok: false, insertedMarkdown: joinedMarkdown, errorGroups };
+	}
 
 	plugin.loggerAdapter?.log(
 		'debug',
@@ -522,7 +504,7 @@ export async function openCreateNoteFromTemplatePicker(plugin: RhizomePlugin): P
 	if (items.length === 0) {
 		const resolved = resolveTemplateFolders(folderConfig);
 		new Notice(
-			`No templates with a \`\`\`rhizome codeblock found in "${resolved.templatesFolder}".`,
+			`No templates with a \`\`\`rhizome or \`\`\`rhizome-sample codeblock found in "${resolved.templatesFolder}".`,
 		);
 		return;
 	}
@@ -549,7 +531,7 @@ export async function openInsertFromTemplatePicker(
 	if (items.length === 0) {
 		const resolved = resolveTemplateFolders(folderConfig);
 		new Notice(
-			`No templates with a \`\`\`rhizome codeblock found in "${resolved.templatesFolder}".`,
+			`No templates with a \`\`\`rhizome or \`\`\`rhizome-sample codeblock found in "${resolved.templatesFolder}".`,
 		);
 		return;
 	}

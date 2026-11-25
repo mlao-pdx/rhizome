@@ -219,8 +219,8 @@ export function parseTargetPathTagArgs(
  */
 export function registerTargetPathTag(liquid: Liquid, getBinding: () => QueryTagBinding): void {
 	class TargetPathTag extends Tag {
-		private readonly valueExpr: Value | null;
-		private readonly tabMode: TemplateTargetTabMode;
+		public readonly valueExpr: Value | null;
+		public readonly tabMode: TemplateTargetTabMode;
 		private readonly headerSpan: SourceSpan;
 		private readonly externalFile: string | null;
 

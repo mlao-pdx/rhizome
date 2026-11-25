@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+	analyzeQueryExplain,
 	buildRegex101Url,
 	createNormalizedFileInfo,
 	describeScopeSemantics,
-	explainQuery,
 	formatDateIntervalWindow,
 	formatSourceCaretSnippet,
 	initEngineConfig,
@@ -11,8 +11,16 @@ import {
 	type EngineConfig,
 	type ResolvedEngineConfig,
 } from '../../src/core/search';
+import {
+	buildConceptsReferenceCallout,
+	buildQueryExplainCallouts,
+	escapeExplainProse,
+	prefixCalloutBodyLines,
+	wrapCodeFenceLines,
+} from '../../src/core/templates';
 
 const REF_TIME_MS = Date.parse('2026-10-22T15:30:00.000Z');
+const SPAN = Object.freeze({ startOffset: 0, endOffset: 1, startLine: 1, startColumn: 1 });
 
 function makeConfig(overrides?: Partial<EngineConfig>): ResolvedEngineConfig {
 	const res = initEngineConfig({
@@ -119,272 +127,125 @@ describe('explain-helpers', () => {
 	});
 });
 
-describe('explainQuery', () => {
-	it('renders Header Context, Logic Breakdown, Diagnostics, and Concept Reference for an empty query', () => {
+describe('analyzeQueryExplain & buildQueryExplainCallouts', () => {
+	it('produces footnote-free MATCH_ALL bullets and omits Concepts Reference when 0 concepts are triggered', () => {
 		const cfg = makeConfig({ propertyTypes: {} });
-		const md = explainQuery('   ', cfg, REF_TIME_MS);
+		const res = analyzeQueryExplain('   ', cfg, REF_TIME_MS);
 
-		expect(md).toContain('# Query Explain Plan');
-		expect(md).toContain('- **Query**: _(empty query)_');
-		expect(md).toContain('- **Status**: *Executable* with 0 errors, 0 warnings, 0 hints.');
-		expect(md).toContain('  - `@now`: `2026-10-22T11:30:00-04:00` (`1792683000000` ms UTC)');
-		expect(md).toContain(
-			'  - `@today`: `[2026-10-22T00:00:00-04:00, 2026-10-23T00:00:00-04:00)`[^1]',
-		);
-		expect(md).toContain('  - **Timezone**: `America/New_York`[^2]');
-		expect(md).toContain('## Logic Breakdown');
-		expect(md).toContain(
+		expect(res.executable).toBe(true);
+		expect(res.nowLocalIso).toBe('2026-10-22T11:30:00-04:00');
+		expect(res.todayLocalWindow).toBe('[2026-10-22T00:00:00-04:00, 2026-10-23T00:00:00-04:00)');
+		expect(res.astBullets.join('\n')).toContain(
 			'- _(empty query)_\n  Matches every Markdown note in the vault (`MATCH_ALL`).',
 		);
-		expect(md).toContain('## Diagnostics');
-		expect(md).toContain('> [!tip] No issues found');
-		expect(md).toContain('## Concept Reference');
-		expect(md).toContain('[^1]: **Half-Open Temporal Intervals');
-		expect(md).toContain(
-			'```mermaid\ngantt\n    title [Half-Open) Interval Comparison Matches',
-		);
-		expect(md).toContain('[^2]: **Timezone Resolution**');
-		expect(md).not.toContain('flowchart TD');
-		expect(md).not.toContain('## Reference — Execution Context & Resolution');
+		expect(res.concepts.size).toBe(0);
+		expect(buildConceptsReferenceCallout(res.concepts, REF_TIME_MS, cfg.timeZone)).toBe('');
 
-		const customHeadingMd = explainQuery(
-			'#work [status] [due:]',
-			cfg,
-			REF_TIME_MS,
-			'Active Projects — Explain Plan',
-		);
-		expect(customHeadingMd.startsWith('# Active Projects — Explain Plan\n')).toBe(true);
-		expect(customHeadingMd).toContain('is present on the note (regardless of value).');
-		expect(customHeadingMd).toContain('is present on the note with no value (empty or null).');
+		const existsEmpty = analyzeQueryExplain('#work [status] [due:]', cfg, REF_TIME_MS);
+		const joined = existsEmpty.astBullets.join('\n');
+		expect(joined).toContain('is present on the note (regardless of value).');
+		expect(joined).toContain('is present on the note with no value (empty or null).');
+		expect(joined).not.toContain('[^');
 	});
 
-	it('progressively shrinks query slices, distinguishes implicit vs explicit AND, uses italic emphasis, and emits numbered footnotes', () => {
+	it('progressively shrinks query slices, distinguishes implicit vs explicit AND, and embeds inline property type badges without footnotes', () => {
 		const cfg = makeConfig();
 		const query =
 			'folder:projects AND #work/auth tag:(#urgent !#archived) [priority: >= 2] [status: != "done"] !( [done: = true] OR file:"draft" )';
-		const md = explainQuery(query, cfg, REF_TIME_MS);
+		const res = analyzeQueryExplain(query, cfg, REF_TIME_MS);
+		const md = res.astBullets.join('\n');
 
-		expect(md).toContain(`- **Query**: \`${query}\``);
-		expect(md).toContain('- **Status**: *Executable* with 0 errors, 0 warnings, 1 hint.');
-		expect(md).toContain(`- \`${query}\``);
+		expect(res.executable).toBe(true);
+		expect(res.hintCount).toBe(1);
 		expect(md).toContain('Matches notes where *all* of the following hold (`AND`):');
-		// Scope alias + numbered footnote
 		expect(md).toContain(
-			'- `folder:projects`\n    At least one `path`[^3] (alias for `path:`) contains `projects` (case-insensitive).',
+			'- `folder:projects`\n    At least one `path` (alias for `path:`) contains `projects` (case-insensitive).',
 		);
-		// Tag shorthand + numbered footnote
 		expect(md).toContain(
-			'- `#work/auth`\n    At least one `tag`[^4] is `#work/auth` or a nested tag under `#work/auth/...` (case-insensitive).',
+			'- `#work/auth`\n    At least one `tag` is `#work/auth` or a nested tag under `#work/auth/...` (case-insensitive).',
 		);
-		// Compound ValueExprAST with progressive shrinking and implicit AND (reusing [^4] for tag)
-		expect(md).toContain('- `tag:(#urgent !#archived)`\n    At least one `tag`[^4] satisfies:');
 		expect(md).toContain(
 			'  - `(#urgent !#archived)`\n      *All* of the following on that same tag (implicit `AND`):',
 		);
 		expect(md).toContain(
-			'    - `#urgent`\n        Is `#urgent` or a nested tag under `#urgent/...` (case-insensitive).',
+			'- `[priority: >= 2]`\n    `priority` *(`number` in `types.json`)* is at least `2`.',
 		);
-		expect(md).toContain('    - `!#archived`\n        Does *not* match (`!` / `NOT`):');
 		expect(md).toContain(
-			'      - `#archived`\n          Is `#archived` or a nested tag under `#archived/...` (case-insensitive).',
+			'- `[status: != "done"]`\n    `status` *(`text` in `types.json`)* does not equal `"done"` (case-insensitive). · ℹ️ `HINT_PROP_NEQ_EXISTENCE`',
 		);
-		// Property operators without repeating operator symbols (`>=`, `!=`)
-		expect(md).toContain('- `[priority: >= 2]`\n    `priority`[^5] is at least `2`.');
-		expect(md).toContain(
-			'- `[status: != "done"]`\n    `status`[^6] does not equal `"done"` (case-insensitive). · [^7]',
-		);
-		expect(md).not.toContain('(`>= 2`)');
-		expect(md).not.toContain('(`!=`,');
-		// Note-level NOT and OR shrinking
 		expect(md).toContain(
 			'- `!( [done: = true] OR file:"draft" )`\n    Excludes notes matching (`!` / `NOT`):',
 		);
-		expect(md).toContain(
-			'  - `( [done: = true] OR file:"draft" )`\n      Matches notes where *any* of the following hold (`OR`):',
-		);
-		expect(md).toContain('    - `[done: = true]`\n        `done`[^8] is `true`.');
-		expect(md).toContain(
-			'    - `file:"draft"`\n        At least one `file`[^9] contains `draft` (case-insensitive).',
-		);
-
-		// Diagnostics section immediately follows Logic Breakdown
-		const logicIdx = md.indexOf('## Logic Breakdown');
-		const diagIdx = md.indexOf('## Diagnostics');
-		const refIdx = md.indexOf('## Concept Reference');
-		expect(logicIdx).toBeGreaterThan(-1);
-		expect(diagIdx).toBeGreaterThan(logicIdx);
-		expect(refIdx).toBeGreaterThan(diagIdx);
-
-		expect(md).toContain('> [!info] Hint 1: `HINT_PROP_NEQ_EXISTENCE`');
-		expect(md).toContain('‼️[status: != "done"]‼️');
-
-		// Concept Reference places the Mermaid diagram first, followed by numbered footnote definitions
-		const refSection = md.slice(refIdx);
-		const mermaidIdx = refSection.indexOf('```mermaid\ngantt');
-		const firstFootnoteIdx = refSection.indexOf('[^1]: ');
-		expect(mermaidIdx).toBeGreaterThan(-1);
-		expect(firstFootnoteIdx).toBeGreaterThan(mermaidIdx);
-		for (let i = 1; i <= 9; i++) {
-			expect(refSection).toMatch(new RegExp(`^\\[\\^${i}\\]: `, 'm'));
-		}
-		expect(refSection).toContain('title [Half-Open) Interval Comparison Matches');
-		expect(refSection).toContain('[2026-10-21 <= Criteria < 2026-10-24)');
+		expect(md).not.toContain('[^');
 	});
 
-	it('resolves temporal windows in the configured timezone and links numbered footnotes', () => {
+	it('resolves temporal windows in the configured timezone, triggers temporal-intervals concept once, and links regexes to regex101', () => {
 		const cfg = makeConfig({ timeZone: 'Asia/Tokyo' });
-		const md = explainQuery(
+		const temporalRes = analyzeQueryExplain(
 			'[due: = @today] [updated: >= 2026-01-01..2026-06-30] [file.modified: < @thisweek]',
 			cfg,
 			REF_TIME_MS,
 		);
+		expect(temporalRes.executable).toBe(true);
+		expect(temporalRes.concepts.has('temporal-intervals')).toBe(true);
+		const conceptsCallout = buildConceptsReferenceCallout(
+			temporalRes.concepts,
+			REF_TIME_MS,
+			cfg.timeZone,
+		);
+		expect(conceptsCallout).toContain('> [!abstract]- Concepts Reference');
+		expect(conceptsCallout).toContain('title [Half-Open) Interval Comparison Matches');
 
-		expect(md).toContain('- **Status**: *Executable* with 0 errors, 0 warnings, 0 hints.');
-		expect(md).toContain('  - **Timezone**: `Asia/Tokyo`[^2]');
-		expect(md).toContain('Matches notes where *all* of the following hold (implicit `AND`):');
-		expect(md).toContain('`due`[^3] falls within');
-		expect(md).toContain('`updated`[^4] is on or after');
-		expect(md).toContain('`file.modified`[^5] is before');
-		expect(md).toContain('[^3]: **Configured `date` Property**');
-		expect(md).toContain('[^4]: **Configured `datetime` Property**');
-		expect(md).toContain('[^5]: **Predetermined Property (`file.modified`)**');
-	});
-
-	it('renders regex values as direct links to regex101 with flavor=javascript, regex, and flags preselected', () => {
-		const cfg = makeConfig();
-		const md = explainQuery(
+		const regexRes = analyzeQueryExplain(
 			'file:/^roadmap/i path:/^projects\\// [priority:/^10$/] [status:/todo|doing/i]',
-			cfg,
+			makeConfig(),
 			REF_TIME_MS,
 		);
-
-		const roadmapUrl = buildRegex101Url('^roadmap', 'i');
-		const projectsUrl = buildRegex101Url('^projects\\/', '');
-		const prioUrl = buildRegex101Url('^10$', '');
-		const statusUrl = buildRegex101Url('todo|doing', 'i');
-
-		expect(md).toContain(`[\`/^roadmap/i\`](${roadmapUrl})[^4]`);
-		expect(md).toContain(`[\`/^projects\\//\`](${projectsUrl})[^4]`);
-		expect(md).toContain(
-			`\`priority\`[^6] has raw text matching [\`/^10$/\`](${prioUrl})[^4].`,
+		const regexMd = regexRes.astBullets.join('\n');
+		expect(regexMd).toContain(
+			`[
+			\`/^roadmap/i\`
+		]`
+				.replace(/\s+/g, '')
+				.replace('][', ']('),
 		);
-		expect(md).toContain(`\`status\`[^7] matches [\`/todo|doing/i\`](${statusUrl})[^4].`);
-		expect(md).toContain('[^4]: **Regular Expression Evaluation**');
+		expect(regexMd).toContain(buildRegex101Url('^roadmap', 'i'));
+		expect(regexMd).toContain(buildRegex101Url('^10$', ''));
 	});
 
-	it('preserves the best-effort Logic Breakdown and attaches numbered diagnostic links on semantic errors', () => {
+	it('handles semantic errors, syntax errors, invalid EngineConfig, system scope hints, and @this / @query graph filters', () => {
 		const cfg = makeConfig();
-		const md = explainQuery(
+		const semErr = analyzeQueryExplain(
 			'bogus:value [priority: = "nan"] [done: > true] [unconfigured_prop: = "ok"]',
 			cfg,
 			REF_TIME_MS,
 		);
+		expect(semErr.executable).toBe(false);
+		expect(semErr.errorCount).toBe(3);
+		expect(semErr.astBullets.join('\n')).toContain('*(untyped → `text`)*');
 
-		expect(md).toContain('- **Status**: *Not Executable* with 3 errors, 0 warnings, 0 hints.');
-		expect(md).toContain('## Logic Breakdown');
-		expect(md).toContain('- `bogus:value`\n    ❌ Unknown search scope `bogus:`. · [^3]');
-		expect(md).toContain(
-			'- `[priority: = "nan"]`\n    `priority`[^4] ❌ `"nan"` (expected an unquoted number such as `42` or `-3.5`). · [^5]',
-		);
-		expect(md).toContain(
-			'- `[done: > true]`\n    `done`[^6] ❌ `true` (ordering comparison is not supported on `checkbox` properties). · [^7]',
-		);
-		expect(md).toContain(
-			'- `[unconfigured_prop: = "ok"]`\n    `unconfigured_prop`[^8] equals `"ok"` (case-insensitive).',
-		);
-		expect(md).toContain('[^8]: **Untyped Property (Default `text`)**');
-		expect(md).toContain('> [!danger] Error 1: `ERROR_UNKNOWN_SCOPE`');
-		expect(md).toContain('‼️bogus:value‼️');
-		expect(md).toContain('> [!danger] Error 2: `ERROR_TYPE_MISMATCH`');
-		expect(md).toContain('[priority: = ‼️"nan"‼️]');
-		expect(md).toContain('> [!danger] Error 3: `ERROR_INVALID_OPERATOR_FOR_TYPE`');
-		expect(md).toContain('‼️[done: > true]‼️');
+		const synErr = analyzeQueryExplain('tag:(#a OR', cfg, REF_TIME_MS);
+		expect(synErr.executable).toBe(false);
+		expect(synErr.ast).toBeNull();
+		expect(synErr.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
 
-		const datetimeErrMd = explainQuery(
-			'[~created: @thismoonth]',
-			makeConfig({ propertyTypes: { '~created': 'datetime' } }),
-			REF_TIME_MS,
-		);
-		expect(datetimeErrMd).toContain(
-			'- `[~created: @thismoonth]`\n  `~created`[^3] ❌ `@thismoonth` (invalid datetime expression: `INVALID_FORMAT`). · [^4]',
-		);
-		expect(datetimeErrMd).toContain(
-			'> [!danger] Error 1: `ERROR_TYPE_MISMATCH` (line 1, column 12)',
-		);
-		expect(datetimeErrMd).toContain('1 | [~created: ‼️@thismoonth‼️]');
-	});
-
-	it('handles syntax errors, invalid EngineConfig, and invalid referenceTimeMs gracefully', () => {
-		const badSyntaxMd = explainQuery('tag:(#a OR', makeConfig(), REF_TIME_MS);
-		expect(badSyntaxMd).toContain('- **Query**: `tag:(#a OR`');
-		expect(badSyntaxMd).toContain('- **Status**: *Not Executable* with 1 error');
-		expect(badSyntaxMd).toContain(
-			'This query could not be parsed into an execution tree because of a syntax or query-length error.',
-		);
-		expect(badSyntaxMd).toContain('> [!danger] Error 1: `SYNTAX_ERROR`');
-
-		const badConfigMd = explainQuery(
-			'#work [priority: (1 OR 2)] [due: = @today]',
-			{
-				timeZone: 'Mars/Phobos',
-				propertyTypes: { priority: 'number', due: 'date', bad: 'invalid_type' as never },
-			},
+		const badCfg = analyzeQueryExplain(
+			'#work [due: = @today]',
+			{ timeZone: 'Mars/Phobos', propertyTypes: { due: 'date' } },
 			Number.NaN,
 		);
-		expect(badConfigMd).toContain('- **Status**: *Not Executable* with 3 errors');
-		expect(badConfigMd).toContain('> [!danger] Error 1: `ERROR_INVALID_CONFIG`');
-		expect(badConfigMd).toContain('Mars/Phobos');
-		expect(badConfigMd).toContain('Invalid `referenceTimeMs`');
-		expect(badConfigMd).toContain(
-			'resolved against fallback epoch `0` because `referenceTimeMs` is invalid',
-		);
-		expect(badConfigMd).toContain('## Logic Breakdown');
-	});
+		expect(badCfg.executable).toBe(false);
+		expect(badCfg.astBullets.join('\n')).toContain('resolved against fallback epoch `0`');
 
-	it('renders built-in system properties as scope hints instead of untyped properties', () => {
-		const cfg = makeConfig();
 		for (const [key, scope] of [
 			['tags', 'tag'],
 			['aliases', 'aliases'],
 			['cssclasses', 'cssclasses'],
 		] as const) {
-			const md = explainQuery(`[${key}: work]`, cfg, REF_TIME_MS);
-			expect(md).toContain('is a built-in note scope, not a property');
-			expect(md).toContain(`(use \`${scope}:\` instead)`);
-			expect(md).not.toContain('Untyped Property');
+			const sys = analyzeQueryExplain(`[${key}: work]`, cfg, REF_TIME_MS);
+			expect(sys.astBullets.join('\n')).toContain(`(use \`${scope}:\` instead)`);
 		}
-	});
 
-	it('explains scope comparisons with exact and alphabetical wording', () => {
-		const cfg = makeConfig();
-		const md = explainQuery(
-			'tag: = work AND tag: > alpha AND cssclasses: = wide',
-			cfg,
-			REF_TIME_MS,
-		);
-		expect(md).toContain('equals exact tag `#work` (case-insensitive)');
-		expect(md).toContain('comes alphabetically after tag `#alpha` (case-insensitive)');
-		expect(md).toContain('equals `wide` (case-insensitive)');
-	});
-
-	it('safely fences backticks and special characters in inline code and regex links', () => {
-		const cfg = makeConfig();
-		const md = explainQuery(
-			'file:"a|b<c>`d`[e]" tag:"x`y" blocks:"^id`1" ["prop`key": != "val"] [status: (/foo|bar/ OR "x|y")]',
-			cfg,
-			REF_TIME_MS,
-		);
-
-		expect(md).toContain('``#x`y``');
-		expect(md).toContain('``^id`1``');
-		expect(md).toContain('``prop`key``');
-		expect(md).toContain(
-			'[`/foo|bar/`](https://regex101.com/?flavor=javascript&regex=foo%7Cbar&flags=)',
-		);
-	});
-
-	it('explains @this.* leaves with resolved host values and emits warning callouts when @this.* is missing on hostDoc', () => {
-		const cfg = makeConfig({ propertyTypes: { priority: 'number' } });
 		const hostDoc = {
 			normalizationFingerprint: cfg.normalizationFingerprint,
 			file: createNormalizedFileInfo({
@@ -410,96 +271,178 @@ describe('explainQuery', () => {
 			propertyOccurrences: [],
 			propertyKeys: ['priority'],
 			properties: Object.assign(Object.create(null) as Record<string, unknown>, {
-				priority: 3,
+				priority: [
+					{
+						key: 'priority',
+						raw: '3',
+						value: 3,
+						type: 'number',
+						source: 'frontmatter',
+						line: 1,
+					},
+				],
 			}),
 			propertyLocations: [],
 			diagnostics: [],
 		};
-
-		const md = explainQuery(
-			'tag:@this.tags AND [priority: >= @this.properties.priority] AND [status: = @this.properties.missing]',
+		const hostRes = analyzeQueryExplain(
+			'tag:@this.tags AND [status: = @this.properties.missing]',
 			cfg,
 			REF_TIME_MS,
-			'Host Explain Plan',
-			hostDoc,
+			{ hostDoc },
 		);
+		expect(hostRes.warningCount).toBe(1);
+		expect(hostRes.astBullets.join('\n')).toContain('(from `@this.tags`)');
 
-		expect(md).toContain('# Host Explain Plan');
-		expect(md).toContain('- **Status**: *Executable* with 0 errors, 1 warning, 0 hints.');
-		expect(md).toContain('(from `@this.tags`)');
-		expect(md).toContain('is at least `3` (from `@this.properties.priority`)');
-		expect(md).toContain(
-			'⚠️ `@this.properties.missing` is missing or empty on the host note (evaluates to `false`)',
-		);
-		expect(md).toContain('> [!warning] Warning 1: `WARN_MISSING_THIS_VALUE`');
-	});
-
-	it('explains ScopeGraphFilterNode, PropertyGraphFilterNode, hop quantifiers, @query.<name> targets, and scalar @query.* projections', () => {
-		const cfg = makeConfig({ propertyTypes: { priority: 'number' } });
-		const md = explainQuery(
+		const graphRes = analyzeQueryExplain(
 			'links ->* { #project AND [priority: >= @query.baselines.properties.priority] } AND [up <-0..3 @query.goals] AND [parent -> @this]',
 			cfg,
 			REF_TIME_MS,
-			'Graph Explain Plan',
-			null,
+			{ hostDoc: null, knownQueryNames: new Set(['baselines', 'goals']) },
 		);
-
-		expect(md).toContain('# Graph Explain Plan');
-		expect(md).toContain('Traverses outgoing `links`');
-		expect(md).toContain('in 1 or more hops (cycle-free simple path, up to 64 hops)');
-		expect(md).toContain(
-			'compares against scalar values projected from `@query.baselines.properties.priority` (sibling query `@query.baselines`)',
-		);
-		expect(md).toContain('Traverses incoming `up` property links from other notes');
-		expect(md).toContain('in 0 to 3 hops (reflexive self-match or cycle-free simple path)');
-		expect(md).toContain('sibling query `@query.goals`');
-		expect(md).toContain(
-			'⚠️ `@this` (unavailable without a hosting note; evaluates to `false`)',
-		);
-		expect(md).toContain('> [!warning] Warning 1: `WARN_MISSING_THIS_VALUE`');
+		expect(graphRes.concepts.has('graph-traversal')).toBe(true);
+		expect(graphRes.concepts.has('cross-query-waves')).toBe(true);
+		expect(graphRes.queryDependencies).toEqual(['baselines', 'goals']);
 	});
 
-	it('renders the - **Cutoff**: header bullet immediately after - **Status**: when cutoff metadata is provided and omits it when undefined', () => {
+	it('orders Query Explain Callouts with errors first, static waves second, and lazy queries third, and flags template-folder exclusions & coercion warnings', () => {
 		const cfg = makeConfig();
-
-		const standalone = explainQuery('#task', cfg, REF_TIME_MS);
-		expect(standalone).not.toContain('- **Cutoff**:');
-
-		const defaultCutoffMd = explainQuery(
-			'#task',
-			cfg,
-			REF_TIME_MS,
-			'Query Explain Plan',
-			null,
+		const queries = [
 			{
-				value: 5_000,
-				explicit: false,
+				name: 'wave2',
+				query: 'links -> @query.wave1',
+				cutoff: 5_000,
+				explicitCutoff: false,
+				headerSpan: SPAN,
+				bodySpan: SPAN,
+				fullSpan: SPAN,
+				file: null,
 			},
+			{
+				name: 'lazy_items',
+				query: 'tag:@this.tags',
+				cutoff: 5_000,
+				explicitCutoff: false,
+				headerSpan: SPAN,
+				bodySpan: SPAN,
+				fullSpan: SPAN,
+				file: null,
+			},
+			{
+				name: 'broken',
+				query: '[unclosed',
+				cutoff: 5_000,
+				explicitCutoff: false,
+				headerSpan: SPAN,
+				bodySpan: SPAN,
+				fullSpan: SPAN,
+				file: null,
+			},
+			{
+				name: 'downstream_of_broken',
+				query: 'links -> @query.broken',
+				cutoff: 5_000,
+				explicitCutoff: false,
+				headerSpan: SPAN,
+				bodySpan: SPAN,
+				fullSpan: SPAN,
+				file: null,
+			},
+			{
+				name: 'wave1',
+				query: 'path:"◊Rhizome/templates" [priority: >= 1]',
+				cutoff: 100,
+				explicitCutoff: true,
+				headerSpan: SPAN,
+				bodySpan: SPAN,
+				fullSpan: SPAN,
+				file: '◊Rhizome/partials/q.md',
+			},
+		];
+
+		const res = buildQueryExplainCallouts({
+			queries,
+			resolvedConfig: cfg,
+			referenceTimeMs: REF_TIME_MS,
+			isNewNoteMode: true,
+			metricsByName: new Map([
+				[
+					'wave1',
+					{
+						matchedCount: 250,
+						sampledCount: 100,
+						baseStrideCount: 100,
+						referentialTopUpCount: 0,
+						downsampled: false,
+						effectiveCutoff: 100,
+						cutoffBound: true,
+						exceedsProductionCutoff: true,
+					},
+				],
+				[
+					'wave2',
+					{
+						matchedCount: 5,
+						sampledCount: 5,
+						baseStrideCount: 5,
+						referentialTopUpCount: 0,
+						downsampled: false,
+						effectiveCutoff: 5_000,
+						cutoffBound: false,
+						exceedsProductionCutoff: false,
+					},
+				],
+			]),
+			coercionDocuments: [
+				{
+					file: { path: 'Notes/BadPrio.md' },
+					diagnostics: [
+						{
+							code: 'DOC_INVALID_PROPERTY_VALUE',
+							filePath: 'Notes/BadPrio.md',
+							fileBasename: 'BadPrio',
+							propertyKey: 'priority',
+							rawKey: 'priority',
+							expectedType: 'number',
+							rawValue: 'high',
+							source: 'frontmatter',
+							line: null,
+							occurrenceIndex: 0,
+							valueIndex: 0,
+							issue: 'Expected number',
+							hint: null,
+						},
+					],
+				},
+			],
+		});
+
+		expect(res.callouts).toHaveLength(5);
+		expect(res.callouts[0]).toContain('> [!danger]+ Query `broken` — 1 error (Not executable)');
+		// Transitively blocked query receives explicit upstream blocker diagnostic (never 0 diagnostics)
+		expect(res.callouts[1]).toContain(
+			'> [!danger]+ Query `downstream_of_broken` — 1 error (Not executable)',
 		);
-		expect(defaultCutoffMd).toContain(
-			[
-				'- **Status**: *Executable* with 0 errors, 0 warnings, 0 hints.',
-				'- **Cutoff**: `5,000` records (default)',
-				'- **Context**:',
-			].join('\n'),
+		expect(res.callouts[1]).toContain("upstream dependency '@query.broken'");
+		expect(res.callouts[2]).toContain('> [!warning]- Query `wave1`');
+		expect(res.callouts[2]).toContain('Pass 1.5 · Wave 1');
+		expect(res.callouts[2]).toContain('Template-Folder Index Exclusion');
+		expect(res.callouts[2]).toContain('Vault Property Coercion');
+		expect(res.callouts[2]).toContain('[[Notes/BadPrio.md]]');
+		expect(res.callouts[3]).toContain('> [!check]- Query `wave2` — all 5 records');
+		expect(res.callouts[3]).toContain('Pass 1.5 · Wave 2');
+		expect(res.callouts[4]).toContain(
+			'> [!info]- Query `lazy_items` — Skipped (branch not entered in sample)',
 		);
 
-		const singularMd = explainQuery('#task', cfg, REF_TIME_MS, 'Query Explain Plan', null, {
-			value: 1,
-			explicit: true,
-		});
-		expect(singularMd).toContain('- **Cutoff**: `1` record\n- **Context**:');
-
-		const pluralMd = explainQuery('#task', cfg, REF_TIME_MS, 'Query Explain Plan', null, {
-			value: 1_250,
-			explicit: true,
-		});
-		expect(pluralMd).toContain('- **Cutoff**: `1,250` records\n- **Context**:');
-
-		const unlimitedMd = explainQuery('#task', cfg, REF_TIME_MS, 'Query Explain Plan', null, {
-			value: 0,
-			explicit: true,
-		});
-		expect(unlimitedMd).toContain('- **Cutoff**: Unlimited (`cutoff: 0`)\n- **Context**:');
+		// Verify newline-safe callout prefixing, image/link escaping, and dynamic fence width
+		expect(prefixCalloutBodyLines(['line1\n![evil](https://x.test)'])).toEqual([
+			'> line1',
+			'> ![evil](https://x.test)',
+		]);
+		expect(escapeExplainProse('Bad ![img](https://evil.example) and [lnk](https://x)')).toBe(
+			'Bad \\![img]\\(https://evil.example) and [lnk]\\(https://x)',
+		);
+		expect(wrapCodeFenceLines('1 | ```triple```', 'text', '  ')[0]).toBe('  ````text');
 	});
 });

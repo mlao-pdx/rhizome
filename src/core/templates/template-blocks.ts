@@ -1,19 +1,29 @@
 /**
- * Pure CommonMark top-level fenced `rhizome` codeblock scanner.
+ * Pure CommonMark top-level fenced `rhizome` and `rhizome-sample` codeblock scanner.
  *
  * @remarks
- * (design, 2026-11-23) Shared between run-once template extraction (`extractTopLevelRhizomeBlocks`)
+ * (spec-change, 2026-11-24) Extended per `docs/spec/Extended Explain Plan.md` §3.1 to recognize
+ * both `rhizome` and `rhizome-sample` top-level fences and expose `flavor` on each scanned block.
+ *
+ * SUPERSEDED (design, 2026-11-23): Shared between run-once template extraction (`extractTopLevelRhizomeBlocks`)
  * and CodeMirror viewport scanning (`findRhizomeCodeBlocks`) so leading YAML frontmatter,
  * nested 3-backtick/tilde fences inside wider documentation fences, inline backtick code spans,
  * and 4-space indented code blocks behave identically across editor analysis and template execution.
  */
 
 /**
- * Location, line coordinates, and content slice of a top-level fenced `rhizome` codeblock.
+ * Supported fenced codeblock info-string flavors handled by Rhizome.
+ */
+export type RhizomeCodeBlockFlavor = 'rhizome' | 'rhizome-sample';
+
+/**
+ * Location, line coordinates, flavor, and content slice of a top-level fenced Rhizome codeblock.
  */
 export interface TopLevelRhizomeBlock {
-	/** 0-based index among top-level `rhizome` blocks in the document. */
+	/** 0-based index among top-level Rhizome blocks in the document. */
 	readonly index: number;
+	/** Canonical fenced codeblock flavor (`'rhizome'` or `'rhizome-sample'`). */
+	readonly flavor: RhizomeCodeBlockFlavor;
 	/**
 	 * Codeblock body with at most one trailing line break immediately preceding a closing fence
 	 * stripped, matching the `source` string Obsidian passes to `registerMarkdownCodeBlockProcessor`.
@@ -38,7 +48,7 @@ const YAML_OPEN_RE = /^\uFEFF?---[ \t]*$/;
 const YAML_CLOSE_RE = /^(?:---|\.\.\.)[ \t]*$/;
 const FENCE_OPEN_CANDIDATE_RE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const FENCE_CLOSE_CANDIDATE_RE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
-const RHIZOME_INFO_RE = /^rhizome(?:\s|$)/i;
+const RHIZOME_INFO_RE = /^rhizome(-sample)?(?:\s|$)/i;
 
 /**
  * Finds the 0-based closing line index of leading YAML frontmatter (`--- ... ---` or `--- ... ...`),
@@ -67,6 +77,7 @@ export interface FenceScanState {
 	fenceChar: string;
 	fenceLen: number;
 	isRhizomeFence: boolean;
+	flavor: RhizomeCodeBlockFlavor | null;
 	fenceStartLine: number;
 	bodyStartLine: number;
 	bodyFrom: number;
@@ -81,6 +92,7 @@ export function createFenceScanState(): FenceScanState {
 		fenceChar: '',
 		fenceLen: 0,
 		isRhizomeFence: false,
+		flavor: null,
 		fenceStartLine: 0,
 		bodyStartLine: 0,
 		bodyFrom: 0,
@@ -89,8 +101,8 @@ export function createFenceScanState(): FenceScanState {
 
 /**
  * Advances `state` across a single document line (`oneBasedLineNo`), returning the closed
- * `rhizome` block range `{ bodyFrom, bodyTo, fenceStartLine, bodyStartLine }` when `lineText`
- * closes an active `rhizome` fence, or `null` otherwise.
+ * Rhizome block range `{ flavor, bodyFrom, bodyTo, fenceStartLine, bodyStartLine }` when `lineText`
+ * closes an active `rhizome` or `rhizome-sample` fence, or `null` otherwise.
  */
 export function stepFenceScanLine(
 	state: FenceScanState,
@@ -99,6 +111,7 @@ export function stepFenceScanLine(
 	lineFrom: number,
 	afterLineBreakOffset: number,
 ): {
+	readonly flavor: RhizomeCodeBlockFlavor;
 	readonly bodyFrom: number;
 	readonly bodyTo: number;
 	readonly fenceStartLine: number;
@@ -116,10 +129,17 @@ export function stepFenceScanLine(
 		if (ch === '`' && rest.includes('`')) {
 			return null;
 		}
+		const infoMatch = RHIZOME_INFO_RE.exec(rest.trim());
+		const flavor: RhizomeCodeBlockFlavor | null = infoMatch
+			? infoMatch[1]
+				? 'rhizome-sample'
+				: 'rhizome'
+			: null;
 		state.inFence = true;
 		state.fenceChar = ch;
 		state.fenceLen = marker.length;
-		state.isRhizomeFence = RHIZOME_INFO_RE.test(rest.trim());
+		state.isRhizomeFence = flavor !== null;
+		state.flavor = flavor;
 		state.fenceStartLine = oneBasedLineNo;
 		state.bodyStartLine = oneBasedLineNo + 1;
 		state.bodyFrom = afterLineBreakOffset;
@@ -136,6 +156,7 @@ export function stepFenceScanLine(
 	}
 
 	const wasRhizome = state.isRhizomeFence;
+	const closedFlavor = state.flavor;
 	const bodyFrom = state.bodyFrom;
 	const bodyTo = Math.max(bodyFrom, lineFrom);
 	const fenceStartLine = state.fenceStartLine;
@@ -145,14 +166,15 @@ export function stepFenceScanLine(
 	state.fenceChar = '';
 	state.fenceLen = 0;
 	state.isRhizomeFence = false;
+	state.flavor = null;
 	state.fenceStartLine = 0;
 	state.bodyStartLine = 0;
 	state.bodyFrom = 0;
 
-	if (!wasRhizome) {
+	if (!wasRhizome || closedFlavor === null) {
 		return null;
 	}
-	return { bodyFrom, bodyTo, fenceStartLine, bodyStartLine };
+	return { flavor: closedFlavor, bodyFrom, bodyTo, fenceStartLine, bodyStartLine };
 }
 
 interface ScannedLineSpan {
@@ -229,6 +251,7 @@ export function extractTopLevelRhizomeBlocks(markdownText: string): TopLevelRhiz
 			const rawSlice = markdownText.slice(closed.bodyFrom, closed.bodyTo);
 			blocks.push({
 				index: blocks.length,
+				flavor: closed.flavor,
 				source: stripClosingFenceNewline(rawSlice),
 				rawSlice,
 				bodyFrom: closed.bodyFrom,
@@ -239,12 +262,13 @@ export function extractTopLevelRhizomeBlocks(markdownText: string): TopLevelRhiz
 		}
 	}
 
-	if (state.inFence && state.isRhizomeFence) {
+	if (state.inFence && state.isRhizomeFence && state.flavor !== null) {
 		const bodyFrom = state.bodyFrom;
 		const bodyTo = markdownText.length;
 		const rawSlice = markdownText.slice(bodyFrom, bodyTo);
 		blocks.push({
 			index: blocks.length,
+			flavor: state.flavor,
 			source: rawSlice,
 			rawSlice,
 			bodyFrom,

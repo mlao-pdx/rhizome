@@ -1,5 +1,6 @@
 import {
 	type ParsedRhizomeTemplate,
+	type RhizomeCodeBlockFlavor,
 	type TemplateFolderConfig,
 	type TemplateRenderResult,
 } from '@core/templates';
@@ -120,6 +121,7 @@ interface CachedRenderEntry {
 	readonly stateRevision: number;
 	readonly payload: VaultQueryResult;
 	readonly result: TemplateRenderResult;
+	readonly extra?: unknown;
 }
 
 function buildFolderKey(folders: TemplateFolderConfig): string {
@@ -168,18 +170,21 @@ interface InFlightSubscriptionEntry<T> {
 /**
  * Bounded per-plugin cache of Pass 1 parsed templates (`ParsedRhizomeTemplate`) and Pass 2
  * rendered outputs (`TemplateRenderResult` + last `VaultQueryResult` payload) so stepping a
- * cursor into and out of a `rhizome` codeblock in Live Preview or scrolling a codeblock into
- * and out of view reuses the cached render without re-running Pass 1, vault queries, or
- * LiquidJS Pass 2 when neither vault state nor template folders have changed.
+ * cursor into and out of a `rhizome` or `rhizome-sample` codeblock in Live Preview or scrolling
+ * a codeblock into and out of view reuses the cached render without re-running Pass 1, vault
+ * queries, or LiquidJS Pass 2 when neither vault state nor template folders have changed.
  *
  * @remarks
- * (design, 2026-11-18) Both Pass 1 and Pass 2 entries are keyed by `sourcePath` so multiple
- * open notes that share identical codeblock `source` text never share a mutable
- * `ParsedRhizomeTemplate` (`parsed.env.payload` / `parsed.env.explainQuery`) or serialize
- * their renders through the same promise chain. Relative temporal anchors (`@now`, `@today`,
- * `now`, `today`) are pinned to the render pass and are intentionally not refreshed by
- * wall-clock timers; cached outputs remain valid until a vault/template change or a manual
- * codeblock refresh occurs.
+ * (spec-change, 2026-11-24) Pass 2 cache entries (`renderCache` and `inFlight`) are keyed by
+ * fence `flavor` (`'rhizome'` vs `'rhizome-sample'`) per `docs/spec/Extended Explain Plan.md` §3.2
+ * while Pass 1 AST cache entries remain shared across flavors.
+ *
+ * SUPERSEDED (design, 2026-11-18): Both Pass 1 and Pass 2 entries are keyed by `sourcePath` so
+ * multiple open notes that share identical codeblock `source` text never share a mutable
+ * `ParsedRhizomeTemplate` (`parsed.env.payload`) or serialize their renders through the same
+ * promise chain. Relative temporal anchors (`@now`, `@today`, `now`, `today`) are pinned to the
+ * render pass and are intentionally not refreshed by wall-clock timers; cached outputs remain
+ * valid until a vault/template change or a manual codeblock refresh occurs.
  */
 export class CodeBlockRenderCache {
 	private readonly pass1Cache = new Map<string, CachedPass1Entry>();
@@ -258,8 +263,8 @@ export class CodeBlockRenderCache {
 	}
 
 	/**
-	 * Returns a cached `(payload, result)` when the codeblock is remounted at the exact same
-	 * `stateRevision` and `templateRevision` with the same `source`, `sourcePath`, and
+	 * Returns a cached `(payload, result, extra)` when the codeblock is remounted at the exact same
+	 * `stateRevision` and `templateRevision` with the same `source`, `sourcePath`, `flavor`, and
 	 * `headingLevel`.
 	 */
 	getRemountHit(
@@ -269,8 +274,15 @@ export class CodeBlockRenderCache {
 		folders: TemplateFolderConfig,
 		templateRevision: number,
 		stateRevision: number,
-	): { readonly payload: VaultQueryResult; readonly result: TemplateRenderResult } | undefined {
-		const key = `${sourcePath}\0${headingLevel}\0${source}`;
+		flavor: RhizomeCodeBlockFlavor = 'rhizome',
+	):
+		| {
+				readonly payload: VaultQueryResult;
+				readonly result: TemplateRenderResult;
+				readonly extra?: unknown;
+		  }
+		| undefined {
+		const key = `${sourcePath}\0${flavor}\0${headingLevel}\0${source}`;
 		const hit = this.renderCache.get(key);
 		if (
 			hit !== undefined &&
@@ -278,7 +290,7 @@ export class CodeBlockRenderCache {
 			hit.stateRevision === stateRevision &&
 			hit.folderKey === buildFolderKey(folders)
 		) {
-			return { payload: hit.payload, result: hit.result };
+			return { payload: hit.payload, result: hit.result, extra: hit.extra };
 		}
 		return undefined;
 	}
@@ -286,7 +298,7 @@ export class CodeBlockRenderCache {
 	/**
 	 * Returns a cached `TemplateRenderResult` when a query run or reactive nudge produces
 	 * the exact same `payloadHash` (which already folds in `headingLevel`) for the same
-	 * `source`, `sourcePath`, and `templateRevision`.
+	 * `source`, `sourcePath`, `flavor`, and `templateRevision`.
 	 */
 	getRenderByPayloadHash(
 		sourcePath: string,
@@ -295,8 +307,32 @@ export class CodeBlockRenderCache {
 		folders: TemplateFolderConfig,
 		templateRevision: number,
 		payloadHash: string,
+		flavor: RhizomeCodeBlockFlavor = 'rhizome',
 	): TemplateRenderResult | undefined {
-		const key = `${sourcePath}\0${headingLevel}\0${source}`;
+		return this.getRenderEntryByPayloadHash(
+			sourcePath,
+			source,
+			headingLevel,
+			folders,
+			templateRevision,
+			payloadHash,
+			flavor,
+		)?.result;
+	}
+
+	/**
+	 * Returns a cached `{ result, extra }` entry by `payloadHash` and `flavor`.
+	 */
+	getRenderEntryByPayloadHash(
+		sourcePath: string,
+		source: string,
+		headingLevel: number,
+		folders: TemplateFolderConfig,
+		templateRevision: number,
+		payloadHash: string,
+		flavor: RhizomeCodeBlockFlavor = 'rhizome',
+	): { readonly result: TemplateRenderResult; readonly extra?: unknown } | undefined {
+		const key = `${sourcePath}\0${flavor}\0${headingLevel}\0${source}`;
 		const hit = this.renderCache.get(key);
 		if (
 			hit !== undefined &&
@@ -304,7 +340,7 @@ export class CodeBlockRenderCache {
 			hit.payloadHash === payloadHash &&
 			hit.folderKey === buildFolderKey(folders)
 		) {
-			return hit.result;
+			return { result: hit.result, extra: hit.extra };
 		}
 		return undefined;
 	}
@@ -319,8 +355,10 @@ export class CodeBlockRenderCache {
 		payloadHash: string,
 		payload: VaultQueryResult,
 		result: TemplateRenderResult,
+		flavor: RhizomeCodeBlockFlavor = 'rhizome',
+		extra?: unknown,
 	): void {
-		const key = `${sourcePath}\0${headingLevel}\0${source}`;
+		const key = `${sourcePath}\0${flavor}\0${headingLevel}\0${source}`;
 		setBounded(this.renderCache, key, {
 			templateRevision,
 			folderKey: buildFolderKey(folders),
@@ -328,6 +366,7 @@ export class CodeBlockRenderCache {
 			stateRevision,
 			payload,
 			result,
+			...(extra !== undefined ? { extra } : {}),
 		});
 	}
 
@@ -344,8 +383,9 @@ export class CodeBlockRenderCache {
 		templateRevision: number,
 		payloadHash: string,
 		stateRevision: number,
+		flavor: RhizomeCodeBlockFlavor = 'rhizome',
 	): void {
-		const key = `${sourcePath}\0${headingLevel}\0${source}`;
+		const key = `${sourcePath}\0${flavor}\0${headingLevel}\0${source}`;
 		const hit = this.renderCache.get(key);
 		if (
 			hit !== undefined &&
@@ -375,6 +415,7 @@ export class CodeBlockRenderCache {
 			readonly folders: TemplateFolderConfig;
 			readonly templateRevision: number;
 			readonly stateRevision: number;
+			readonly flavor?: RhizomeCodeBlockFlavor | undefined;
 		},
 		callerSignal: AbortSignal,
 		factory: (hasLiveSubscribers: () => boolean) => Promise<T>,
@@ -382,8 +423,9 @@ export class CodeBlockRenderCache {
 		if (callerSignal.aborted) {
 			return { promise: factory(() => false), isLeader: true };
 		}
+		const flavor = params.flavor ?? 'rhizome';
 		const folderKey = buildFolderKey(params.folders);
-		const key = `${params.sourcePath}\0${params.headingLevel}\0${params.templateRevision}\0${params.stateRevision}\0${folderKey}\0${params.source}`;
+		const key = `${params.sourcePath}\0${flavor}\0${params.headingLevel}\0${params.templateRevision}\0${params.stateRevision}\0${folderKey}\0${params.source}`;
 
 		let entry = this.inFlight.get(key) as InFlightSubscriptionEntry<T> | undefined;
 		const isLeader = entry === undefined;

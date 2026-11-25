@@ -14,6 +14,10 @@ import {
 } from 'liquidjs';
 import { offsetRangeToSourceSpan, type QueryTagBinding } from './query-tag';
 import {
+	MAX_TEMPLATE_OUTPUT_CHARS,
+	measureSerializedFrontmatterCharsBounded,
+} from './render-limits';
+import {
 	overwriteDeepTargetValue,
 	type ParsedPathSelector,
 	parsePickOrAggSelectors,
@@ -178,7 +182,7 @@ function evaluateSelectorSourceAgainstContext(
  */
 export function registerFrontmatterTag(liquid: Liquid, getBinding: () => QueryTagBinding): void {
 	class FrontmatterTag extends Tag {
-		private readonly argTokens: readonly ValueToken[] | null;
+		public readonly argTokens: readonly ValueToken[] | null;
 		private readonly headerSpan: SourceSpan;
 		private readonly externalFile: string | null;
 
@@ -278,6 +282,29 @@ export function registerFrontmatterTag(liquid: Liquid, getBinding: () => QueryTa
 					clonedContainers,
 					selector.outputSegments,
 					serialized,
+				);
+			}
+
+			try {
+				measureSerializedFrontmatterCharsBounded(
+					nextFrontmatter,
+					MAX_TEMPLATE_OUTPUT_CHARS,
+				);
+			} catch (err: unknown) {
+				const msg = err instanceof Error ? err.message : String(err);
+				const customHint = (err as { hint?: unknown }).hint;
+				throw new TaggedTemplateDiagnosticError(
+					Object.freeze({
+						code: 'TEMPLATE_RENDER_ERROR',
+						severity: 'error',
+						issue: msg.endsWith('.') ? msg : `${msg}.`,
+						hint:
+							typeof customHint === 'string' && customHint.length > 0
+								? customHint
+								: "Reduce the size of values staged via '{% frontmatter %}'.",
+						span: this.headerSpan,
+						file: this.externalFile,
+					}),
 				);
 			}
 

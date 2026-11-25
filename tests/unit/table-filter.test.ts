@@ -268,7 +268,6 @@ describe('Liquid table filter (tableFilter, parseTableAlignments, formatTableCel
 				].join('\n'),
 				{
 					runQueries: async () => ({ books: matches }),
-					explainQuery: async () => '',
 					runtimeContext: {
 						language: 'de',
 					},

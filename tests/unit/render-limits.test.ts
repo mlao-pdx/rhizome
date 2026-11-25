@@ -6,10 +6,9 @@ import {
 	parseRhizomeTemplatePass1Async,
 	renderParsedRhizomeTemplate,
 	renderRhizomeTemplate,
+	RenderTelemetryCollector,
 	TEMPLATE_RENDER_LIMIT_MS,
 } from '../../src/core/templates';
-
-const noopExplain = async () => '';
 
 describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 	afterEach(() => {
@@ -32,7 +31,6 @@ describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 			'{% query q %}#x{% endquery %}{% for item in query.q %}{{ item }}{% endfor %}',
 			parsed,
 			{ q: items },
-			noopExplain,
 		);
 
 		expect(res.ok).toBe(false);
@@ -51,7 +49,6 @@ describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 			'{% query q %}#x{% endquery %}{% for item in query.q %}{% capture buf %}{{ item }}{% endcapture %}{% endfor %}done';
 		const captureRes = await renderRhizomeTemplate(captureSource, {
 			runQueries: async () => ({ q: items }),
-			explainQuery: noopExplain,
 		});
 		expect(captureRes.ok).toBe(false);
 		expect(captureRes.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
@@ -66,7 +63,6 @@ describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 			"{% query q %}#x{% endquery %}{% for item in query.q %}{% render 'row', val: item %}{% endfor %}";
 		const partialRes = await renderRhizomeTemplate(partialSource, {
 			runQueries: async () => ({ q: items }),
-			explainQuery: noopExplain,
 			readTemplateFile: async (p) => files.get(p) ?? null,
 		});
 		expect(partialRes.ok).toBe(false);
@@ -78,7 +74,6 @@ describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 			"{% layout 'frame' %}{% query q %}#x{% endquery %}{% for item in query.q %}{{ item }}{% endfor %}";
 		const layoutRes = await renderRhizomeTemplate(layoutSource, {
 			runQueries: async () => ({ q: items }),
-			explainQuery: noopExplain,
 			readTemplateFile: async (p) => files.get(p) ?? null,
 		});
 		expect(layoutRes.ok).toBe(false);
@@ -90,7 +85,6 @@ describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 		const items25Mb = new Array(26).fill(chunk);
 		const layoutTrueSizeRes = await renderRhizomeTemplate(layoutSource, {
 			runQueries: async () => ({ q: items25Mb }),
-			explainQuery: noopExplain,
 			readTemplateFile: async (p) => files.get(p) ?? null,
 		});
 		expect(layoutTrueSizeRes.ok).toBe(true);
@@ -100,7 +94,6 @@ describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 			'{% query q %}#x{% endquery %}{% capture buf %}{% for item in query.q %}{{ item }}{% endfor %}{% endcapture %}{{ buf }}';
 		const captureTrueSizeRes = await renderRhizomeTemplate(capturePrintSource, {
 			runQueries: async () => ({ q: items25Mb }),
-			explainQuery: noopExplain,
 		});
 		expect(captureTrueSizeRes.ok).toBe(true);
 		expect(captureTrueSizeRes.markdown.length).toBe(2_600_000);
@@ -117,7 +110,6 @@ describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 			'{% query q %}#x{% endquery %}{{ query.q }}',
 			{
 				runQueries: async () => ({ q: trackedArray }),
-				explainQuery: noopExplain,
 			},
 		);
 		expect(directArrayRes.ok).toBe(false);
@@ -138,7 +130,7 @@ describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 			const source = `{% query q %}#x{% endquery %}${expr}`;
 			const parsed = parseRhizomeTemplatePass1(source);
 
-			const res = await renderParsedRhizomeTemplate(source, parsed, { q: rows }, noopExplain);
+			const res = await renderParsedRhizomeTemplate(source, parsed, { q: rows });
 
 			expect(res.ok).toBe(false);
 			expect(res.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
@@ -157,12 +149,9 @@ describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 		const source =
 			'{% query q %}#x{% endquery %}{% for item in query.q %}{{ item }}{% endfor %}';
 		const parsed = parseRhizomeTemplatePass1(source);
-		const res = await renderParsedRhizomeTemplate(
-			source,
-			parsed,
-			{ q: ['a', 'b', 'c', 'd', 'e'] },
-			noopExplain,
-		);
+		const res = await renderParsedRhizomeTemplate(source, parsed, {
+			q: ['a', 'b', 'c', 'd', 'e'],
+		});
 
 		expect(res.ok).toBe(false);
 		expect(res.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
@@ -204,7 +193,7 @@ describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 				return fakeNow;
 			});
 
-			const res = await renderParsedRhizomeTemplate(source, parsed, { q: rows }, noopExplain);
+			const res = await renderParsedRhizomeTemplate(source, parsed, { q: rows });
 
 			expect(res.ok).toBe(false);
 			expect(res.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
@@ -246,5 +235,72 @@ describe('LiquidJS Pass 2 Render Safeguards (5,000 ms & 3.25 MiB)', () => {
 					: null,
 		);
 		expect(parsedTemplateHasLoopTag(partialSource, parsedWithPartial)).toBe(true);
+	});
+
+	it('enforces the 3.25 MiB cap across staged frontmatter + Markdown and records AST telemetry & failing partial call stacks', async () => {
+		const bigText = 'm'.repeat(2_000_000);
+		const fmOverflowSource =
+			'{% query q %}#x{% endquery %}{% assign big = query.q[0] %}{% frontmatter "big as body_copy" %}{{ big }}';
+		const fmOverflowRes = await renderRhizomeTemplate(fmOverflowSource, {
+			runQueries: async () => ({ q: [bigText] }),
+			runtimeContext: { trigger: 'newNote', timeZone: 'UTC' },
+		});
+		expect(fmOverflowRes.ok).toBe(false);
+		expect(fmOverflowRes.diagnostics[0]?.code).toBe('TEMPLATE_RENDER_ERROR');
+		expect(fmOverflowRes.diagnostics[0]?.issue).toContain('3.25 MiB');
+
+		// Telemetry collector captures loop deltas, ignores unrendered {% capture %}, and records 2nd {% render %} failure
+		const files = new Map<string, string>([
+			[
+				'◊Rhizome/partials/row.md',
+				'{% if fail %}{{ today..yesterday }}{% else %}{{ val }}{% endif %}',
+			],
+		]);
+		const telemetrySource = [
+			'{% query q %}#x{% endquery %}',
+			'{% capture hidden %}{{ "ignored" }}{% endcapture %}',
+			'{% for x in query.q %}{{ x }}{% endfor %}',
+			"{% render 'row', val: 'ok', fail: false %}",
+			"{% render 'row', val: 'ok2', fail: false %}",
+		].join('\n');
+		const parsed = await parseRhizomeTemplatePass1Async(
+			telemetrySource,
+			undefined,
+			async (p) => files.get(p) ?? null,
+		);
+		const collector = new RenderTelemetryCollector();
+		const okRes = await renderParsedRhizomeTemplate(
+			telemetrySource,
+			parsed,
+			{ q: ['hello', 'world'] },
+			undefined,
+			undefined,
+			{ telemetry: collector },
+		);
+		expect(okRes.ok).toBe(true);
+		expect(collector.rootNodeChars.size).toBeGreaterThan(0);
+
+		const fail2Source = [
+			'{% query q %}#x{% endquery %}',
+			"{% render 'row', val: 'ok', fail: false %}",
+			"{% render 'row', val: 'boom', fail: true %}",
+		].join('\n');
+		const parsed2 = await parseRhizomeTemplatePass1Async(
+			fail2Source,
+			undefined,
+			async (p) => files.get(p) ?? null,
+		);
+		const collector2 = new RenderTelemetryCollector();
+		const errRes = await renderParsedRhizomeTemplate(
+			fail2Source,
+			parsed2,
+			{ q: ['hello'] },
+			undefined,
+			undefined,
+			{ telemetry: collector2 },
+		);
+		expect(errRes.ok).toBe(false);
+		expect(collector2.failedRenderCallStack).not.toBeNull();
+		expect(collector2.failedRenderCallStack).toHaveLength(1);
 	});
 });

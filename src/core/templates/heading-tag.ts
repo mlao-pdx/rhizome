@@ -87,7 +87,7 @@ export function parseHeadingTagArgs(
 export function registerHeadingTag(liquid: Liquid, getBinding: () => QueryTagBinding): void {
 	class HeadingBlockTag extends Tag {
 		public readonly templates: Template[] = [];
-		private readonly levelSpec: HeadingLevelSpec | null;
+		public readonly levelSpec: HeadingLevelSpec | null;
 
 		public constructor(
 			tagToken: TagToken,

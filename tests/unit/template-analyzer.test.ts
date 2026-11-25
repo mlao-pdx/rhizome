@@ -29,7 +29,7 @@ describe('analyzeRhizomeCodeBlock & findRhizomeCodeBlocks', () => {
 	it('classifies outer Liquid tokens and inner query DSL tokens with exact offsets', () => {
 		const code = [
 			'{% # Outer inline comment %}',
-			'{%- query tasks explain -%}',
+			'{%- query tasks cutoff: 500 -%}',
 			'  {% # Inner query comment %}',
 			'  tag:work AND (#urgent OR [score: >= 10]) [due: @today] file:/^sprint/i aliases:"quoted" links:[[Target]] [score: != 5]',
 			'{%- endquery -%}',
@@ -275,7 +275,7 @@ describe('analyzeRhizomeCodeBlock & findRhizomeCodeBlocks', () => {
 	it('highlights cutoff as liquid-keyword and <int> as liquid-number for spaced and compact forms, preserves dotted cutoff variables, and recovers cutoff metadata on outer syntax errors', () => {
 		const source = [
 			'{% query a cutoff: 500 %}#a{% endquery %}',
-			'{% query b explain cutoff:0 %}#b{% endquery %}',
+			'{% query b cutoff:0 %}#b{% endquery %}',
 			'{{ item.properties.cutoff }}',
 		].join('\n');
 
@@ -303,10 +303,18 @@ describe('analyzeRhizomeCodeBlock & findRhizomeCodeBlocks', () => {
 		});
 		expect(analysis.queries[1]).toMatchObject({
 			name: 'b',
-			explain: true,
 			cutoff: 0,
 			explicitCutoff: true,
 		});
+
+		// Legacy `{% query ... explain %}` emits INVALID_QUERY_TAG_ARGS with rhizome-sample hint
+		const legacyExplain = analyzeRhizomeCodeBlock(
+			'{% query tasks explain %}#work{% endquery %}',
+			config,
+			PINNED_REF_MS,
+		);
+		expect(legacyExplain.diagnostics[0]?.code).toBe('INVALID_QUERY_TAG_ARGS');
+		expect(legacyExplain.diagnostics[0]?.hint).toContain('rhizome-sample');
 
 		// Fallback recovery when outer Liquid fails tokenization ({{ unclosed)
 		const brokenOuter = [

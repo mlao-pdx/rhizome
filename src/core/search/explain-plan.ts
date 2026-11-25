@@ -1,15 +1,6 @@
 import { Temporal } from '@js-temporal/polyfill';
 import { initEngineConfig } from './config';
-import {
-	FootnoteRegistry,
-	refDiagnosticFootnote,
-	refIntervalFootnote,
-	refPropertyFootnote,
-	refRegexFootnote,
-	refScopeFootnote,
-	refTimezoneFootnote,
-	renderIntervalComparisonDiagram,
-} from './explain-concepts';
+import { type ExplainConceptKey, formatPropertyTypeInlineBadge } from './explain-concepts';
 import {
 	buildRegex101Url,
 	describeHopBounds,
@@ -21,20 +12,20 @@ import {
 	formatInlineCode,
 	formatLeafMatcher,
 	formatScopeStringMatch,
-	formatSourceCaretSnippet,
 	resolvePropertyTypeWithOrigin,
 } from './explain-helpers';
 import { isGraphScopeCanonicalName } from './graph-dag';
-import { lintQueryAST } from './linter';
 import { coerceHostScalarForProperty, resolveThisReference } from './host-reference';
+import { lintQueryAST } from './linter';
 import { validateRegexLiteral } from './literals';
 import { parseAndLowerQuery } from './parser';
 import { FORBIDDEN_KEYS, STRICT_NUMBER_RE } from './property-coercion';
 import { isValidReferenceTimeMs, parseTemporalExpr } from './temporal';
 import {
+	type EngineConfig,
 	getSystemScopeForPropertyKey,
 	isValidPropertyType,
-	type EngineConfig,
+	isVirtualFileKey,
 	type LeafMatcher,
 	type NormalizedDocument,
 	type ObsidianPropertyType,
@@ -48,6 +39,41 @@ import {
 	type ValueExprAST,
 } from './types';
 import { suggestScopeHint, validateQueryAST } from './validator';
+
+/**
+ * Options passed to `analyzeQueryExplain`.
+ */
+export interface AnalyzeQueryExplainOptions {
+	readonly knownQueryNames?: ReadonlySet<string> | undefined;
+	readonly extraDiagnostics?: readonly SearchDiagnostic[] | undefined;
+	readonly hostDoc?: NormalizedDocument | null | undefined;
+}
+
+/**
+ * Structured, footnote-free query explain analysis consumed by `rhizome-sample` callout builders.
+ */
+export interface QueryExplainAnalysis {
+	readonly input: string;
+	readonly executable: boolean;
+	readonly ast: SearchAST | null;
+	readonly effectiveTimeZone: string;
+	readonly displayTimeZone: string;
+	readonly timeZoneValid: boolean;
+	readonly referenceTimeMs: number;
+	readonly validReferenceTime: boolean;
+	readonly nowLocalIso: string | null;
+	readonly todayLocalWindow: string;
+	readonly astBullets: readonly string[];
+	readonly diagnostics: readonly SearchDiagnostic[];
+	readonly errorCount: number;
+	readonly warningCount: number;
+	readonly hintCount: number;
+	readonly queriedKeys: ReadonlySet<string>;
+	readonly pathFilterLiterals: readonly string[];
+	readonly queryDependencies: readonly string[];
+	readonly usesHostReference: boolean;
+	readonly concepts: ReadonlySet<ExplainConceptKey>;
+}
 
 function isResolvedEngineConfig(
 	cfg: ResolvedEngineConfig | EngineConfig,
@@ -88,14 +114,10 @@ function formatLocalIsoWithOffset(epochMs: number, timeZone: string): string {
 	}
 }
 
-function formatDirectRegexLink(
-	matcher: Extract<LeafMatcher, { kind: 'regex' }>,
-	footnotes: FootnoteRegistry,
-): string {
+function formatDirectRegexLink(matcher: Extract<LeafMatcher, { kind: 'regex' }>): string {
 	const literal = formatLeafMatcher(matcher);
 	const url = buildRegex101Url(matcher.pattern, matcher.flags);
-	const fn = refRegexFootnote(footnotes);
-	return `[${formatInlineCode(literal)}](${url})${fn}`;
+	return `[${formatInlineCode(literal)}](${url})`;
 }
 
 function capitalizeFirst(text: string): string {
@@ -105,6 +127,11 @@ function capitalizeFirst(text: string): string {
 
 function spanKey(span: SourceSpan): string {
 	return `${span.startOffset}:${span.endOffset}`;
+}
+
+function formatInlineDiagBadge(diag: SearchDiagnostic): string {
+	const icon = diag.severity === 'error' ? '❌' : diag.severity === 'warning' ? '⚠️' : 'ℹ️';
+	return `${icon} \`${diag.code}\``;
 }
 
 function describeScopeThisLeaf(
@@ -132,17 +159,14 @@ function describePropertyLeaf(
 	propType: ObsidianPropertyType,
 	operator: PropertyOperator,
 	timeZone: string,
-	configuredTimeZone: string,
-	tzValid: boolean,
 	referenceTimeMs: number,
 	validRefTime: boolean,
-	todayLocalWindow: string | undefined,
-	footnotes: FootnoteRegistry,
+	concepts: Set<ExplainConceptKey>,
 	hostDoc?: NormalizedDocument | null,
 ): string {
 	if (matcher.kind === 'regex') {
 		const valid = validateRegexLiteral(matcher.pattern, matcher.flags) !== null;
-		const link = formatDirectRegexLink(matcher, footnotes);
+		const link = formatDirectRegexLink(matcher);
 		if (operator !== ':' || propType === 'checkbox') {
 			return `❌ ${link} (regular expressions cannot be used with this operator on \`${propType}\` properties)`;
 		}
@@ -182,12 +206,9 @@ function describePropertyLeaf(
 					propType,
 					operator,
 					timeZone,
-					configuredTimeZone,
-					tzValid,
 					referenceTimeMs,
 					true,
-					todayLocalWindow,
-					footnotes,
+					concepts,
 				),
 			);
 		}
@@ -201,6 +222,7 @@ function describePropertyLeaf(
 	}
 
 	if (matcher.kind === 'query') {
+		concepts.add('cross-query-waves');
 		const rawCode = formatInlineCode(matcher.raw);
 		if (
 			propType === 'checkbox' &&
@@ -254,6 +276,7 @@ function describePropertyLeaf(
 		}
 		case 'date':
 		case 'datetime': {
+			concepts.add('temporal-intervals');
 			const res = parseTemporalExpr(matcher.value, {
 				allowYearOnly: true,
 				allowRelative: true,
@@ -267,8 +290,6 @@ function describePropertyLeaf(
 			const startIso = formatLocalIsoWithOffset(res.interval.start, timeZone);
 			const endIso = formatLocalIsoWithOffset(res.interval.end, timeZone);
 			const intervalCode = formatInlineCode(`[${startIso}, ${endIso})`);
-			const intervalFn = refIntervalFootnote(footnotes, todayLocalWindow);
-			const tzFn = refTimezoneFootnote(footnotes, timeZone, configuredTimeZone, tzValid);
 			const fallbackNote =
 				!validRefTime && /(?:^|\.\.)\s*@/.test(matcher.value.trim())
 					? ' *(resolved against fallback epoch `0` because `referenceTimeMs` is invalid)*'
@@ -276,11 +297,11 @@ function describePropertyLeaf(
 			switch (operator) {
 				case ':':
 				case '=':
-					return `falls within ${intervalCode}${intervalFn} (in ${formatInlineCode(timeZone)}${tzFn})${fallbackNote}`;
+					return `falls within ${intervalCode} (in ${formatInlineCode(timeZone)})${fallbackNote}`;
 				case '!=':
-					return `is outside ${intervalCode}${intervalFn} (in ${formatInlineCode(timeZone)}${tzFn})${fallbackNote}`;
+					return `is outside ${intervalCode} (in ${formatInlineCode(timeZone)})${fallbackNote}`;
 				default:
-					return `${win.plainEnglish} (expanded window ${intervalCode}${intervalFn}${tzFn})${fallbackNote}`;
+					return `${win.plainEnglish} (expanded window ${intervalCode})${fallbackNote}`;
 			}
 		}
 		case 'text':
@@ -307,41 +328,18 @@ function describePropertyLeaf(
 	}
 }
 
-const EXPLAIN_NUMBER_FORMAT = new Intl.NumberFormat('en-US');
-
 /**
- * Post-query Pass 2 record cutoff metadata displayed in the `# Query Explain Plan` header
- * when `explainQuery` is invoked from a `{% query %}` template block.
+ * Analyzes `input` into a pure, footnote-free `QueryExplainAnalysis` with progressive-shrinking
+ * AST bullets, compile/DAG/lint diagnostics, queried property keys, path literals, and triggered
+ * `ExplainConceptKey` topics without scanning vault notes.
  */
-export interface QueryExplainCutoff {
-	readonly value: number;
-	readonly explicit: boolean;
-}
-
-function formatExplainCutoffLine(cutoff: QueryExplainCutoff): string {
-	if (cutoff.value <= 0) {
-		return '- **Cutoff**: Unlimited (`cutoff: 0`)';
-	}
-	const formatted = EXPLAIN_NUMBER_FORMAT.format(cutoff.value);
-	const noun = cutoff.value === 1 ? 'record' : 'records';
-	if (!cutoff.explicit) {
-		return `- **Cutoff**: \`${formatted}\` ${noun} (default)`;
-	}
-	return `- **Cutoff**: \`${formatted}\` ${noun}`;
-}
-
-/**
- * Generates a progressive-shrinking Markdown explanation plan with inline footnotes and a
- * `## Concept Reference` section for a search query without scanning vault notes.
- */
-export function explainQuery(
+export function analyzeQueryExplain(
 	input: string,
 	configOrResolved: ResolvedEngineConfig | EngineConfig,
 	referenceTimeMs: number,
-	heading = 'Query Explain Plan',
-	hostDoc?: NormalizedDocument | null,
-	cutoff?: QueryExplainCutoff,
-): string {
+	options?: AnalyzeQueryExplainOptions,
+): QueryExplainAnalysis {
+	const hostDoc = options?.hostDoc;
 	const configDiagnostics: SearchDiagnostic[] = [];
 	let resolvedConfig: ResolvedEngineConfig | null = null;
 	let displayTimeZone: string;
@@ -393,16 +391,52 @@ export function explainQuery(
 			effectiveRefTimeMs,
 			parsed.invalidPropertyNodes,
 			hostDoc,
+			options?.knownQueryNames,
 		);
 		resolvedAst = valRes.ast;
 		valDiagnostics = valRes.diagnostics;
 		lintDiagnostics = lintQueryAST(resolvedAst, valRes.invalidPropertyNodes, effectiveConfig);
 		return valRes.invalidPropertyNodes;
 	})();
+
+	const concepts = new Set<ExplainConceptKey>();
+	const queriedKeys = new Set<string>();
+	const pathFilterLiterals: string[] = [];
+	const queryDepsSet = new Set<string>();
+	let usesHostReference = false;
 	const unknownScopeNodes = new Set<SearchAST>();
 	const invalidRegexNodes = new Set<SearchAST>();
 
-	function collectAstFlags(node: SearchAST): void {
+	const visitValueFlags = (
+		expr: ValueExprAST,
+		ownerNode: SearchAST,
+		collectStringsInto?: string[],
+	): void => {
+		if (expr.type === 'VALUE_LEAF') {
+			if (
+				expr.matcher.kind === 'regex' &&
+				validateRegexLiteral(expr.matcher.pattern, expr.matcher.flags) === null
+			) {
+				invalidRegexNodes.add(ownerNode);
+			}
+			if (expr.matcher.kind === 'this') {
+				usesHostReference = true;
+			} else if (expr.matcher.kind === 'query') {
+				concepts.add('cross-query-waves');
+				queryDepsSet.add(expr.matcher.queryName);
+			} else if (expr.matcher.kind === 'string' && collectStringsInto) {
+				collectStringsInto.push(expr.matcher.value);
+			}
+		} else if (expr.type === 'VALUE_NOT') {
+			visitValueFlags(expr.child, ownerNode, collectStringsInto);
+		} else {
+			for (const c of expr.children) {
+				visitValueFlags(c, ownerNode, collectStringsInto);
+			}
+		}
+	};
+
+	const collectAstFlags = (node: SearchAST): void => {
 		switch (node.type) {
 			case 'MATCH_ALL':
 				return;
@@ -416,79 +450,97 @@ export function explainQuery(
 				if (node.rawScope !== '#' && !effectiveConfig.getScope(node.rawScope)) {
 					unknownScopeNodes.add(node);
 				}
-				const visitExpr = (expr: ValueExprAST): void => {
-					if (expr.type === 'VALUE_LEAF') {
-						if (
-							expr.matcher.kind === 'regex' &&
-							validateRegexLiteral(expr.matcher.pattern, expr.matcher.flags) === null
-						) {
-							invalidRegexNodes.add(node);
-						}
-					} else if (expr.type === 'VALUE_NOT') {
-						visitExpr(expr.child);
-					} else {
-						for (const c of expr.children) visitExpr(c);
-					}
-				};
-				visitExpr(node.expr);
+				visitValueFlags(
+					node.expr,
+					node,
+					node.scope === 'path' ? pathFilterLiterals : undefined,
+				);
 				return;
 			}
 			case 'PROPERTY_FILTER': {
-				if (!node.valueExpr) return;
-				const visitExpr = (expr: ValueExprAST): void => {
-					if (expr.type === 'VALUE_LEAF') {
-						if (
-							expr.matcher.kind === 'regex' &&
-							validateRegexLiteral(expr.matcher.pattern, expr.matcher.flags) === null
-						) {
-							invalidRegexNodes.add(node);
-						}
-					} else if (expr.type === 'VALUE_NOT') {
-						visitExpr(expr.child);
-					} else {
-						for (const c of expr.children) visitExpr(c);
+				const sysScope = getSystemScopeForPropertyKey(node.key);
+				if (sysScope === undefined) {
+					const tInfo = resolvePropertyTypeWithOrigin(
+						node.key,
+						effectiveConfig.propertyTypes,
+					);
+					if (tInfo.type === 'date' || tInfo.type === 'datetime') {
+						concepts.add('temporal-intervals');
 					}
-				};
-				visitExpr(node.valueExpr);
+					if (!isVirtualFileKey(node.key) && node.key.length > 0) {
+						queriedKeys.add(node.key);
+						concepts.add('property-coercion');
+					}
+				}
+				if (node.valueExpr) {
+					const isPathProp = node.key === 'file.path' || node.key === 'file.parent';
+					visitValueFlags(
+						node.valueExpr,
+						node,
+						isPathProp ? pathFilterLiterals : undefined,
+					);
+				}
 				return;
 			}
 			case 'SCOPE_GRAPH_FILTER': {
+				concepts.add('graph-traversal');
 				if (!effectiveConfig.getScope(node.rawScope)) {
 					unknownScopeNodes.add(node);
 				}
 				if (node.target.kind === 'subquery') {
 					collectAstFlags(node.target.ast);
+				} else if (node.target.kind === 'query_ref') {
+					concepts.add('cross-query-waves');
+					queryDepsSet.add(node.target.queryName);
+				} else {
+					usesHostReference = true;
 				}
 				return;
 			}
 			case 'PROPERTY_GRAPH_FILTER': {
+				concepts.add('graph-traversal');
 				if (node.target.kind === 'subquery') {
 					collectAstFlags(node.target.ast);
+				} else if (node.target.kind === 'query_ref') {
+					concepts.add('cross-query-waves');
+					queryDepsSet.add(node.target.queryName);
+				} else {
+					usesHostReference = true;
 				}
 				return;
 			}
 		}
-	}
+	};
 
 	if (resolvedAst !== null) {
 		collectAstFlags(resolvedAst);
 	}
 
-	const allDiagnostics: SearchDiagnostic[] = [
+	const rawAllDiags: SearchDiagnostic[] = [
 		...configDiagnostics,
 		...refTimeDiagnostics,
 		...parsed.diagnostics,
 		...valDiagnostics,
+		...(options?.extraDiagnostics ?? []),
 		...lintDiagnostics,
 	];
-	const errorCount = allDiagnostics.filter((d) => d.severity === 'error').length;
-	const warningCount = allDiagnostics.filter((d) => d.severity === 'warning').length;
-	const hintCount = allDiagnostics.filter((d) => d.severity === 'hint').length;
+	const dedupedDiagnostics: SearchDiagnostic[] = [];
+	const seenDiagKeys = new Set<string>();
+	for (const d of rawAllDiags) {
+		const k = `${d.code}:${d.span?.startOffset ?? -1}:${d.span?.endOffset ?? -1}:${d.issue}`;
+		if (!seenDiagKeys.has(k)) {
+			seenDiagKeys.add(k);
+			dedupedDiagnostics.push(d);
+		}
+	}
+
+	const errorCount = dedupedDiagnostics.filter((d) => d.severity === 'error').length;
+	const warningCount = dedupedDiagnostics.filter((d) => d.severity === 'warning').length;
+	const hintCount = dedupedDiagnostics.filter((d) => d.severity === 'hint').length;
 	const executable = resolvedAst !== null && errorCount === 0;
 
-	const footnotes = new FootnoteRegistry();
 	const diagIndicesBySpan = new Map<string, number[]>();
-	allDiagnostics.forEach((diag, i) => {
+	dedupedDiagnostics.forEach((diag, i) => {
 		if (diag.span) {
 			const key = spanKey(diag.span);
 			const list = diagIndicesBySpan.get(key) ?? [];
@@ -498,25 +550,24 @@ export function explainQuery(
 	});
 	const attachedDiagNumbers = new Set<number>();
 
-	function consumeDiagLinksForSpan(span: SourceSpan | undefined): string {
+	const consumeDiagBadgesForSpan = (span: SourceSpan | undefined): string => {
 		if (!span) return '';
 		const nums = diagIndicesBySpan.get(spanKey(span));
 		if (!nums || nums.length === 0) return '';
-		const refs: string[] = [];
+		const badges: string[] = [];
 		for (const num of nums) {
 			if (!attachedDiagNumbers.has(num)) {
 				attachedDiagNumbers.add(num);
-				const diag = allDiagnostics[num - 1]!;
-				refs.push(refDiagnosticFootnote(footnotes, num, diag));
+				badges.push(formatInlineDiagBadge(dedupedDiagnostics[num - 1]!));
 			}
 		}
-		return refs.length > 0 ? ` · ${refs.join(' ')}` : '';
-	}
+		return badges.length > 0 ? ` · ${badges.join(' ')}` : '';
+	};
 
-	function consumeUnattachedContainedDiags(span: SourceSpan | undefined): string {
+	const consumeUnattachedContainedDiags = (span: SourceSpan | undefined): string => {
 		if (!span) return '';
-		const refs: string[] = [];
-		allDiagnostics.forEach((diag, idx) => {
+		const badges: string[] = [];
+		dedupedDiagnostics.forEach((diag, idx) => {
 			const num = idx + 1;
 			if (attachedDiagNumbers.has(num) || !diag.span) return;
 			if (
@@ -524,13 +575,12 @@ export function explainQuery(
 				diag.span.endOffset <= span.endOffset
 			) {
 				attachedDiagNumbers.add(num);
-				refs.push(refDiagnosticFootnote(footnotes, num, diag));
+				badges.push(formatInlineDiagBadge(diag));
 			}
 		});
-		return refs.length > 0 ? ` · ${refs.join(' ')}` : '';
-	}
+		return badges.length > 0 ? ` · ${badges.join(' ')}` : '';
+	};
 
-	// Compute @today window in effectiveConfig.timeZone at effectiveRefTimeMs
 	const todayParsed = parseTemporalExpr('@today', {
 		allowYearOnly: true,
 		allowRelative: true,
@@ -540,64 +590,12 @@ export function explainQuery(
 	const todayLocalWindow = todayParsed.ok
 		? `[${formatLocalIsoWithOffset(todayParsed.interval.start, effectiveConfig.timeZone)}, ${formatLocalIsoWithOffset(todayParsed.interval.end, effectiveConfig.timeZone)})`
 		: '[1970-01-01T00:00:00Z, 1970-01-02T00:00:00Z)';
+	const nowLocalIso = validRefTime
+		? formatLocalIsoWithOffset(referenceTimeMs, effectiveConfig.timeZone)
+		: null;
 
-	const normalizedHeading =
-		heading
-			.replace(/[\r\n]+/g, ' ')
-			.trim()
-			.replace(/^#+\s*/, '') || 'Query Explain Plan';
-	const lines: string[] = [`# ${normalizedHeading}`, ''];
-
-	// =========================================================================
-	// Header Context
-	// =========================================================================
-	const queryDisplay = input.trim().length === 0 ? '_(empty query)_' : formatInlineCode(input);
-	const statusBadge = executable ? '*Executable*' : '*Not Executable*';
-	lines.push(`- **Query**: ${queryDisplay}`);
-	lines.push(
-		`- **Status**: ${statusBadge} with ${errorCount} error${errorCount === 1 ? '' : 's'}, ${warningCount} warning${warningCount === 1 ? '' : 's'}, ${hintCount} hint${hintCount === 1 ? '' : 's'}.`,
-	);
-	if (cutoff !== undefined) {
-		lines.push(formatExplainCutoffLine(cutoff));
-	}
-	lines.push('- **Context**:');
-	if (validRefTime) {
-		const nowLocalIso = formatLocalIsoWithOffset(referenceTimeMs, effectiveConfig.timeZone);
-		lines.push(`  - \`@now\`: \`${nowLocalIso}\` (\`${referenceTimeMs}\` ms UTC)`);
-	} else {
-		lines.push(
-			`  - \`@now\`: ❌ Invalid \`referenceTimeMs\` (${formatInlineCode(String(referenceTimeMs))}; fell back to epoch \`0\` for best-effort analysis)`,
-		);
-	}
-	const todayIntervalFn = refIntervalFootnote(footnotes, todayLocalWindow);
-	lines.push(`  - \`@today\`: \`${todayLocalWindow}\`${todayIntervalFn}`);
-	const headerTzFn = refTimezoneFootnote(
-		footnotes,
-		effectiveConfig.timeZone,
-		displayTimeZone,
-		tzValid,
-	);
-	if (tzValid) {
-		lines.push(`  - **Timezone**: ${formatInlineCode(effectiveConfig.timeZone)}${headerTzFn}`);
-	} else {
-		lines.push(
-			`  - **Timezone**: ❌ Invalid timezone ${formatInlineCode(displayTimeZone)} (fell back to \`UTC\`${headerTzFn})`,
-		);
-	}
-	lines.push('');
-
-	// =========================================================================
-	// SECTION 1: Logic Breakdown
-	// =========================================================================
-	lines.push('## Logic Breakdown', '');
-	if (resolvedAst === null) {
-		lines.push(
-			'This query could not be parsed into an execution tree because of a syntax or query-length error. See *Diagnostics* below for the exact location and fix.',
-			'',
-		);
-	} else {
-		const bulletLines: string[] = [];
-
+	const bulletLines: string[] = [];
+	if (resolvedAst !== null) {
 		const renderValueExprBullets = (
 			expr: ValueExprAST,
 			indent: string,
@@ -608,13 +606,13 @@ export function explainQuery(
 			switch (expr.type) {
 				case 'VALUE_LEAF': {
 					const desc = capitalizeFirst(leafFormatter(expr.matcher));
-					const exactDiagSuffix = consumeDiagLinksForSpan(expr.span);
+					const exactDiagSuffix = consumeDiagBadgesForSpan(expr.span);
 					bulletLines.push(`${indent}- ${sliceCode}`);
 					bulletLines.push(`${indent}  ${desc}.${exactDiagSuffix}`);
 					return;
 				}
 				case 'VALUE_NOT': {
-					const exactDiagSuffix = consumeDiagLinksForSpan(expr.span);
+					const exactDiagSuffix = consumeDiagBadgesForSpan(expr.span);
 					bulletLines.push(`${indent}- ${sliceCode}`);
 					bulletLines.push(
 						`${indent}  Does *not* match (\`!\` / \`NOT\`):${exactDiagSuffix}`,
@@ -629,7 +627,7 @@ export function explainQuery(
 							: expr.implicit
 								? `*All* of the following on that same ${targetNoun} (implicit \`AND\`):`
 								: `*All* of the following on that same ${targetNoun} (\`AND\`):`;
-					const exactDiagSuffix = consumeDiagLinksForSpan(expr.span);
+					const exactDiagSuffix = consumeDiagBadgesForSpan(expr.span);
 					const headerIdx = bulletLines.length;
 					bulletLines.push(`${indent}- ${sliceCode}`);
 					bulletLines.push(`${indent}  ${combLabel}${exactDiagSuffix}`);
@@ -658,7 +656,6 @@ export function explainQuery(
 			}
 
 			const sliceCode = formatInlineCode(extractAstSlice(input, node));
-
 			switch (node.type) {
 				case 'LOGICAL': {
 					const combLabel =
@@ -667,54 +664,47 @@ export function explainQuery(
 							: node.implicit
 								? 'Matches notes where *all* of the following hold (implicit `AND`):'
 								: 'Matches notes where *all* of the following hold (`AND`):';
-					const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+					const exactDiagSuffix = consumeDiagBadgesForSpan(node.span);
 					const headerIdx = bulletLines.length;
 					bulletLines.push(`${indent}- ${sliceCode}`);
 					bulletLines.push(`${indent}  ${combLabel}${exactDiagSuffix}`);
 					for (const child of node.children) {
 						renderAstBullets(child, `${indent}  `);
 					}
-					const remainingDiagSuffix = consumeUnattachedContainedDiags(node.span);
-					if (remainingDiagSuffix) {
-						bulletLines[headerIdx + 1] =
-							`${bulletLines[headerIdx + 1]}${remainingDiagSuffix}`;
-					}
+					const rem = consumeUnattachedContainedDiags(node.span);
+					if (rem) bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${rem}`;
 					return;
 				}
 				case 'NOT': {
-					const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+					const exactDiagSuffix = consumeDiagBadgesForSpan(node.span);
 					const headerIdx = bulletLines.length;
 					bulletLines.push(`${indent}- ${sliceCode}`);
 					bulletLines.push(
 						`${indent}  Excludes notes matching (\`!\` / \`NOT\`):${exactDiagSuffix}`,
 					);
 					renderAstBullets(node.child, `${indent}  `);
-					const remainingDiagSuffix = consumeUnattachedContainedDiags(node.span);
-					if (remainingDiagSuffix) {
-						bulletLines[headerIdx + 1] =
-							`${bulletLines[headerIdx + 1]}${remainingDiagSuffix}`;
-					}
+					const rem = consumeUnattachedContainedDiags(node.span);
+					if (rem) bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${rem}`;
 					return;
 				}
 				case 'SCOPED_FILTER': {
 					if (unknownScopeNodes.has(node)) {
 						const suggestion = suggestScopeHint(node.rawScope, effectiveConfig);
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
+						const exact = consumeDiagBadgesForSpan(node.span);
+						const rem = consumeUnattachedContainedDiags(node.span);
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ❌ Unknown search scope ${formatInlineCode(`${node.rawScope}:`)}.${suggestion ? ` ${suggestion}` : ''}${exactDiagSuffix}${remDiag}`,
+							`${indent}  ❌ Unknown search scope ${formatInlineCode(`${node.rawScope}:`)}.${suggestion ? ` ${suggestion}` : ''}${exact}${rem}`,
 						);
 						return;
 					}
 					const sem = describeScopeSemantics(node.scope);
-					const scopeFn = refScopeFootnote(footnotes, node.scope);
 					const aliasParen =
 						node.rawScope !== '#' &&
 						node.rawScope.trim().toLowerCase() !== node.scope.toLowerCase()
 							? ` (alias for ${formatInlineCode(`${node.scope}:`)})`
 							: '';
-					const scopeTargetLabel = `${formatInlineCode(node.scope)}${scopeFn}${aliasParen}`;
+					const scopeTargetLabel = `${formatInlineCode(node.scope)}${aliasParen}`;
 					const scopeOp = node.operator ?? ':';
 					const formatScopeValue = (val: string): string =>
 						formatScopeStringMatch(node.scope, scopeOp, val);
@@ -727,93 +717,87 @@ export function explainQuery(
 							m.kind === 'regex'
 								? invalidRegexComparison
 									? ''
-									: `matches ${formatDirectRegexLink(m, footnotes)}`
+									: `matches ${formatDirectRegexLink(m)}`
 								: m.kind === 'this'
 									? describeScopeThisLeaf(m, formatScopeValue, hostDoc)
 									: m.kind === 'query'
 										? `matches scalar values projected from ${formatInlineCode(m.raw)} (sibling query ${formatInlineCode(`@query.${m.queryName}`)})`
 										: formatScopeValue(m.value);
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
-						const leafDiag = consumeDiagLinksForSpan(node.expr.span);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
+						const exact = consumeDiagBadgesForSpan(node.span);
+						const leafDiag = consumeDiagBadgesForSpan(node.expr.span);
+						const rem = consumeUnattachedContainedDiags(node.span);
 						const description = invalidRegexComparison
 							? `Operator ${formatInlineCode(scopeOp)} cannot be used with a regular expression`
 							: `At least one ${scopeTargetLabel} ${leafDesc}`;
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ${invalidPrefix}${description}.${exactDiagSuffix}${leafDiag}${remDiag}`,
+							`${indent}  ${invalidPrefix}${description}.${exact}${leafDiag}${rem}`,
 						);
 					} else {
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const exact = consumeDiagBadgesForSpan(node.span);
 						const headerIdx = bulletLines.length;
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ${invalidPrefix}At least one ${scopeTargetLabel} satisfies:${exactDiagSuffix}`,
+							`${indent}  ${invalidPrefix}At least one ${scopeTargetLabel} satisfies:${exact}`,
 						);
 						renderValueExprBullets(node.expr, `${indent}  `, sem.singularTarget, (m) =>
 							m.kind === 'regex'
-								? `matches ${formatDirectRegexLink(m, footnotes)}`
+								? `matches ${formatDirectRegexLink(m)}`
 								: m.kind === 'this'
 									? describeScopeThisLeaf(m, formatScopeValue, hostDoc)
 									: m.kind === 'query'
 										? `matches scalar values projected from ${formatInlineCode(m.raw)} (sibling query ${formatInlineCode(`@query.${m.queryName}`)})`
 										: formatScopeValue(m.value),
 						);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
-						if (remDiag) {
-							bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${remDiag}`;
-						}
+						const rem = consumeUnattachedContainedDiags(node.span);
+						if (rem) bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${rem}`;
 					}
 					return;
 				}
 				case 'SCOPE_GRAPH_FILTER': {
 					if (unknownScopeNodes.has(node)) {
 						const suggestion = suggestScopeHint(node.rawScope, effectiveConfig);
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
+						const exact = consumeDiagBadgesForSpan(node.span);
+						const rem = consumeUnattachedContainedDiags(node.span);
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ❌ Unknown search scope ${formatInlineCode(node.rawScope)}.${suggestion ? ` ${suggestion}` : ''}${exactDiagSuffix}${remDiag}`,
+							`${indent}  ❌ Unknown search scope ${formatInlineCode(node.rawScope)}.${suggestion ? ` ${suggestion}` : ''}${exact}${rem}`,
 						);
 						return;
 					}
 					if (!isGraphScopeCanonicalName(node.scope)) {
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
+						const exact = consumeDiagBadgesForSpan(node.span);
+						const rem = consumeUnattachedContainedDiags(node.span);
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ❌ Scope ${formatInlineCode(node.scope)} does not support graph traversal (only \`links\`, \`embeds\`, and \`backlinks\` support graph targets).${exactDiagSuffix}${remDiag}`,
+							`${indent}  ❌ Scope ${formatInlineCode(node.scope)} does not support graph traversal (only \`links\`, \`embeds\`, and \`backlinks\` support graph targets).${exact}${rem}`,
 						);
 						return;
 					}
-					const scopeFn = refScopeFootnote(footnotes, node.scope);
 					const hopDesc = describeHopBounds(node.hops);
 					const edgeDesc =
 						node.scope === 'backlinks'
 							? node.direction === 'outgoing'
-								? `incoming \`backlinks\`${scopeFn}`
-								: `inverted \`backlinks\`${scopeFn} (outgoing links)`
+								? 'incoming `backlinks`'
+								: 'inverted `backlinks` (outgoing links)'
 							: node.direction === 'outgoing'
-								? `outgoing ${formatInlineCode(node.scope)}${scopeFn}`
-								: `incoming ${formatInlineCode(node.scope)}${scopeFn} from other notes`;
-					const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+								? `outgoing ${formatInlineCode(node.scope)}`
+								: `incoming ${formatInlineCode(node.scope)} from other notes`;
+					const exact = consumeDiagBadgesForSpan(node.span);
 
 					if (node.target.kind === 'subquery') {
 						const headerIdx = bulletLines.length;
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach a note matching:${exactDiagSuffix}`,
+							`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach a note matching:${exact}`,
 						);
 						renderAstBullets(node.target.ast, `${indent}  `);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
-						if (remDiag) {
-							bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${remDiag}`;
-						}
+						const rem = consumeUnattachedContainedDiags(node.span);
+						if (rem) bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${rem}`;
 						return;
 					}
-
-					const targetDiag = consumeDiagLinksForSpan(node.target.span);
-					const remDiag = consumeUnattachedContainedDiags(node.span);
+					const targetDiag = consumeDiagBadgesForSpan(node.target.span);
+					const rem = consumeUnattachedContainedDiags(node.span);
 					const targetDesc =
 						node.target.kind === 'query_ref'
 							? `a note matched by sibling query ${formatInlineCode(`@query.${node.target.queryName}`)}`
@@ -824,7 +808,7 @@ export function explainQuery(
 									: 'the hosting note (`@this`)';
 					bulletLines.push(`${indent}- ${sliceCode}`);
 					bulletLines.push(
-						`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach ${targetDesc}.${exactDiagSuffix}${targetDiag}${remDiag}`,
+						`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach ${targetDesc}.${exact}${targetDiag}${rem}`,
 					);
 					return;
 				}
@@ -835,24 +819,21 @@ export function explainQuery(
 						node.direction === 'outgoing'
 							? `outgoing ${keyCode} property links`
 							: `incoming ${keyCode} property links from other notes`;
-					const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+					const exact = consumeDiagBadgesForSpan(node.span);
 
 					if (node.target.kind === 'subquery') {
 						const headerIdx = bulletLines.length;
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach a note matching:${exactDiagSuffix}`,
+							`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach a note matching:${exact}`,
 						);
 						renderAstBullets(node.target.ast, `${indent}  `);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
-						if (remDiag) {
-							bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${remDiag}`;
-						}
+						const rem = consumeUnattachedContainedDiags(node.span);
+						if (rem) bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${rem}`;
 						return;
 					}
-
-					const targetDiag = consumeDiagLinksForSpan(node.target.span);
-					const remDiag = consumeUnattachedContainedDiags(node.span);
+					const targetDiag = consumeDiagBadgesForSpan(node.target.span);
+					const rem = consumeUnattachedContainedDiags(node.span);
 					const targetDesc =
 						node.target.kind === 'query_ref'
 							? `a note matched by sibling query ${formatInlineCode(`@query.${node.target.queryName}`)}`
@@ -863,7 +844,7 @@ export function explainQuery(
 									: 'the hosting note (`@this`)';
 					bulletLines.push(`${indent}- ${sliceCode}`);
 					bulletLines.push(
-						`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach ${targetDesc}.${exactDiagSuffix}${targetDiag}${remDiag}`,
+						`${indent}  Traverses ${edgeDesc} ${hopDesc} to reach ${targetDesc}.${exact}${targetDiag}${rem}`,
 					);
 					return;
 				}
@@ -871,11 +852,11 @@ export function explainQuery(
 					const keyCode = formatInlineCode(node.key);
 					const systemScope = getSystemScopeForPropertyKey(node.key);
 					if (systemScope !== undefined) {
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
+						const exact = consumeDiagBadgesForSpan(node.span);
+						const rem = consumeUnattachedContainedDiags(node.span);
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ${keyCode} is a built-in note scope, not a property (use ${formatInlineCode(`${systemScope}:`)} instead).${exactDiagSuffix}${remDiag}`,
+							`${indent}  ${keyCode} is a built-in note scope, not a property (use ${formatInlineCode(`${systemScope}:`)} instead).${exact}${rem}`,
 						);
 						return;
 					}
@@ -883,60 +864,54 @@ export function explainQuery(
 						node.key,
 						effectiveConfig.propertyTypes,
 					);
-					const propFn = refPropertyFootnote(footnotes, node.key, typeInfo);
-					const propTargetLabel = `${keyCode}${propFn}`;
+					const propTargetLabel = `${keyCode} ${formatPropertyTypeInlineBadge(typeInfo)}`;
 					const isInvalid = invalidPropertyNodes.has(node) || invalidRegexNodes.has(node);
 					const prefix = isInvalid ? '❌ ' : '';
 
 					if (node.operator === 'EXISTS') {
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
+						const exact = consumeDiagBadgesForSpan(node.span);
+						const rem = consumeUnattachedContainedDiags(node.span);
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ${prefix}${propTargetLabel} is present on the note (regardless of value).${exactDiagSuffix}${remDiag}`,
+							`${indent}  ${prefix}${propTargetLabel} is present on the note (regardless of value).${exact}${rem}`,
 						);
 						return;
 					}
-
 					if (node.operator === 'EMPTY') {
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
+						const exact = consumeDiagBadgesForSpan(node.span);
+						const rem = consumeUnattachedContainedDiags(node.span);
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ${prefix}${propTargetLabel} is present on the note with no value (empty or null).${exactDiagSuffix}${remDiag}`,
+							`${indent}  ${prefix}${propTargetLabel} is present on the note with no value (empty or null).${exact}${rem}`,
 						);
 						return;
 					}
-
 					if (node.valueExpr && node.valueExpr.type === 'VALUE_LEAF') {
 						const leafDesc = describePropertyLeaf(
 							node.valueExpr.matcher,
 							typeInfo.type,
 							node.operator,
 							effectiveConfig.timeZone,
-							displayTimeZone,
-							tzValid,
 							effectiveRefTimeMs,
 							validRefTime,
-							todayLocalWindow,
-							footnotes,
+							concepts,
 							hostDoc,
 						);
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
-						const leafDiag = consumeDiagLinksForSpan(node.valueExpr.span);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
+						const exact = consumeDiagBadgesForSpan(node.span);
+						const leafDiag = consumeDiagBadgesForSpan(node.valueExpr.span);
+						const rem = consumeUnattachedContainedDiags(node.span);
 						const singleLeafPrefix =
 							leafDesc.startsWith('❌ ') && node.key.length > 0 ? '' : prefix;
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ${singleLeafPrefix}${propTargetLabel} ${leafDesc}.${exactDiagSuffix}${leafDiag}${remDiag}`,
+							`${indent}  ${singleLeafPrefix}${propTargetLabel} ${leafDesc}.${exact}${leafDiag}${rem}`,
 						);
 					} else if (node.valueExpr) {
-						const exactDiagSuffix = consumeDiagLinksForSpan(node.span);
+						const exact = consumeDiagBadgesForSpan(node.span);
 						const headerIdx = bulletLines.length;
 						bulletLines.push(`${indent}- ${sliceCode}`);
 						bulletLines.push(
-							`${indent}  ${prefix}At least one ${propTargetLabel} value satisfies:${exactDiagSuffix}`,
+							`${indent}  ${prefix}At least one ${propTargetLabel} value satisfies:${exact}`,
 						);
 						renderValueExprBullets(
 							node.valueExpr,
@@ -948,19 +923,14 @@ export function explainQuery(
 									typeInfo.type,
 									node.operator,
 									effectiveConfig.timeZone,
-									displayTimeZone,
-									tzValid,
 									effectiveRefTimeMs,
 									validRefTime,
-									todayLocalWindow,
-									footnotes,
+									concepts,
 									hostDoc,
 								),
 						);
-						const remDiag = consumeUnattachedContainedDiags(node.span);
-						if (remDiag) {
-							bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${remDiag}`;
-						}
+						const rem = consumeUnattachedContainedDiags(node.span);
+						if (rem) bulletLines[headerIdx + 1] = `${bulletLines[headerIdx + 1]}${rem}`;
 					}
 					return;
 				}
@@ -968,58 +938,28 @@ export function explainQuery(
 		};
 
 		renderAstBullets(resolvedAst, '');
-		lines.push(...bulletLines, '');
 	}
 
-	// =========================================================================
-	// SECTION 2: Diagnostics
-	// =========================================================================
-	lines.push('## Diagnostics', '');
-	if (allDiagnostics.length === 0) {
-		lines.push('> [!tip] No issues found');
-		lines.push('> This query compiled cleanly with 0 errors, 0 warnings, and 0 lint hints.');
-	} else {
-		allDiagnostics.forEach((diag, idx) => {
-			if (idx > 0) lines.push('');
-			const num = idx + 1;
-			const calloutType =
-				diag.severity === 'error'
-					? '[!danger]'
-					: diag.severity === 'warning'
-						? '[!warning]'
-						: '[!info]';
-			const sevTitle =
-				diag.severity === 'error'
-					? 'Error'
-					: diag.severity === 'warning'
-						? 'Warning'
-						: 'Hint';
-			const locText = diag.span
-				? ` (line ${diag.span.startLine}, column ${diag.span.startColumn})`
-				: '';
-			lines.push(`> ${calloutType} ${sevTitle} ${num}: \`${diag.code}\`${locText}`);
-			lines.push(`> ${diag.issue}`);
-			if (diag.span !== null) {
-				const snippet = formatSourceCaretSnippet(input, diag.span);
-				lines.push('> ```text');
-				for (const sLine of snippet.split('\n')) {
-					lines.push(`> ${sLine}`);
-				}
-				lines.push('> ```');
-			}
-			if (diag.hint !== null) {
-				lines.push(`> *Fix*: ${diag.hint}`);
-			}
-		});
-	}
-	lines.push('');
-
-	// =========================================================================
-	// SECTION 3: Concept Reference
-	// =========================================================================
-	lines.push('## Concept Reference', '');
-	lines.push(renderIntervalComparisonDiagram(effectiveRefTimeMs, effectiveConfig.timeZone), '');
-	lines.push(footnotes.renderDefinitions());
-
-	return lines.join('\n');
+	return Object.freeze({
+		input,
+		executable,
+		ast: resolvedAst,
+		effectiveTimeZone: effectiveConfig.timeZone,
+		displayTimeZone,
+		timeZoneValid: tzValid,
+		referenceTimeMs: effectiveRefTimeMs,
+		validReferenceTime: validRefTime,
+		nowLocalIso,
+		todayLocalWindow,
+		astBullets: Object.freeze(bulletLines),
+		diagnostics: Object.freeze(dedupedDiagnostics),
+		errorCount,
+		warningCount,
+		hintCount,
+		queriedKeys,
+		pathFilterLiterals: Object.freeze(pathFilterLiterals),
+		queryDependencies: Object.freeze([...queryDepsSet]),
+		usesHostReference,
+		concepts,
+	});
 }

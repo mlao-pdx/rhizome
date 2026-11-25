@@ -523,8 +523,6 @@ describe('Payload-Shaping & Aggregation Filters (pick, prune, merge, aggregate/a
 					},
 				],
 			}));
-			const explainQuery = vi.fn(async () => '');
-
 			const template = [
 				'{%- query orders -%}tag:order{%- endquery -%}',
 				'{%- assign shaped = query.orders | prune: "tagLocations" | pick: "file.basename as title", "properties.amount", "properties.due" -%}',
@@ -545,7 +543,6 @@ describe('Payload-Shaping & Aggregation Filters (pick, prune, merge, aggregate/a
 
 			const res = await renderRhizomeTemplate(template, {
 				runQueries,
-				explainQuery,
 				runtimeContext: {
 					timeZone: 'UTC',
 					referenceTimeMs: Date.UTC(2026, 3, 1, 0, 0, 0),
@@ -759,7 +756,6 @@ describe('Payload-Shaping & Aggregation Filters (pick, prune, merge, aggregate/a
 					runQueries: async () => ({
 						words: [{ w: 'Note 10' }, { w: 'Note 2' }, { w: 'Éclair' }],
 					}),
-					explainQuery: async () => '',
 					runtimeContext: { language: 'en' },
 				},
 			);
@@ -868,7 +864,6 @@ describe('Payload-Shaping & Aggregation Filters (pick, prune, merge, aggregate/a
 							{ id: 'utc-z', properties: { at: '2026-10-15T12:00Z' } },
 						],
 					}),
-					explainQuery: async () => '',
 					runtimeContext: {
 						timeZone: 'America/New_York',
 						referenceTimeMs: Date.UTC(2026, 9, 15, 12, 0, 0),

@@ -701,41 +701,41 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 
 	it('serializes concurrent renderParsedRhizomeTemplate calls on the same ParsedRhizomeTemplate instance', async () => {
 		const source = [
-			'{% query tasks explain %}#task{% endquery %}',
+			'{% query tasks %}[status: @this.properties.status]{% endquery %}',
 			'{% for item in query.tasks %}{{ item.label }}{% endfor %}',
 		].join('\n');
 		const parsed = parseRhizomeTemplatePass1(source);
 
-		let releaseFirstExplain!: () => void;
-		const firstExplainGate = new Promise<void>((resolve) => {
-			releaseFirstExplain = resolve;
+		let releaseFirstLazy!: () => void;
+		const firstLazyGate = new Promise<void>((resolve) => {
+			releaseFirstLazy = resolve;
 		});
 
 		const render1Promise = renderParsedRhizomeTemplate(
 			source,
 			parsed,
-			{ tasks: [{ label: 'FIRST' }] },
+			{},
+			{ trigger: 'newNote', timeZone: 'UTC' },
 			async () => {
-				await firstExplainGate;
-				return '# Explain 1';
+				await firstLazyGate;
+				return { tasks: [{ label: 'FIRST' }] };
 			},
 		);
 
 		const render2Promise = renderParsedRhizomeTemplate(
 			source,
 			parsed,
-			{ tasks: [{ label: 'SECOND' }] },
-			async () => '# Explain 2',
+			{},
+			{ trigger: 'newNote', timeZone: 'UTC' },
+			async () => ({ tasks: [{ label: 'SECOND' }] }),
 		);
 
-		releaseFirstExplain();
+		releaseFirstLazy();
 		const [res1, res2] = await Promise.all([render1Promise, render2Promise]);
 
-		expect(res1.markdown).toContain('# Explain 1');
 		expect(res1.markdown).toContain('FIRST');
 		expect(res1.markdown).not.toContain('SECOND');
 
-		expect(res2.markdown).toContain('# Explain 2');
 		expect(res2.markdown).toContain('SECOND');
 		expect(res2.markdown).not.toContain('FIRST');
 	});
@@ -750,19 +750,63 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		const plugin = new RhizomePlugin(harness.app, createMockManifest() as PluginManifest);
 		await plugin.onload();
 
-		let explainCalls = 0;
-		let releaseInitialExplain!: () => void;
-		const initialExplainGate = new Promise<void>((resolve) => {
-			releaseInitialExplain = resolve;
+		let renderCalls = 0;
+		let releaseInitialPass2!: () => void;
+		const initialPass2Gate = new Promise<void>((resolve) => {
+			releaseInitialPass2 = resolve;
 		});
 
-		vi.spyOn(plugin, 'explainQuery').mockImplementation(async () => {
-			explainCalls++;
-			if (explainCalls === 1) {
-				await initialExplainGate;
-				return '# Initial Explain';
+		const origGetByPayload = plugin.codeBlockRenderCache.getRenderByPayloadHash.bind(
+			plugin.codeBlockRenderCache,
+		);
+		const cacheLookupSpy = vi
+			.spyOn(plugin.codeBlockRenderCache, 'getRenderByPayloadHash')
+			.mockImplementation((...args) => {
+				renderCalls++;
+				return origGetByPayload(...args);
+			});
+
+		let typesJsonReads = 0;
+		const origRead = harness.app.vault.adapter.read.bind(harness.app.vault.adapter);
+		vi.spyOn(harness.app.vault.adapter, 'read').mockImplementation(async (p: string) => {
+			if (p.endsWith('types.json')) {
+				typesJsonReads++;
 			}
-			return '# Updated Explain';
+			return origRead(p);
+		});
+
+		const source = [
+			'{% query tasks %}#task{% endquery %}',
+			'{% for item in query.tasks %}- {{ item.file.basename }}\n{% endfor %}',
+		].join('\n');
+
+		// Pre-warm Pass-1 AST in CodeBlockRenderCache so we can gate its Liquid instance on Pass-2 #1
+		const folderConfig = {
+			templatesFolder: plugin.settings.templatesFolder,
+			partialsFolder: plugin.settings.partialsFolder,
+			layoutsFolder: plugin.settings.layoutsFolder,
+			configDir: plugin.app.vault.configDir,
+		};
+		const preParsed = parseRhizomeTemplatePass1(source);
+		plugin.codeBlockRenderCache.setPass1(
+			'dashboard.md',
+			source,
+			folderConfig,
+			0,
+			preParsed,
+			false,
+			true,
+		);
+		let liquidCalls = 0;
+		const origLiquidRender = preParsed.liquid.render.bind(preParsed.liquid) as (
+			...args: Parameters<typeof preParsed.liquid.render>
+		) => Promise<unknown>;
+		vi.spyOn(preParsed.liquid, 'render').mockImplementation(async (...lArgs) => {
+			liquidCalls++;
+			if (liquidCalls === 1) {
+				await initialPass2Gate;
+			}
+			return origLiquidRender(...lArgs);
 		});
 
 		const renderedMarkdowns: string[] = [];
@@ -778,17 +822,15 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 			addChild: () => {},
 		} as unknown as MarkdownPostProcessorContext;
 
-		const source = [
-			'{% query tasks explain %}#task{% endquery %}',
-			'{% for item in query.tasks %}- {{ item.file.basename }}\n{% endfor %}',
-		].join('\n');
-
 		const blockPromise = processRhizomeCodeBlock(source, el, ctx, plugin);
 
-		// Wait until initial query has registered and initial render is paused in explainQuery
+		// Wait until initial query has registered and initial render is paused inside Liquid Pass 2
 		await vi.waitFor(() => {
-			expect(explainCalls).toBe(1);
+			expect(liquidCalls).toBe(1);
 		});
+		// Fix #4 check: healthy rhizome codeblock performs only 1 types.json read (no duplicate Pass-2 read)
+		expect(typesJsonReads).toBe(1);
+		expect(renderCalls).toBe(1);
 
 		// Trigger a vault update and nudge while initial render is still in flight
 		harness.setNotes([
@@ -803,15 +845,16 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		]);
 		const nudgePromise = plugin.activeQueryRoster.nudge();
 
-		// Let initial explain finish so the serialized Pass 2 queue drains both renders
-		releaseInitialExplain();
+		// Let initial Pass 2 resume; its stale generation is dropped while the newer generation commits
+		releaseInitialPass2();
 		await Promise.all([blockPromise, nudgePromise]);
 
 		// Only the newer generation's output was committed to the DOM
 		expect(renderedMarkdowns).toHaveLength(1);
-		expect(renderedMarkdowns[0]).toContain('# Updated Explain');
+		expect(renderedMarkdowns[0]).toContain('- alpha');
 		expect(renderedMarkdowns[0]).toContain('- beta');
 
+		cacheLookupSpy.mockRestore();
 		renderSpy.mockRestore();
 	});
 
@@ -2724,7 +2767,7 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		// 1. Sibling @query.goals wave sees all 3 goals even when {% query goals cutoff: 1 %} truncates Pass 2 to 1 goal
 		const waveSource = [
 			'{% query goals cutoff: 1 %}#goal{% endquery %}',
-			'{% query tasks explain cutoff: 25 %}#task AND [up -> @query.goals]{% endquery %}',
+			'{% query tasks cutoff: 25 %}#task AND [up -> @query.goals]{% endquery %}',
 			'Goals={{ query.goals.size }} Tasks={{ query.tasks | map: "file.basename" | join: "," }}',
 		].join('\n');
 		const elWave = { empty: () => {} } as unknown as HTMLElement;
@@ -2737,7 +2780,6 @@ describe('processRhizomeCodeBlock reactive DOM lifecycle', () => {
 		expect(renderedMarkdowns[0]).toContain(
 			'> Defined inline in this codeblock in [[Dashboard.md]] (line 1).',
 		);
-		expect(renderedMarkdowns[0]).toContain('- **Cutoff**: `25` records');
 		expect(renderedMarkdowns[0]).toContain('Goals=1 Tasks=T3');
 
 		// 2. Default-cutoff query matching 14,000 notes clamps countExtractedQueryRecords to 5,000,

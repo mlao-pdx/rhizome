@@ -1,5 +1,6 @@
 import type { App } from 'obsidian';
 import { XxHash64Accumulator } from '@core/hash/xxhash64';
+import type { RhizomeCodeBlockFlavor } from '@core/templates';
 import type { LoggerPort } from '@ports/logger-port';
 import {
 	type PersistedRenderSentinelRecord,
@@ -80,17 +81,19 @@ function evictionTier(status: RenderSentinelStatus): number {
 }
 
 /**
- * Computes a deterministic 64-bit hex digest identifying a `rhizome` codeblock's host path,
- * inline template source, and referenced partial/layout file contents without persisting
- * vault text or note paths in IndexedDB.
+ * Computes a deterministic 64-bit hex digest identifying a Rhizome codeblock's fence `flavor`,
+ * host path, inline template source, and referenced partial/layout file contents without
+ * persisting vault text or note paths in IndexedDB.
  */
 export function computeCodeBlockSentinelHash(
 	sourcePath: string,
 	source: string,
 	fileSources: ReadonlyMap<string, string>,
+	flavor: RhizomeCodeBlockFlavor = 'rhizome',
 ): string {
 	const acc = new XxHash64Accumulator();
-	acc.updateTag(0x53, 1);
+	acc.updateTag(0x53, 2);
+	acc.updateString(flavor);
 	acc.updateString(sourcePath);
 	acc.updateString(source);
 	const entries = [...fileSources.entries()].sort((a, b) =>

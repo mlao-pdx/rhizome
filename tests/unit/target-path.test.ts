@@ -100,7 +100,6 @@ describe('normalizeAndValidateTargetPath & TargetPathClaimRegistry', () => {
 
 		const res = await renderRhizomeTemplate(source, {
 			runQueries: async () => ({}),
-			explainQuery: async () => '',
 			runtimeContext: {
 				trigger: 'newNote',
 				referenceTimeMs: Date.UTC(2026, 10, 23, 19, 3, 0),
@@ -124,7 +123,6 @@ describe('normalizeAndValidateTargetPath & TargetPathClaimRegistry', () => {
 			'{% assign active = "Inbox/Fallback" %}{% targetPath missing_var | default: active closed %}{{ targetPath }}',
 			{
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 				runtimeContext: { trigger: 'newNote', timeZone: 'UTC' },
 			},
 		);
@@ -134,7 +132,6 @@ describe('normalizeAndValidateTargetPath & TargetPathClaimRegistry', () => {
 
 		const badMode = await renderRhizomeTemplate('{% targetPath "Inbox/Note" sideways %}', {
 			runQueries: async () => ({}),
-			explainQuery: async () => '',
 			runtimeContext: { trigger: 'newNote', timeZone: 'UTC' },
 		});
 		expect(badMode.ok).toBe(false);
@@ -142,7 +139,6 @@ describe('normalizeAndValidateTargetPath & TargetPathClaimRegistry', () => {
 
 		const badPathRuntime = await renderRhizomeTemplate('{% targetPath "../escape" %}', {
 			runQueries: async () => ({}),
-			explainQuery: async () => '',
 			runtimeContext: { trigger: 'newNote', timeZone: 'UTC' },
 		});
 		expect(badPathRuntime.ok).toBe(false);

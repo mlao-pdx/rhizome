@@ -84,7 +84,6 @@ describe('Inline Rhizome Expression Property Invariants', () => {
 				const inlineRes = evaluateInlineRhizomeExpression(expr, effectiveHost, ctx);
 				const blockRes = await renderRhizomeTemplate(`{{ ${expr} }}`, {
 					runQueries: async () => ({}),
-					explainQuery: async () => '',
 					resolveHost: () => effectiveHost,
 					runtimeContext: ctx,
 				});

@@ -4,13 +4,17 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 
 import {
-	explainVaultQuery,
+	loadVaultPropertyTypes,
 	parseObsidianTypesJson,
 	runVaultQuery,
 } from '../../src/adapters/vault-query-runner';
 import type { BacklinkSnapshot } from '../../src/adapters/backlink-index';
 import { NormalizedDocumentCache } from '../../src/adapters/normalized-document-cache';
-import { resolveThisReference, type NormalizedDocument } from '../../src/core/search';
+import {
+	analyzeQueryExplain,
+	resolveThisReference,
+	type NormalizedDocument,
+} from '../../src/core/search';
 
 interface MockNoteSpec {
 	path: string;
@@ -827,7 +831,7 @@ describe('runVaultQuery', () => {
 			expect(typeof failedSummary?.meta?.['durationMs']).toBe('number');
 		});
 
-		it('explainVaultQuery loads types.json and merges overrides without scanning any vault notes', async () => {
+		it('loadVaultPropertyTypes + analyzeQueryExplain resolves types.json and merges overrides without scanning any vault notes', async () => {
 			let markdownFilesCalled = false;
 			let fileCacheCalled = false;
 			const spy = createLoggerSpy();
@@ -852,30 +856,24 @@ describe('runVaultQuery', () => {
 				},
 			});
 
-			const md = await explainVaultQuery(
-				app,
+			const vaultTypes = await loadVaultPropertyTypes(app, spy.logger);
+			const analysis = analyzeQueryExplain(
 				'#work [priority: >= 2] [due: = @today] [custom_override: = true]',
 				{
 					timeZone: 'America/New_York',
-					referenceTimeMs: Date.parse('2026-10-22T15:30:00.000Z'),
-					propertyTypes: { custom_override: 'checkbox' },
+					propertyTypes: { ...vaultTypes, custom_override: 'checkbox' },
 				},
-				spy.logger,
+				Date.parse('2026-10-22T15:30:00.000Z'),
 			);
 
 			expect(markdownFilesCalled).toBe(false);
 			expect(fileCacheCalled).toBe(false);
-			expect(md).toContain('# Query Explain Plan');
-			expect(md).toContain('`priority`[^4]');
-			expect(md).toContain('`due`[^5]');
-			expect(md).toContain('`custom_override`[^6]');
-			const explainLog = spy.calls.find((c) => c.message === 'Generated query explanation');
-			expect(explainLog?.level).toBe('debug');
-			expect(explainLog?.meta?.['source']).toBe('query.explain');
-			expect(explainLog?.meta?.['query']).toBe(
-				'‼️#work [priority: >= 2] [due: = @today] [custom_override: = true]‼️',
-			);
-			expect(typeof explainLog?.meta?.['durationMs']).toBe('number');
+			expect(analysis.executable).toBe(true);
+			const bulletsJoined = analysis.astBullets.join('\n');
+			expect(bulletsJoined).toContain('`priority` *(`number` in `types.json`)*');
+			expect(bulletsJoined).toContain('`due` *(`date` in `types.json`)*');
+			expect(bulletsJoined).toContain('`custom_override` *(`checkbox` in `types.json`)*');
+			expect(bulletsJoined).not.toContain('[^');
 		});
 
 		it('resolves options.sourcePath in O(1) prior to query compilation, populates results["◊host"], and evaluates @this.* queries against hostDoc', async () => {
@@ -1121,15 +1119,6 @@ describe('runVaultQuery', () => {
 			);
 			// Only the 2 matched notes (Apollo, LandModule) project backlinks; unmatched Q4Goal is untouched
 			expect(backlinkGetCalls).toBe(2);
-
-			const explainWithoutCutoff = await explainVaultQuery(app, '#goal', { timeZone: 'UTC' });
-			expect(explainWithoutCutoff).not.toContain('- **Cutoff**:');
-
-			const explainWithCutoff = await explainVaultQuery(app, '#goal', {
-				timeZone: 'UTC',
-				cutoff: { value: 250, explicit: true },
-			});
-			expect(explainWithCutoff).toContain('- **Cutoff**: `250` records\n- **Context**:');
 		});
 	});
 });

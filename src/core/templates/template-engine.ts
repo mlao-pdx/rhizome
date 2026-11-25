@@ -1,9 +1,16 @@
-import { formatSourceCaretSnippet, type QueryExplainCutoff, type SourceSpan } from '@core/search';
+import { formatSourceCaretSnippet, type SourceSpan } from '@core/search';
 import { Liquid, LiquidError, Tag, type Template, toPromise } from 'liquidjs';
 import { registerFrontmatterTag } from './frontmatter-tag';
 import { registerHeadingTag } from './heading-filter';
 import { registerPayloadLiquidFilters } from './payload-filters';
 import { applyQueryCutoffs } from './query-cutoff';
+import {
+	analyzeExtractedQueryErrorsByName,
+	createOmittedQueryDiagnostic,
+	flattenQueryErrors,
+	isQueryDiagnosticCode,
+	MultiTemplateDiagnosticError,
+} from './query-diagnostics';
 import {
 	extractMatchedDocumentPaths,
 	isRenderLoopTag,
@@ -11,8 +18,12 @@ import {
 	validateQueriesNotInLoop,
 } from './query-partitioner';
 import {
+	attachRenderTelemetryCollector,
 	checkFilterOutputSize,
 	installBoundedTemplateRenderer,
+	MAX_TEMPLATE_OUTPUT_CHARS,
+	measureSerializedFrontmatterCharsBounded,
+	type RenderTelemetryCollector,
 	TEMPLATE_MEMORY_LIMIT,
 	TEMPLATE_MEMORY_LIMIT_HINT,
 	TEMPLATE_RENDER_LIMIT_MS,
@@ -162,8 +173,9 @@ export function formatTemplateDiagnosticsMarkdown(
 		} else if (diag.span) {
 			locSuffix = ` (line ${diag.span.startLine}, column ${diag.span.startColumn})`;
 		}
+		const errorLabel = isQueryDiagnosticCode(diag.code) ? 'Query Error' : 'Template Error';
 		const lines: string[] = [
-			`> [!danger] Template Error: \`${diag.code}\`${locSuffix}`,
+			`> [!danger] ${errorLabel}: \`${diag.code}\`${locSuffix}`,
 			`> ${diag.issue}`,
 		];
 
@@ -434,7 +446,7 @@ function getInFileChildTemplates(tag: InspectableTag): Template[] {
 	return children;
 }
 
-function normalizeLookupCacheKey(kind: 'layout' | 'render', rawFile: string): string {
+export function normalizeLookupCacheKey(kind: 'layout' | 'render', rawFile: string): string {
 	const trimmed = rawFile.trim().replace(/\\/g, '/').replace(/^\/+/, '');
 	const withoutExt = trimmed.toLowerCase().endsWith('.md')
 		? trimmed.slice(0, trimmed.length - 3)
@@ -782,10 +794,7 @@ export async function parseRhizomeTemplatePass1Async(
 	if (parsed.templates !== null && parsed.env.diagnostics.length === 0) {
 		const resolvedFolders = resolveTemplateFolders(folders);
 		const activeStack = new Set<string>();
-		const visitedFiles = new Map<
-			string,
-			{ readonly templates: Template[]; readonly resolvedFile: string }
-		>();
+		const visitedFiles = parsed.env.visitedFiles;
 		const visitedDirectLoopFiles = new Set<string>();
 		const indirectLoopFiles = new Map<
 			string,
@@ -827,30 +836,73 @@ export async function parseRhizomeTemplatePass1Async(
 const parsedTemplateRenderChains = new WeakMap<ParsedRhizomeTemplate, Promise<unknown>>();
 
 /**
+ * Optional hooks and mode flags for `renderParsedRhizomeTemplate` used by `rhizome-sample`.
+ */
+export interface RenderParsedTemplateOptions {
+	/**
+	 * When `true` (`rhizome-sample` mode), query compilation/DAG errors do not abort Pass 2;
+	 * failed queries bind to `[]` so healthy queries and the template body still render.
+	 */
+	readonly allowFailedQueries?: boolean | undefined;
+	/**
+	 * Optional sampled static query payload bound into Liquid root scope after `uncutQueryPaths`
+	 * have been recorded from the full unsampled `payload`.
+	 */
+	readonly effectiveStaticPayload?: Readonly<Record<string, unknown[]>> | undefined;
+	/**
+	 * Optional Pass-1.5 cutoff callout override (`""` or pre-formatted callouts) used when
+	 * `rhizome-sample` has already applied effective cutoff vs. sample precedence.
+	 */
+	readonly precomputedStaticCalloutsMarkdown?: string | undefined;
+	/**
+	 * Optional Pass-2 lazy row transformer used by `rhizome-sample` to sample lazy `@this`
+	 * queries against `LinkedPaths` and control cutoff callout emission.
+	 */
+	readonly transformLazyRows?:
+		| ((
+				queryBlock: ExtractedQueryBlock,
+				rawRows: unknown[],
+				lazyOptions: TemplateLazyQueryOptions,
+		  ) => {
+				readonly effectiveRows: unknown[];
+				readonly calloutMarkdown: string;
+		  })
+		| undefined;
+	/**
+	 * When `true`, `pass15Queries` have already been compiled and DAG-validated upstream by
+	 * `runVaultQuery` (`allExtractedQueriesExecutable`), skipping redundant re-compilation.
+	 */
+	readonly staticQueriesPrevalidated?: boolean | undefined;
+	/**
+	 * Optional AST-keyed size and partial error stack collector attached during `rhizome-sample` Pass 2.
+	 */
+	readonly telemetry?: RenderTelemetryCollector | undefined;
+}
+
+/**
  * Runs Pass 2 (Liquid template rendering against a pre-fetched query `payload`) using
  * the AST and environment produced by `parseRhizomeTemplatePass1`.
  *
  * @remarks
- * (bugfix, 2026-10-30) Serializes concurrent Pass 2 renders on the same
+ * (spec-change, 2026-11-24) Per `docs/spec/Extended Explain Plan.md` §2.2, production renders
+ * short-circuit with `ok: false` whenever any static or reached lazy query fails compilation
+ * or DAG validation, while `rhizome-sample` (`allowFailedQueries: true`) binds failed queries
+ * to `[]` so Sample Preview still renders.
+ *
+ * SUPERSEDED (bugfix, 2026-10-30): Serializes concurrent Pass 2 renders on the same
  * `ParsedRhizomeTemplate` instance via a `WeakMap` promise chain so overlapping
- * async renders cannot clobber `parsed.env.payload` or `parsed.env.explainQuery`
- * while awaiting partials, layouts, or `explainQuery`.
+ * async renders cannot clobber `parsed.env.payload` while awaiting partials or layouts.
  */
 export async function renderParsedRhizomeTemplate(
 	source: string,
 	parsed: ParsedRhizomeTemplate,
 	payload: Readonly<Record<string, unknown[]>>,
-	explainQuery: (
-		query: string,
-		heading: string,
-		cutoff?: QueryExplainCutoff,
-		lazyOptions?: TemplateLazyQueryOptions,
-	) => Promise<string>,
 	runtimeContext?: TemplateRuntimeContext,
 	lazyRunQueries?: (
 		queries: Readonly<Record<string, string>>,
 		lazyOptions?: TemplateLazyQueryOptions,
 	) => Promise<Record<string, unknown[]>>,
+	options?: RenderParsedTemplateOptions,
 ): Promise<TemplateRenderResult> {
 	const queries: readonly ExtractedQueryBlock[] = Object.freeze([...parsed.env.queries]);
 
@@ -870,6 +922,7 @@ export async function renderParsedRhizomeTemplate(
 
 	const templates = parsed.templates;
 	const previousRender = parsedTemplateRenderChains.get(parsed) ?? Promise.resolve();
+	const allowFailedQueries = options?.allowFailedQueries === true;
 
 	const executePass2 = async (): Promise<TemplateRenderResult> => {
 		parsed.env.uncutQueryPaths.clear();
@@ -878,12 +931,85 @@ export async function renderParsedRhizomeTemplate(
 		parsed.env.runLazyQuery = null;
 
 		try {
-			const safePayload: Readonly<Record<string, unknown[]>> =
+			const rawSafePayload: Readonly<Record<string, unknown[]>> =
 				payload && typeof payload === 'object' ? payload : Object.freeze({});
 			const isNewNoteLazyMode =
 				runtimeContext?.trigger === 'newNote' && typeof lazyRunQueries === 'function';
 			const partitioned = isNewNoteLazyMode ? partitionNewNoteQueries(queries) : null;
 			const pass15Queries = partitioned ? partitioned.staticQueries : queries;
+
+			const hasLazyQueries = Boolean(partitioned && partitioned.lazyQueryNames.size > 0);
+			const skipStaticRecompile =
+				options?.staticQueriesPrevalidated === true && !hasLazyQueries;
+
+			const queryErrorsByName =
+				!allowFailedQueries && !skipStaticRecompile && queries.length > 0
+					? analyzeExtractedQueryErrorsByName(
+							source,
+							queries,
+							parsed.env.fileSources,
+							runtimeContext,
+						)
+					: null;
+
+			if (!allowFailedQueries && queryErrorsByName !== null) {
+				const staticErrors = flattenQueryErrors(pass15Queries, queryErrorsByName);
+				if (staticErrors.length > 0) {
+					return Object.freeze({
+						ok: false,
+						markdown: formatTemplateDiagnosticsMarkdown(
+							source,
+							staticErrors,
+							parsed.env.fileSources,
+						),
+						queries,
+						diagnostics: staticErrors,
+					});
+				}
+				const omittedStaticDiags: TemplateDiagnostic[] = [];
+				for (const q of pass15Queries) {
+					if (!Object.prototype.hasOwnProperty.call(rawSafePayload, q.name)) {
+						omittedStaticDiags.push(createOmittedQueryDiagnostic(q));
+					}
+				}
+				if (omittedStaticDiags.length > 0) {
+					const frozenOmitted = Object.freeze(omittedStaticDiags);
+					return Object.freeze({
+						ok: false,
+						markdown: formatTemplateDiagnosticsMarkdown(
+							source,
+							frozenOmitted,
+							parsed.env.fileSources,
+						),
+						queries,
+						diagnostics: frozenOmitted,
+					});
+				}
+			}
+
+			const emptyFrozenRows: unknown[] = Object.freeze([]) as unknown as unknown[];
+			let safePayload = rawSafePayload;
+			if (allowFailedQueries && pass15Queries.length > 0) {
+				let needsFallback = false;
+				for (const q of pass15Queries) {
+					if (!Object.prototype.hasOwnProperty.call(rawSafePayload, q.name)) {
+						needsFallback = true;
+						break;
+					}
+				}
+				if (needsFallback) {
+					const normalizedPayload = Object.assign(
+						Object.create(null) as Record<string, unknown[]>,
+						rawSafePayload,
+					);
+					for (const q of pass15Queries) {
+						if (!Object.prototype.hasOwnProperty.call(normalizedPayload, q.name)) {
+							normalizedPayload[q.name] = emptyFrozenRows;
+						}
+					}
+					safePayload = Object.freeze(normalizedPayload);
+				}
+			}
 
 			for (const q of pass15Queries) {
 				if (Object.prototype.hasOwnProperty.call(safePayload, q.name)) {
@@ -894,14 +1020,32 @@ export async function renderParsedRhizomeTemplate(
 				}
 			}
 
-			const { effectivePayload: baseEffectivePayload, calloutsMarkdown } = applyQueryCutoffs(
-				pass15Queries,
-				safePayload,
-				runtimeContext,
-			);
+			let staticInputForLiquid = options?.effectiveStaticPayload ?? safePayload;
+			if (allowFailedQueries && options?.effectiveStaticPayload && pass15Queries.length > 0) {
+				const withFallbacks = Object.assign(
+					Object.create(null) as Record<string, unknown[]>,
+					options.effectiveStaticPayload,
+				);
+				for (const q of pass15Queries) {
+					if (!Object.prototype.hasOwnProperty.call(withFallbacks, q.name)) {
+						withFallbacks[q.name] = emptyFrozenRows;
+					}
+				}
+				staticInputForLiquid = Object.freeze(withFallbacks);
+			}
+
+			const cutoffApp =
+				options?.precomputedStaticCalloutsMarkdown !== undefined
+					? {
+							effectivePayload: staticInputForLiquid,
+							calloutsMarkdown: options.precomputedStaticCalloutsMarkdown,
+						}
+					: applyQueryCutoffs(pass15Queries, staticInputForLiquid, runtimeContext);
+			const baseEffectivePayload = cutoffApp.effectivePayload;
+			const calloutsMarkdown = cutoffApp.calloutsMarkdown;
+
 			let effectivePayload = baseEffectivePayload;
 			if (partitioned && partitioned.lazyQueryNames.size > 0) {
-				const emptyFrozenRows: unknown[] = Object.freeze([]) as unknown as unknown[];
 				const seededPayload: Record<string, unknown[]> = Object.assign(
 					Object.create(null) as Record<string, unknown[]>,
 					baseEffectivePayload,
@@ -912,7 +1056,6 @@ export async function renderParsedRhizomeTemplate(
 				effectivePayload = Object.freeze(seededPayload);
 			}
 			parsed.env.payload = extractUserQueryMap(effectivePayload);
-			parsed.env.explainQuery = explainQuery;
 
 			if (partitioned && partitioned.lazyQueryNames.size > 0 && lazyRunQueries) {
 				const queryBlockByName = new Map<string, ExtractedQueryBlock>();
@@ -921,6 +1064,13 @@ export async function renderParsedRhizomeTemplate(
 				}
 				parsed.env.lazyQueryNames = partitioned.lazyQueryNames;
 				parsed.env.runLazyQuery = async (name, queryText, lazyOpts) => {
+					const qBlock = queryBlockByName.get(name);
+					if (!allowFailedQueries && queryErrorsByName !== null) {
+						const lazyErrs = queryErrorsByName.get(name);
+						if (lazyErrs && lazyErrs.length > 0) {
+							throw new MultiTemplateDiagnosticError(lazyErrs);
+						}
+					}
 					const rawRes = await lazyRunQueries(
 						Object.freeze({ [name]: queryText }),
 						lazyOpts,
@@ -930,23 +1080,36 @@ export async function renderParsedRhizomeTemplate(
 						typeof rawRes !== 'object' ||
 						!Object.prototype.hasOwnProperty.call(rawRes, name)
 					) {
+						if (!allowFailedQueries && qBlock) {
+							throw new MultiTemplateDiagnosticError([
+								createOmittedQueryDiagnostic(qBlock),
+							]);
+						}
 						return {
 							matched: false,
 							rawRows: [],
-							effectiveRows: [],
+							effectiveRows: emptyFrozenRows,
 							calloutMarkdown: '',
 						};
 					}
 					const candidateRows = rawRes[name];
 					const rawRows = Array.isArray(candidateRows) ? candidateRows : [];
 					parsed.env.uncutQueryPaths.set(name, extractMatchedDocumentPaths(rawRows));
-					const qBlock = queryBlockByName.get(name);
 					if (!qBlock) {
 						return {
 							matched: true,
 							rawRows,
 							effectiveRows: rawRows,
 							calloutMarkdown: '',
+						};
+					}
+					if (options?.transformLazyRows) {
+						const transformed = options.transformLazyRows(qBlock, rawRows, lazyOpts);
+						return {
+							matched: true,
+							rawRows,
+							effectiveRows: transformed.effectiveRows,
+							calloutMarkdown: transformed.calloutMarkdown,
 						};
 					}
 					const cutoffRes = applyQueryCutoffs(
@@ -965,6 +1128,9 @@ export async function renderParsedRhizomeTemplate(
 			}
 
 			const rootScope = buildRhizomeTemplateContext(effectivePayload, runtimeContext);
+			if (options?.telemetry) {
+				attachRenderTelemetryCollector(rootScope, options.telemetry);
+			}
 			const renderedRaw: unknown = await parsed.liquid.render(templates, rootScope, {
 				globals: rootScope,
 				renderLimit: TEMPLATE_RENDER_LIMIT_MS,
@@ -983,6 +1149,13 @@ export async function renderParsedRhizomeTemplate(
 			checkFilterOutputSize(finalMarkdown.length);
 
 			const targetState = readTemplateTargetState(rootScope);
+			if (targetState?.hasFrontmatterMutations) {
+				const stagedFmChars = measureSerializedFrontmatterCharsBounded(
+					targetState.frontmatterSnapshot,
+					MAX_TEMPLATE_OUTPUT_CHARS,
+				);
+				checkFilterOutputSize(finalMarkdown.length + stagedFmChars);
+			}
 			const newNoteFields =
 				targetState?.trigger === 'newNote'
 					? {
@@ -1001,6 +1174,26 @@ export async function renderParsedRhizomeTemplate(
 				...newNoteFields,
 			});
 		} catch (err: unknown) {
+			const unwrappedMulti =
+				err instanceof MultiTemplateDiagnosticError
+					? err
+					: LiquidError.is(err) &&
+						  err.originalError instanceof MultiTemplateDiagnosticError
+						? err.originalError
+						: null;
+			if (unwrappedMulti !== null) {
+				const frozenDiags = unwrappedMulti.templateDiagnostics;
+				return Object.freeze({
+					ok: false,
+					markdown: formatTemplateDiagnosticsMarkdown(
+						source,
+						frozenDiags,
+						parsed.env.fileSources,
+					),
+					queries,
+					diagnostics: frozenDiags,
+				});
+			}
 			const renderDiag = extractLiquidErrorDiagnostic(
 				source,
 				err,
@@ -1035,12 +1228,12 @@ export async function renderParsedRhizomeTemplate(
 /**
  * Executes a `rhizome` LiquidJS template in two passes:
  * 1. **Pass 1 (Static Parse & Extract):** Parses the Liquid AST across the root codeblock and any
- *    referenced `{% layout %}` / `{% render %}` files, validates `{% query <name> [explain] %}`
+ *    referenced `{% layout %}` / `{% render %}` files, validates `{% query <name> [cutoff: <int>] %}`
  *    blocks, and rejects duplicate `<name>` definitions, loop-nested queries, or circular file
  *    references before touching the vault.
- * 2. **Pass 2 (Single-Pass / Hybrid Lazy Vault Query & Render):** Executes static queries in Pass 1.5
- *    (and in `"newNote"` mode defers `@this.*` queries and their `@query.*` dependents to Pass 2),
- *    then renders the Liquid template with the batch payload as root scope.
+ * 2. **Pass 2 (Single-Pass / Hybrid Lazy Vault Query & Render):** Validates static query compilation
+ *    and DAG dependencies, executes static queries in Pass 1.5 (and in `"newNote"` mode defers
+ *    `@this.*` queries and their `@query.*` dependents to Pass 2), then renders the Liquid template.
  */
 export async function renderRhizomeTemplate(
 	source: string,
@@ -1072,6 +1265,28 @@ export async function renderRhizomeTemplate(
 		const pass15Queries = isNewNoteMode
 			? partitionNewNoteQueries(queries).staticQueries
 			: queries;
+
+		if (pass15Queries.length > 0) {
+			const queryErrorsByName = analyzeExtractedQueryErrorsByName(
+				source,
+				queries,
+				parsed.env.fileSources,
+				callbacks.runtimeContext,
+			);
+			const staticErrors = flattenQueryErrors(pass15Queries, queryErrorsByName);
+			if (staticErrors.length > 0) {
+				return Object.freeze({
+					ok: false,
+					markdown: formatTemplateDiagnosticsMarkdown(
+						source,
+						staticErrors,
+						parsed.env.fileSources,
+					),
+					queries,
+					diagnostics: staticErrors,
+				});
+			}
+		}
 
 		const payload: Record<string, unknown[]> = Object.create(null) as Record<string, unknown[]>;
 		const queryMap = Object.create(null) as Record<string, string>;
@@ -1105,7 +1320,6 @@ export async function renderRhizomeTemplate(
 			source,
 			parsed,
 			payload,
-			(q, heading, cutoff, lazyOpts) => callbacks.explainQuery(q, heading, cutoff, lazyOpts),
 			callbacks.runtimeContext,
 			isNewNoteMode ? (qMap, lazyOpts) => callbacks.runQueries(qMap, lazyOpts) : undefined,
 		);

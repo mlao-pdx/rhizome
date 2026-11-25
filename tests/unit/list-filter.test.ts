@@ -68,7 +68,6 @@ describe('Liquid list and sentence (array_to_sentence_string) filters', () => {
 				].join('\n'),
 				{
 					runQueries: async () => ({}),
-					explainQuery: async () => '',
 					runtimeContext: { language: 'de' },
 				},
 			);
@@ -82,7 +81,6 @@ describe('Liquid list and sentence (array_to_sentence_string) filters', () => {
 				'{%- assign tags = "un, deux, trois" | split: ", " -%}{{ tags | sentence }}',
 				{
 					runQueries: async () => ({}),
-					explainQuery: async () => '',
 					runtimeContext: { language: 'fr' },
 				},
 			);
@@ -404,7 +402,6 @@ describe('Liquid list and sentence (array_to_sentence_string) filters', () => {
 				].join('\n'),
 				{
 					runQueries: async () => ({ tasks }),
-					explainQuery: async () => '',
 					runtimeContext: { language: 'de' },
 				},
 			);

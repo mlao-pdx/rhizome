@@ -438,4 +438,87 @@ describe('template-runner, Live Preview simulation & template-folder index exclu
 		await h.plugin.activeQueryRoster.nudge(Date.now(), { onlyIfChanged: true });
 		expect(latestPaths).toEqual([]);
 	});
+
+	it('discovers rhizome-sample blocks in TemplatePickerModal, inserts inline [!danger] callouts in atCursor without opening TemplateErrorModal, and opens TemplateErrorModal on query errors in newNote', async () => {
+		const h = await createRunnerHarness('Notes/Host.md');
+		const hostFile = h.putNote('Notes/Host.md', 'Host body\n');
+		const sampleTpl = h.putNote(
+			'◊Rhizome/templates/SampleAuthored.md',
+			[
+				'```rhizome-sample',
+				'{% targetPath "Created/FromSample" %}',
+				'Hello from rhizome-sample!',
+				'```',
+			].join('\n'),
+		);
+
+		await openCreateNoteFromTemplatePicker(h.plugin);
+		expect(openedModals).toHaveLength(1);
+		const picker = openedModals[0] as unknown as {
+			getItems: () => Array<{ displayPath: string; blockCount: number }>;
+		};
+		expect(picker.getItems()).toEqual([
+			expect.objectContaining({ displayPath: 'SampleAuthored', blockCount: 1 }),
+		]);
+		openedModals.length = 0;
+
+		// Full execution in newNote creates the note cleanly from a rhizome-sample block without explain callouts
+		const createOk = await executeCreateNoteFromTemplate(h.plugin, sampleTpl);
+		expect(createOk.ok).toBe(true);
+		expect(h.contents.get('Created/FromSample.md')?.trim()).toBe('Hello from rhizome-sample!');
+
+		// Query error in newNote aborts with 0 disk mutations and opens TemplateErrorModal
+		const brokenQueryTpl = h.putNote(
+			'◊Rhizome/templates/BrokenQuery.md',
+			[
+				'```rhizome-sample',
+				'{% targetPath "Created/NeverWritten" %}',
+				'{% query q %}[unclosed_filter{% endquery %}',
+				'Body {{ query.q.size }}',
+				'```',
+			].join('\n'),
+		);
+		const createFail = await executeCreateNoteFromTemplate(h.plugin, brokenQueryTpl);
+		expect(createFail.ok).toBe(false);
+		expect(h.contents.has('Created/NeverWritten.md')).toBe(false);
+		expect(openedModals).toHaveLength(1);
+		expect(openedModals[0]?.title).toBe('Cannot create note from template');
+		expect(createFail.errorGroups[0]?.diagnostics[0]?.code).toBe('SYNTAX_ERROR');
+		openedModals.length = 0;
+
+		// atCursor with a valid block + broken block inserts joined output via single replaceSelection and NEVER opens TemplateErrorModal
+		const mixedAtCursorTpl = h.putNote(
+			'◊Rhizome/templates/MixedInsert.md',
+			[
+				'```rhizome',
+				'Healthy Block 1',
+				'```',
+				'',
+				'```rhizome-sample',
+				'{% query bad %}[broken{% endquery %}',
+				'```',
+			].join('\n'),
+		);
+		let replaceCalls = 0;
+		let replacedSelection = '';
+		const fakeEditor = {
+			getCursor: () => ({ line: 0, ch: 0 }),
+			replaceSelection: (txt: string) => {
+				replaceCalls++;
+				replacedSelection = txt;
+			},
+		} as unknown as Editor;
+
+		const insertRes = await executeInsertFromTemplate(
+			h.plugin,
+			fakeEditor,
+			hostFile,
+			mixedAtCursorTpl,
+		);
+		expect(insertRes.ok).toBe(false);
+		expect(openedModals).toHaveLength(0);
+		expect(replaceCalls).toBe(1);
+		expect(replacedSelection).toContain('Healthy Block 1');
+		expect(replacedSelection).toContain('> [!danger] Query Error: `SYNTAX_ERROR`');
+	});
 });

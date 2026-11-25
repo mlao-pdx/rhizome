@@ -142,7 +142,6 @@ describe('Template graph shaping filters: link_paths, lookup, tree & list integr
 				projects: [p1, p2],
 				tasks: [t1, t2],
 			}),
-			explainQuery: async () => '',
 		});
 		expect(rendered.ok).toBe(true);
 		expect(rendered.markdown.trim()).toBe('Stage1: Apollo, Gemini\nOrphan:');
@@ -226,13 +225,12 @@ describe('Template graph shaping filters: link_paths, lookup, tree & list integr
 		const t2 = makeNoteMatch('Tasks/Parser.md', { up: ['Projects/Core.md'] });
 
 		const fullTpl = [
-			'{%- query items -%}*{%- endquery -%}',
+			'{%- query items -%}{%- endquery -%}',
 			'{{ query.items | tree: \'links | link_paths: "up"\' | list: "-", "1.", "-", "file.basename" }}',
 		].join('');
 
 		const res1 = await renderRhizomeTemplate(fullTpl, {
 			runQueries: async () => ({ items: [goal, p1, t1, t2] }),
-			explainQuery: async () => '',
 		});
 		expect(res1.ok).toBe(true);
 		expect(res1.markdown).toBe(
@@ -241,12 +239,11 @@ describe('Template graph shaping filters: link_paths, lookup, tree & list integr
 
 		// Inline horizon at depth 3 when only 2 style levels (`"-", "1."`) are configured
 		const horizonTpl = [
-			'{%- query items -%}*{%- endquery -%}',
+			'{%- query items -%}{%- endquery -%}',
 			'{{ query.items | tree: \'links | link_paths: "up"\' | list: "-", "1.", "file.basename" }}',
 		].join('');
 		const res2 = await renderRhizomeTemplate(horizonTpl, {
 			runQueries: async () => ({ items: [goal, p1, t1, t2] }),
-			explainQuery: async () => '',
 		});
 		expect(res2.ok).toBe(true);
 		expect(res2.markdown).toBe(['- Roadmap', '  1. Core', '    - Lexer and Parser'].join('\n'));
@@ -258,12 +255,11 @@ describe('Template graph shaping filters: link_paths, lookup, tree & list integr
 			properties: { title: 'Visible Child' },
 		});
 		const vacuousParentTpl = [
-			'{%- query items -%}*{%- endquery -%}',
+			'{%- query items -%}{%- endquery -%}',
 			'{{ query.items | tree: \'links | link_paths: "up"\' | list: "properties.title" }}',
 		].join('');
 		const res3 = await renderRhizomeTemplate(vacuousParentTpl, {
 			runQueries: async () => ({ items: [untitledGoal, titledChild] }),
-			explainQuery: async () => '',
 		});
 		expect(res3.ok).toBe(true);
 		expect(res3.markdown).toBe(['- {...}', '  - Visible Child'].join('\n'));

@@ -1,5 +1,11 @@
-import { type Context, type Emitter, type Liquid, type Template, toValue } from 'liquidjs';
+import { type Context, type Emitter, type Liquid, Tag, type Template, toValue } from 'liquidjs';
 import type { LiquidFilterThis } from './selector-evaluator';
+
+/**
+ * Unshadowable `Symbol` key storing an opt-in `RenderTelemetryCollector` on `rootScope`
+ * (`ctx.globals`), preserved across `ctx.spawn()` during `rhizome-sample` Pass 2 renders.
+ */
+export const RENDER_TELEMETRY_SYMBOL = Symbol.for('rhizome.renderTelemetryCollector');
 
 /**
  * Maximum wall-clock execution time (`5,000 ms`) permitted for a single LiquidJS Pass 2
@@ -123,8 +129,8 @@ function stringifyChunkWithBudget(raw: unknown, maxChars: number): string {
 
 class BoundedEmitter implements Emitter {
 	public buffer = '';
+	public readonly kind: EmitterBucketKind;
 	private readonly budget: RenderOutputBudget;
-	private readonly kind: EmitterBucketKind;
 
 	constructor(budget: RenderOutputBudget, kind: EmitterBucketKind) {
 		this.budget = budget;
@@ -161,6 +167,85 @@ class BoundedEmitter implements Emitter {
 	}
 }
 
+/**
+ * Formats a canonical AST node identity key `file:begin:end` for a LiquidJS `Template` node.
+ */
+export function formatAstNodeKey(tpl: Template): string | null {
+	const tok = (tpl as { readonly token?: { begin?: unknown; end?: unknown; file?: unknown } })
+		.token;
+	if (!tok || typeof tok.begin !== 'number' || typeof tok.end !== 'number') {
+		return null;
+	}
+	const file = typeof tok.file === 'string' ? tok.file.trim() : '';
+	return `${file}:${tok.begin}:${tok.end}`;
+}
+
+function isRenderTagTemplate(tpl: Template): boolean {
+	return tpl instanceof Tag && (tpl as { readonly name?: unknown }).name === 'render';
+}
+
+/**
+ * Opt-in Pass-2 profiler attached only during `rhizome-sample` renders to record cumulative
+ * character deltas emitted per AST node onto `'root'` and `'layout'` `BoundedEmitter`s and
+ * capture the active `{% render %}` call-site chain if a runtime error is thrown inside a partial.
+ */
+export class RenderTelemetryCollector {
+	public readonly rootNodeChars = new Map<string, number>();
+	public readonly layoutStoreNodeChars = new Map<string, number>();
+	public readonly activeRenderCallStack: string[] = [];
+	public failedRenderCallStack: readonly string[] | null = null;
+
+	public recordChars(kind: 'root' | 'layout', nodeKey: string, delta: number): void {
+		if (delta <= 0) {
+			return;
+		}
+		const map = kind === 'root' ? this.rootNodeChars : this.layoutStoreNodeChars;
+		map.set(nodeKey, (map.get(nodeKey) ?? 0) + delta);
+	}
+
+	public getNodeChars(nodeKey: string): number {
+		return this.rootNodeChars.get(nodeKey) ?? this.layoutStoreNodeChars.get(nodeKey) ?? 0;
+	}
+
+	public getTemplateChars(tpl: Template): number {
+		const key = formatAstNodeKey(tpl);
+		return key !== null ? this.getNodeChars(key) : 0;
+	}
+
+	public isOnFailedRenderCallStack(nodeKey: string | null): boolean {
+		return (
+			nodeKey !== null &&
+			this.failedRenderCallStack !== null &&
+			this.failedRenderCallStack.includes(nodeKey)
+		);
+	}
+}
+
+/**
+ * Attaches `collector` onto `rootScope` behind `RENDER_TELEMETRY_SYMBOL` so `renderTemplates`
+ * observes it across root, `{% layout %}`, and `ctx.spawn()` (`{% render %}`) contexts.
+ */
+export function attachRenderTelemetryCollector(
+	rootScope: Record<PropertyKey, unknown>,
+	collector: RenderTelemetryCollector,
+): void {
+	Object.defineProperty(rootScope, RENDER_TELEMETRY_SYMBOL, {
+		value: collector,
+		enumerable: false,
+		configurable: false,
+		writable: false,
+	});
+}
+
+function readRenderTelemetryCollector(ctx: Context): RenderTelemetryCollector | null {
+	if (!ctx || typeof ctx !== 'object') {
+		return null;
+	}
+	const globals = (ctx as unknown as { globals?: Record<PropertyKey, unknown> }).globals;
+	const candidate = globals?.[RENDER_TELEMETRY_SYMBOL];
+	return candidate instanceof RenderTelemetryCollector ? candidate : null;
+}
+
 function getOrCreateOutputBudget(ctx: Context): RenderOutputBudget {
 	const keyObj: object =
 		ctx && typeof ctx === 'object' && ctx.renderLimit && typeof ctx.renderLimit === 'object'
@@ -188,6 +273,57 @@ function isLayoutStorePass(ctx: Context): boolean {
 	return getReg.call(ctx, 'blockMode') === BLOCK_MODE_STORE;
 }
 
+function* renderTemplatesInstrumented(
+	originalRenderTemplates: (
+		templates: Template[],
+		ctx: Context,
+		emitter?: Emitter,
+	) => Generator<unknown, unknown, unknown>,
+	templates: Template[],
+	ctx: Context,
+	activeEmitter: BoundedEmitter,
+	collector: RenderTelemetryCollector,
+): Generator<unknown, unknown, unknown> {
+	const kind = activeEmitter.kind === 'root' ? 'root' : 'layout';
+	for (const tpl of templates) {
+		const before = activeEmitter.buffer.length;
+		const isRender = isRenderTagTemplate(tpl);
+		const nodeKey = formatAstNodeKey(tpl);
+		if (isRender && nodeKey !== null) {
+			collector.activeRenderCallStack.push(nodeKey);
+		}
+		try {
+			yield* originalRenderTemplates([tpl], ctx, activeEmitter);
+		} catch (err) {
+			if (
+				collector.failedRenderCallStack === null &&
+				collector.activeRenderCallStack.length > 0
+			) {
+				collector.failedRenderCallStack = Object.freeze([
+					...collector.activeRenderCallStack,
+				]);
+			}
+			throw err;
+		} finally {
+			if (isRender && nodeKey !== null) {
+				collector.activeRenderCallStack.pop();
+			}
+		}
+		const delta = activeEmitter.buffer.length - before;
+		if (delta > 0 && nodeKey !== null) {
+			collector.recordChars(kind, nodeKey, delta);
+		}
+		const ctxControl = ctx as unknown as {
+			breakCalled?: boolean;
+			continueCalled?: boolean;
+		};
+		if (ctxControl.breakCalled || ctxControl.continueCalled) {
+			break;
+		}
+	}
+	return activeEmitter.buffer;
+}
+
 /**
  * Wraps `liquid.renderer.renderTemplates` idempotently so every render invocation without an
  * explicit emitter writes through a bucketed `BoundedEmitter` keyed on `ctx.renderLimit`,
@@ -196,7 +332,11 @@ function isLayoutStorePass(ctx: Context): boolean {
  * layout or captured strings when they are later emitted to root.
  *
  * @remarks
- * (design, 2026-11-20) LiquidJS `10.30.1`'s built-in `SimpleEmitter` concatenates output into
+ * (spec-change, 2026-11-24) Extended per `docs/spec/Extended Explain Plan.md` §7.4 to record
+ * opt-in per-AST-node character deltas and `{% render %}` call-site error stacks when a
+ * `RenderTelemetryCollector` is attached on `ctx.globals`, with zero overhead in production renders.
+ *
+ * SUPERSEDED (design, 2026-11-20): LiquidJS `10.30.1`'s built-in `SimpleEmitter` concatenates output into
  * `this.buffer` without charging `ctx.memoryLimit`. Separating `rootChars`, `layoutChars`, and
  * `captureChars` per `ctx.renderLimit` ensures final output is measured at its true size while
  * still capping unrendered `{% capture %}` loops and oversized `{% layout %}` bodies.
@@ -220,7 +360,22 @@ export function installBoundedTemplateRenderer(liquid: Liquid): void {
 		ctx: Context,
 		emitter?: Emitter,
 	): Generator<unknown, unknown, unknown> {
+		const collector = readRenderTelemetryCollector(ctx);
+
 		if (emitter !== undefined) {
+			if (
+				collector !== null &&
+				emitter instanceof BoundedEmitter &&
+				(emitter.kind === 'root' || emitter.kind === 'layout')
+			) {
+				return yield* renderTemplatesInstrumented(
+					originalRenderTemplates,
+					templates,
+					ctx,
+					emitter,
+					collector,
+				);
+			}
 			return yield* originalRenderTemplates(templates, ctx, emitter);
 		}
 		const keepOutputType = Boolean(
@@ -234,6 +389,15 @@ export function installBoundedTemplateRenderer(liquid: Liquid): void {
 		if (!budget.hasRootEmitter) {
 			budget.hasRootEmitter = true;
 			const rootEmitter = new BoundedEmitter(budget, 'root');
+			if (collector !== null) {
+				return yield* renderTemplatesInstrumented(
+					originalRenderTemplates,
+					templates,
+					ctx,
+					rootEmitter,
+					collector,
+				);
+			}
 			return yield* originalRenderTemplates(templates, ctx, rootEmitter);
 		}
 
@@ -245,6 +409,15 @@ export function installBoundedTemplateRenderer(liquid: Liquid): void {
 			budget.layoutChars = 0;
 			const layoutEmitter = new BoundedEmitter(budget, 'layout');
 			try {
+				if (collector !== null) {
+					return yield* renderTemplatesInstrumented(
+						originalRenderTemplates,
+						templates,
+						ctx,
+						layoutEmitter,
+						collector,
+					);
+				}
 				return yield* originalRenderTemplates(templates, ctx, layoutEmitter);
 			} finally {
 				budget.inLayoutStore = false;
@@ -281,4 +454,71 @@ export function checkFilterOutputSize(chars: number): void {
 	if (chars > MAX_TEMPLATE_OUTPUT_CHARS) {
 		throw createTemplateOutputLimitError();
 	}
+}
+
+/**
+ * Estimates serialized YAML frontmatter character length for a plain staged `frontmatter` object
+ * (including `---\n...\n---\n` delimiters when non-empty), throwing `createTemplateOutputLimitError()`
+ * immediately if accumulated characters exceed `maxChars`.
+ */
+export function measureSerializedFrontmatterCharsBounded(
+	value: unknown,
+	maxChars: number = MAX_TEMPLATE_OUTPUT_CHARS,
+): number {
+	let total = 0;
+
+	const addChars = (delta: number): void => {
+		total += delta;
+		if (total > maxChars) {
+			throw createTemplateOutputLimitError();
+		}
+	};
+
+	const walk = (node: unknown, depth: number): void => {
+		if (node === null || node === undefined) {
+			addChars(4);
+			return;
+		}
+		if (typeof node === 'string') {
+			addChars(node.length + 2);
+			return;
+		}
+		if (typeof node === 'number' || typeof node === 'boolean') {
+			addChars(String(node).length);
+			return;
+		}
+		if (Array.isArray(node)) {
+			if (node.length === 0) {
+				addChars(2);
+				return;
+			}
+			for (let i = 0; i < node.length; i++) {
+				addChars(depth * 2 + 3);
+				walk(node[i], depth + 1);
+			}
+			return;
+		}
+		if (typeof node === 'object') {
+			const keys = Object.keys(node);
+			if (keys.length === 0) {
+				addChars(2);
+				return;
+			}
+			if (depth === 0) {
+				addChars(8); // leading & trailing ---\n
+			}
+			for (const key of keys) {
+				addChars(depth * 2 + key.length + 3);
+				walk((node as Record<string, unknown>)[key], depth + 1);
+			}
+		}
+	};
+
+	if (value && typeof value === 'object' && !Array.isArray(value)) {
+		if (Object.keys(value).length === 0) {
+			return 0;
+		}
+	}
+	walk(value, 0);
+	return total;
 }

@@ -257,21 +257,21 @@ describe('RhizomePlugin lifecycle (smoke)', () => {
 		expect(emptyResult).toEqual({});
 	});
 
-	it('explainQuery() generates a Markdown explanation plan without scanning vault notes', async () => {
+	it('registers both rhizome and rhizome-sample codeblock processors on onload and retires plugin.explainQuery()', async () => {
 		const plugin = createPlugin();
 		await plugin.onload();
 
-		const explainMd = await plugin.explainQuery('#project [status: active]', {
-			timeZone: 'UTC',
-			referenceTimeMs: 1700000000000,
-		});
-		expect(explainMd).toContain('# Query Explain Plan');
-		expect(explainMd).toContain('## Logic Breakdown');
-		expect(explainMd).toContain('## Diagnostics');
-		expect(explainMd).toContain('## Concept Reference');
-
-		const defaultExplainMd = await plugin.explainQuery();
-		expect(defaultExplainMd).toContain('# Query Explain Plan');
+		expect('explainQuery' in plugin).toBe(false);
+		const processors = (
+			plugin as unknown as {
+				codeBlockProcessors: Map<
+					string,
+					(source: string, el: HTMLElement, ctx: unknown) => Promise<void>
+				>;
+			}
+		).codeBlockProcessors;
+		expect(processors.has('rhizome')).toBe(true);
+		expect(processors.has('rhizome-sample')).toBe(true);
 	});
 
 	it('debounces reactive query nudges by 500 ms on .md metadataCache.changed, metadataCache.deleted, and vault.rename events', async () => {

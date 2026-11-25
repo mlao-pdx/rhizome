@@ -180,12 +180,13 @@ group_by: ... | sort_by: ...`), reserving `{% for %}` loops strictly for
 
 ### 15. Explain Yourself
 
-- **Self-diagnosing by default (`explain` and inline diagnostics):**
+- **Self-diagnosing by default (` ```rhizome-sample ` workbench and inline diagnostics):**
   - When a user asks _"Why didn't my note show up?"_ or _"Why did this sort
-    strangely?"_, the language itself should answer the question—via
-    `{% query name explain %}` plans and accessible `diagnostics` collections
-    on the query payload, rather than forcing the user into the developer
-    console.
+    strangely?"_, the language itself should answer the question—by switching a
+    codeblock fence to ` ```rhizome-sample ` to inspect a bounded,
+    referentially intact sample preview alongside per-query explain callouts, a
+    static template execution outline, and live vault property coercion
+    diagnostics, rather than forcing the user into the developer console.
 
 ### 16. Render Never Writes
 

@@ -8,9 +8,9 @@ import {
 	scanNoteBody,
 } from '../../src/core/scanner';
 import {
+	analyzeQueryExplain,
 	compileQuery,
 	evaluateDoc,
-	explainQuery,
 	initEngineConfig,
 	normalizeObsidianMetadata,
 } from '../../src/core/search';
@@ -352,7 +352,7 @@ describe('extractTaskFromLine & scanNoteBody', () => {
 		expect((tplCtx['this'] as { tasks: unknown[] }).tasks).toEqual(doc.tasks);
 
 		// Explain plan for tasks: scope
-		const explained = explainQuery(
+		const explained = analyzeQueryExplain(
 			'tasks:"Write specification"',
 			{
 				timeZone: 'UTC',
@@ -360,8 +360,8 @@ describe('extractTaskFromLine & scanNoteBody', () => {
 			},
 			1700000000000,
 		);
-		expect(explained).toContain('contains `Write specification`');
-		expect(explained).toContain('Tasks Scope (`tasks:` / `task:`)');
+		expect(explained.astBullets.join('\n')).toContain('contains `Write specification`');
+		expect(explained.astBullets.join('\n')).toContain('`tasks`');
 
 		// Document digest changes when tasks change
 		const docWithoutTasks = normalizeObsidianMetadata(

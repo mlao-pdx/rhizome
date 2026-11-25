@@ -5,12 +5,13 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('obsidian', () => import('../support/mock-obsidian-app'));
 
 import {
-	explainVaultQuery,
+	loadVaultPropertyTypes,
 	parseObsidianTypesJson,
 	runVaultQuery,
 	type VaultQueryOptions,
 } from '../../src/adapters/vault-query-runner';
 import {
+	analyzeQueryExplain,
 	FORBIDDEN_KEYS,
 	initEngineConfig,
 	isValidPropertyType,
@@ -654,18 +655,26 @@ describe('Vault Query Runner Property Invariants', () => {
 					const { app: appRun } = makeSpyMockApp({ notes, typesJson });
 					const { app: appExplain } = makeSpyMockApp({ notes, typesJson });
 
-					const [runRes, explainMd] = await Promise.all([
+					const [runRes, loadedTypes] = await Promise.all([
 						runVaultQuery(appRun, queryMap, options),
-						explainVaultQuery(appExplain, singleQuery, options),
+						loadVaultPropertyTypes(appExplain),
 					]);
+					const explainRes = analyzeQueryExplain(
+						singleQuery,
+						{
+							timeZone: options?.timeZone ?? 'UTC',
+							propertyTypes: { ...loadedTypes, ...options?.propertyTypes },
+						},
+						options?.referenceTimeMs ?? PINNED_REF_MS,
+					);
 
 					for (const forbidden of FORBIDDEN_KEYS) {
 						expect(Object.prototype.hasOwnProperty.call(runRes, forbidden)).toBe(false);
 					}
 
 					expect(JSON.parse(JSON.stringify(runRes))).toEqual(runRes);
-					expect(typeof explainMd).toBe('string');
-					expect(explainMd.length).toBeGreaterThan(0);
+					expect(Array.isArray(explainRes.astBullets)).toBe(true);
+					expect(explainRes.astBullets.join('\n')).not.toContain('[^');
 				},
 			),
 		);

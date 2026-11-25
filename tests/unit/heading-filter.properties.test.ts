@@ -132,7 +132,6 @@ describe('Heading Filter & Tag Property Invariants', () => {
 
 					const res = await renderRhizomeTemplate(template, {
 						runQueries: async () => ({}),
-						explainQuery: async () => '',
 						runtimeContext: { headingLevel: initialLevel },
 					});
 

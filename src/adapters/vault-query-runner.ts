@@ -4,7 +4,6 @@ import {
 	analyzeQueryDependencyDag,
 	compileQuery,
 	createGraphEvaluationContext,
-	explainQuery,
 	evaluateDoc,
 	FORBIDDEN_KEYS,
 	getExecutionPlan,
@@ -26,7 +25,6 @@ import {
 	normalizeObsidianMetadata,
 	type PreparedQuery,
 	type PropertyTypeRegistry,
-	type QueryExplainCutoff,
 	type ResolvedEngineConfig,
 	type ResolveLinkPathFn,
 	VaultGraphSnapshot,
@@ -55,10 +53,10 @@ import {
 	QueriedPropertyDiagnosticsAggregator,
 } from './vault-query-logging';
 
-export { parseObsidianTypesJson };
+export { loadVaultPropertyTypes, parseObsidianTypesJson };
 
 /**
- * Options for running or explaining a vault query.
+ * Options for running a vault query.
  */
 export interface VaultQueryOptions {
 	/** Optional IANA timezone override (defaults to system timezone, falling back to 'UTC'). */
@@ -67,13 +65,6 @@ export interface VaultQueryOptions {
 	readonly propertyTypes?: PropertyTypeRegistry | undefined;
 	/** Optional reference timestamp in UTC epoch ms for `@` relative date anchors (defaults to `Date.now()`). */
 	readonly referenceTimeMs?: number | undefined;
-	/** Optional alternate level-1 Markdown heading for `explainQuery` / `explainVaultQuery` (defaults to `'Query Explain Plan'`). */
-	readonly heading?: string | undefined;
-	/**
-	 * Optional Pass 2 record cutoff metadata displayed in the `# Query Explain Plan` header
-	 * when `explainVaultQuery` is invoked from a `{% query %}` template block.
-	 */
-	readonly cutoff?: QueryExplainCutoff | undefined;
 	/** Optional AbortSignal to unregister a reactive `onUpdate` callback when the caller unloads. */
 	readonly signal?: AbortSignal | undefined;
 	/**
@@ -1098,56 +1089,4 @@ export async function runVaultQuery(
 	});
 
 	return results;
-}
-
-/**
- * Generates a progressive-shrinking Markdown explanation plan with inline footnotes and a
- * `## Concept Reference` section for a search query using the vault's `types.json` registry
- * without scanning or normalizing any vault notes.
- */
-export async function explainVaultQuery(
-	app: App,
-	input: string = '',
-	options?: VaultQueryOptions,
-	logger?: LoggerPort,
-): Promise<string> {
-	const startedAt = Date.now();
-	const timeZone = options?.timeZone !== undefined ? options.timeZone : resolveDefaultTimeZone();
-	const referenceTimeMs = options?.referenceTimeMs ?? Date.now();
-	const vaultTypes = await loadVaultPropertyTypes(app, logger);
-	const mergedTypes = mergePropertyTypes(vaultTypes, options?.propertyTypes);
-
-	let hostDoc: NormalizedDocument | null | undefined = options?.hostDoc;
-	if (hostDoc === undefined && options?.sourcePath !== undefined) {
-		const cfgRes = initEngineConfig({ timeZone, propertyTypes: mergedTypes });
-		if (cfgRes.ok) {
-			hostDoc = resolveHostDocument(
-				app,
-				options.sourcePath,
-				cfgRes.config,
-				undefined,
-				logger,
-				options.backlinks,
-				options.isIgnoredFile,
-				options.cache,
-			);
-		}
-	}
-
-	const markdown = explainQuery(
-		input,
-		{ timeZone, propertyTypes: mergedTypes },
-		referenceTimeMs,
-		options?.heading,
-		hostDoc,
-		options?.cutoff,
-	);
-
-	logger?.log('debug', 'Generated query explanation', {
-		source: 'query.explain',
-		query: markSensitive(input),
-		durationMs: Math.max(0, Date.now() - startedAt),
-	});
-
-	return markdown;
 }

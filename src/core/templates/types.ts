@@ -1,5 +1,6 @@
 import type {
 	BacklinkRef,
+	DiagnosticCode,
 	NormalizedAliasLocation,
 	NormalizedBlock,
 	NormalizedDocument,
@@ -9,7 +10,6 @@ import type {
 	NormalizedPropertyLocation,
 	NormalizedTagLocation,
 	NormalizedTask,
-	QueryExplainCutoff,
 	ResolvedEngineConfig,
 	SourceSpan,
 } from '@core/search';
@@ -94,13 +94,12 @@ export interface TemplateLazyQueryOptions {
 }
 
 /**
- * Metadata and source spans for a single `{% query <name> [explain] [cutoff: <int>] %} ... {% endquery %}`
+ * Metadata and source spans for a single `{% query <name> [cutoff: <int>] %} ... {% endquery %}`
  * block extracted during Pass 1 of template compilation.
  */
 export interface ExtractedQueryBlock {
 	readonly name: string;
 	readonly query: string;
-	readonly explain: boolean;
 	readonly cutoff: number;
 	readonly explicitCutoff: boolean;
 	readonly headerSpan: SourceSpan;
@@ -126,11 +125,11 @@ export type TemplateDiagnosticCode =
 	| 'INLINE_QUERY_SCOPE_UNAVAILABLE';
 
 /**
- * Pure POJO diagnostic describing a template-level syntax, argument, duplicate-name,
- * or render failure. Uses `null` (never `undefined`) for optional fields.
+ * Pure POJO diagnostic describing a template-level or query-level syntax, argument, duplicate-name,
+ * validation, or render failure. Uses `null` (never `undefined`) for optional fields.
  */
 export interface TemplateDiagnostic {
-	readonly code: TemplateDiagnosticCode;
+	readonly code: TemplateDiagnosticCode | DiagnosticCode;
 	readonly severity: 'error' | 'warning' | 'hint';
 	readonly issue: string;
 	readonly hint: string | null;
@@ -189,21 +188,14 @@ export interface TemplateRuntimeContext {
 }
 
 /**
- * Host callbacks injected into `renderRhizomeTemplate` to execute batched vault queries,
- * format inline query explain plans, and read vault-scoped template partials/layouts
- * without coupling `@core/templates` to Obsidian.
+ * Host callbacks injected into `renderRhizomeTemplate` to execute batched vault queries
+ * and read vault-scoped template partials/layouts without coupling `@core/templates` to Obsidian.
  */
 export interface TemplateExecutionCallbacks {
 	runQueries(
 		queries: Readonly<Record<string, string>>,
 		lazyOptions?: TemplateLazyQueryOptions,
 	): Promise<Record<string, unknown[]>>;
-	explainQuery(
-		query: string,
-		heading: string,
-		cutoff?: QueryExplainCutoff,
-		lazyOptions?: TemplateLazyQueryOptions,
-	): Promise<string>;
 	resolveHost?: (sourcePath: string) => Promise<object | null> | object | null;
 	readTemplateFile?: (vaultRelativePath: string) => Promise<string | null>;
 	folders?: TemplateFolderConfig;

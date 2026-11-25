@@ -146,7 +146,6 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 				'Intro text{{ "Section Title" | heading }}Body paragraph',
 				{
 					runQueries: async () => ({}),
-					explainQuery: async () => '',
 					runtimeContext: { headingLevel: 2 },
 				},
 			);
@@ -166,7 +165,6 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 				].join(''),
 				{
 					runQueries: async () => ({}),
-					explainQuery: async () => '',
 					runtimeContext: { headingLevel: 2 },
 				},
 			);
@@ -426,7 +424,6 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 
 			const result = await renderRhizomeTemplate(template, {
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 				runtimeContext: { headingLevel: 6 },
 			});
 
@@ -475,7 +472,6 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 						items: [{ file: { basename: 'Leaf Item' } }],
 					};
 				},
-				explainQuery: async () => '',
 				runtimeContext: { headingLevel: 1 },
 			});
 
@@ -499,7 +495,6 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 		it('emits Pass 1 diagnostics for invalid {% heading %} arguments, unclosed blocks, and unexpected {% endheading %} arguments', async () => {
 			const missingArg = await renderRhizomeTemplate('{% heading %}text{% endheading %}', {
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 			});
 			expect(missingArg.ok).toBe(false);
 			expect(missingArg.diagnostics[0]?.code).toBe('INVALID_HEADING_TAG_ARGS');
@@ -508,7 +503,6 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 				'{% heading 7 %}text{% endheading %}',
 				{
 					runQueries: async () => ({}),
-					explainQuery: async () => '',
 				},
 			);
 			expect(invalidLevel.ok).toBe(false);
@@ -518,7 +512,6 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 				'{% heading 2 extra %}text{% endheading %}',
 				{
 					runQueries: async () => ({}),
-					explainQuery: async () => '',
 				},
 			);
 			expect(extraArgs.ok).toBe(false);
@@ -528,7 +521,6 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 				'{% heading demote %}{{ "A" | heading }}',
 				{
 					runQueries: async () => ({}),
-					explainQuery: async () => '',
 				},
 			);
 			expect(unclosed.ok).toBe(false);
@@ -538,7 +530,6 @@ describe('Liquid heading filter and {% heading %} block tag', () => {
 				'{% heading 2 %}text{% endheading extra %}',
 				{
 					runQueries: async () => ({}),
-					explainQuery: async () => '',
 				},
 			);
 			expect(endWithArgs.ok).toBe(false);

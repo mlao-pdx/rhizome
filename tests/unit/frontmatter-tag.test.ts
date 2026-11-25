@@ -26,7 +26,6 @@ describe('{% frontmatter %} tag', () => {
 
 		const res = await renderRhizomeTemplate(source, {
 			runQueries: async () => ({}),
-			explainQuery: async () => '',
 			runtimeContext: {
 				trigger: 'newNote',
 				referenceTimeMs: PINNED_MS,
@@ -73,7 +72,6 @@ describe('{% frontmatter %} tag', () => {
 
 		const res = await renderRhizomeTemplate(source, {
 			runQueries: async () => ({}),
-			explainQuery: async () => '',
 			readTemplateFile: async (p) => files[p] ?? null,
 			runtimeContext: {
 				trigger: 'newNote',
@@ -105,7 +103,6 @@ describe('{% frontmatter %} tag', () => {
 
 		const res = await renderRhizomeTemplate(source, {
 			runQueries: async () => ({}),
-			explainQuery: async () => '',
 			runtimeContext: {
 				trigger: 'newNote',
 				referenceTimeMs: PINNED_MS,
@@ -133,7 +130,6 @@ describe('{% frontmatter %} tag', () => {
 		for (const trigger of ['atCursor', 'dynamicCodeblock'] as const) {
 			const res = await renderRhizomeTemplate(source, {
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 				resolveHost: async () => hostMatch,
 				runtimeContext: {
 					sourcePath: 'Notes/Host.md',
@@ -162,7 +158,6 @@ describe('{% frontmatter %} tag', () => {
 		for (const tpl of badTemplates) {
 			const res = await renderRhizomeTemplate(tpl, {
 				runQueries: async () => ({}),
-				explainQuery: async () => '',
 				runtimeContext: { trigger: 'newNote', timeZone: 'UTC' },
 			});
 			expect(res.ok, `Expected '${tpl}' to fail`).toBe(false);

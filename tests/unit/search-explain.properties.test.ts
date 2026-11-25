@@ -1,6 +1,7 @@
 import * as fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
-import { explainQuery, initEngineConfig } from '../../src/core/search';
+import { analyzeQueryExplain, initEngineConfig } from '../../src/core/search';
+import { buildConceptsReferenceCallout, buildQueryExplainCallouts } from '../../src/core/templates';
 import { assertProperty } from '../support/assertProperty';
 import { printableExecutableAstArb } from '../support/search-arbitraries';
 import { printAST } from '../support/search-printer';
@@ -25,25 +26,70 @@ function createTestConfig() {
 	return res.config;
 }
 
-describe('explainQuery property invariants', () => {
+const DUMMY_SPAN = Object.freeze({ startOffset: 0, endOffset: 1, startLine: 1, startColumn: 1 });
+
+describe('analyzeQueryExplain & Query Explain Callout property invariants', () => {
 	const config = createTestConfig();
 
-	it('always produces all required sections, spaced footnote definitions, and balanced code fences for any printable executable AST', () =>
+	it('produces footnote-free bullets, balanced code fences, and at most one Mermaid diagram per codeblock for any printable executable AST', () =>
 		assertProperty(
-			'core/search/explain-plan__printable-executable-ast-sections-and-fences',
+			'core/search/explain-plan__printable-executable-ast-footnote-free-and-fences',
 			fc.property(printableExecutableAstArb(config, PINNED_REF_MS), (ast) => {
 				const query = printAST(ast);
-				const md = explainQuery(query, config, PINNED_REF_MS);
+				const analysis = analyzeQueryExplain(query, config, PINNED_REF_MS);
 
-				expect(md).toContain('# Query Explain Plan');
-				expect(md).toContain('## Logic Breakdown');
-				expect(md).toContain('## Diagnostics');
-				expect(md).toContain('## Concept Reference');
-				expect(md).toContain('**Status**: *Executable* with 0 errors');
-				expect(md).toContain('```mermaid\ngantt');
-				expect(md).not.toContain('flowchart TD');
+				expect(analysis.executable).toBe(true);
+				expect(analysis.errorCount).toBe(0);
+				expect(analysis.astBullets.length).toBeGreaterThan(0);
 
-				const fenceCount = (md.match(/^```/gm) ?? []).length;
+				const calloutsRes = buildQueryExplainCallouts({
+					queries: [
+						{
+							name: 'q1',
+							query,
+							cutoff: 5_000,
+							explicitCutoff: false,
+							headerSpan: DUMMY_SPAN,
+							bodySpan: DUMMY_SPAN,
+							fullSpan: DUMMY_SPAN,
+							file: null,
+						},
+					],
+					resolvedConfig: config,
+					referenceTimeMs: PINNED_REF_MS,
+					isNewNoteMode: false,
+					metricsByName: new Map([
+						[
+							'q1',
+							{
+								matchedCount: 5,
+								sampledCount: 5,
+								baseStrideCount: 5,
+								referentialTopUpCount: 0,
+								downsampled: false,
+								effectiveCutoff: 5_000,
+								cutoffBound: false,
+								exceedsProductionCutoff: false,
+							},
+						],
+					]),
+				});
+				const conceptsMd = buildConceptsReferenceCallout(
+					calloutsRes.triggeredConcepts,
+					PINNED_REF_MS,
+					config.timeZone,
+				);
+				const fullMd = [...calloutsRes.callouts, conceptsMd].filter(Boolean).join('\n\n');
+
+				// Zero footnote syntax anywhere in the rendered callouts
+				expect(fullMd).not.toMatch(/\[\^\d+\]/);
+
+				// Mermaid Gantt appears at most once across the entire stack
+				const mermaidMatches = fullMd.match(/```mermaid/g) ?? [];
+				expect(mermaidMatches.length).toBeLessThanOrEqual(1);
+
+				// Balanced code fences inside callout lines
+				const fenceCount = (fullMd.match(/^>\s*```/gm) ?? []).length;
 				expect(fenceCount % 2).toBe(0);
 			}),
 		));
@@ -66,16 +112,13 @@ describe('explainQuery property invariants', () => {
 					fc.constant(Number.POSITIVE_INFINITY),
 				),
 				(rawQuery, tz, refMs) => {
-					const md = explainQuery(
+					const analysis = analyzeQueryExplain(
 						rawQuery,
 						{ timeZone: tz, propertyTypes: { priority: 'number' } },
 						refMs,
 					);
-					expect(typeof md).toBe('string');
-					expect(md).toContain('# Query Explain Plan');
-					expect(md).toContain('## Logic Breakdown');
-					expect(md).toContain('## Diagnostics');
-					expect(md).toContain('## Concept Reference');
+					expect(typeof analysis.executable).toBe('boolean');
+					expect(analysis.astBullets.join('\n')).not.toMatch(/\[\^\d+\]/);
 				},
 			),
 		));

@@ -2,15 +2,14 @@ import {
 	FORBIDDEN_KEYS,
 	LIQUID_BLOCK_COMMENT_PATTERN,
 	LIQUID_INLINE_COMMENT_PATTERN,
-	type QueryExplainCutoff,
 	type SourceSpan,
 } from '@core/search';
 import {
 	type Context,
-	type Emitter,
 	type Liquid,
 	Tag,
 	type TagToken,
+	type Template,
 	type TopLevelToken,
 	TypeGuards,
 } from 'liquidjs';
@@ -19,7 +18,7 @@ import { readTemplateTargetState } from './template-target-state';
 import type { ExtractedQueryBlock, TemplateDiagnostic, TemplateLazyQueryOptions } from './types';
 
 /**
- * Valid `<name>` identifier pattern for `{% query <name> [explain] [cutoff: <int>] %}`.
+ * Valid `<name>` identifier pattern for `{% query <name> [cutoff: <int>] %}`.
  */
 export const VALID_QUERY_NAME_RE = /^[a-zA-Z_][a-zA-Z0-9_-]*$/;
 
@@ -74,7 +73,6 @@ export function parseQueryTagArgs(
 	| {
 			readonly ok: true;
 			readonly name: string;
-			readonly explain: boolean;
 			readonly cutoff: number;
 			readonly explicitCutoff: boolean;
 	  }
@@ -98,7 +96,7 @@ export function parseQueryTagArgs(
 	if (trimmed.length === 0) {
 		return fail(
 			"Missing query variable name in '{% query %}' tag.",
-			"Provide a variable name after 'query', e.g., '{% query tasks %}', '{% query tasks explain %}', or '{% query tasks cutoff: 500 %}'.",
+			"Provide a variable name after 'query', e.g., '{% query tasks %}' or '{% query tasks cutoff: 500 %}'.",
 		);
 	}
 
@@ -115,7 +113,7 @@ export function parseQueryTagArgs(
 	if (rawName === 'explain') {
 		return fail(
 			"Reserved keyword 'explain' cannot be used as a query variable name.",
-			"Place the variable name before 'explain', e.g., '{% query tasks explain %}'.",
+			"Choose a different variable name (e.g., '{% query tasks %}') and change the codeblock fence to '```rhizome-sample' to inspect query and template explain plans.",
 		);
 	}
 
@@ -140,7 +138,6 @@ export function parseQueryTagArgs(
 		);
 	}
 
-	let explain = false;
 	let cutoff = DEFAULT_QUERY_CUTOFF;
 	let explicitCutoff = false;
 	let i = 1;
@@ -149,15 +146,10 @@ export function parseQueryTagArgs(
 		const token = parts[i]!;
 
 		if (token === 'explain') {
-			if (explain) {
-				return fail(
-					`Duplicate 'explain' option in '{% query ${trimmed} %}' tag.`,
-					`Specify 'explain' at most once, e.g., '{% query ${rawName} explain %}'.`,
-				);
-			}
-			explain = true;
-			i++;
-			continue;
+			return fail(
+				`The inline 'explain' option in '{% query ${trimmed} %}' is no longer supported.`,
+				`Remove 'explain' (write '{% query ${rawName}${explicitCutoff ? ` cutoff: ${cutoff}` : ''} %}') and change the codeblock fence from '\`\`\`rhizome' to '\`\`\`rhizome-sample' to inspect query and template explain plans.`,
+			);
 		}
 
 		if (token === 'cutoff') {
@@ -226,11 +218,11 @@ export function parseQueryTagArgs(
 
 		return fail(
 			`Unrecognized option '${token}' in '{% query ${trimmed} %}' tag.`,
-			`Supported options after '${rawName}' are 'explain' and 'cutoff: <int>', e.g., '{% query ${rawName} explain cutoff: 500 %}'; put filter expressions inside the tag body before '{% endquery %}'.`,
+			`The only supported option after '${rawName}' is 'cutoff: <int>', e.g., '{% query ${rawName} cutoff: 500 %}'; put filter expressions inside the tag body before '{% endquery %}'.`,
 		);
 	}
 
-	return { ok: true, name: rawName, explain, cutoff, explicitCutoff };
+	return { ok: true, name: rawName, cutoff, explicitCutoff };
 }
 
 /**
@@ -433,15 +425,24 @@ export interface SeenQueryDefinition {
 	readonly file: string | null;
 }
 
+const QUERY_REF_IN_TEXT_RE = /@query\.([a-zA-Z_][a-zA-Z0-9_-]*)/g;
+
+/**
+ * Parsed external partial or layout AST retained during Pass 1 for synchronous explain analysis.
+ */
+export interface VisitedTemplateFileEntry {
+	readonly templates: Template[];
+	readonly resolvedFile: string;
+}
+
 /**
  * Mutable parse/render state shared across `{% query %}` tags within a single
  * `renderRhizomeTemplate` or `analyzeRhizomeCodeBlock` invocation.
  */
-const QUERY_REF_IN_TEXT_RE = /@query\.([a-zA-Z_][a-zA-Z0-9_-]*)/g;
-
 export interface QueryTagEnvironment {
 	readonly seenNames: Map<string, SeenQueryDefinition>;
 	readonly fileSources: Map<string, string>;
+	readonly visitedFiles: Map<string, VisitedTemplateFileEntry>;
 	readonly queries: ExtractedQueryBlock[];
 	readonly diagnostics: TemplateDiagnostic[];
 	readonly uncutQueryPaths: Map<string, readonly string[]>;
@@ -461,14 +462,6 @@ export interface QueryTagEnvironment {
 		| null;
 	pass1Complete: boolean;
 	payload: Readonly<Record<string, unknown[]>>;
-	explainQuery:
-		| ((
-				query: string,
-				heading: string,
-				cutoff?: QueryExplainCutoff,
-				lazyOptions?: TemplateLazyQueryOptions,
-		  ) => Promise<string>)
-		| null;
 }
 
 /**
@@ -478,6 +471,7 @@ export function createQueryTagEnvironment(): QueryTagEnvironment {
 	return {
 		seenNames: new Map<string, SeenQueryDefinition>(),
 		fileSources: new Map<string, string>(),
+		visitedFiles: new Map<string, VisitedTemplateFileEntry>(),
 		queries: [],
 		diagnostics: [],
 		uncutQueryPaths: new Map<string, readonly string[]>(),
@@ -486,7 +480,6 @@ export function createQueryTagEnvironment(): QueryTagEnvironment {
 		runLazyQuery: null,
 		pass1Complete: false,
 		payload: Object.freeze({}),
-		explainQuery: null,
 	};
 }
 
@@ -541,18 +534,15 @@ export interface QueryTagBinding {
 }
 
 /**
- * Registers the `{% query <name> [explain] [cutoff: <int>] %} ... {% endquery %}` block tag and disables
+ * Registers the `{% query <name> [cutoff: <int>] %} ... {% endquery %}` block tag and disables
  * the deprecated `{% include %}` tag on `liquid`. The binding provider is invoked once per
  * tag construction, allowing `liquid` to be reused across parse cycles.
  */
 export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBinding): void {
 	class QueryBlockTag extends Tag {
 		private readonly env: QueryTagEnvironment;
-		private readonly queryName: string | null;
-		private readonly queryText: string;
-		private readonly explainFlag: boolean;
-		private readonly cutoff: number;
-		private readonly explicitCutoff: boolean;
+		public readonly queryName: string | null;
+		public readonly queryText: string;
 
 		public constructor(
 			tagToken: TagToken,
@@ -608,9 +598,6 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 			if (!endTagToken) {
 				this.queryName = null;
 				this.queryText = '';
-				this.explainFlag = false;
-				this.cutoff = DEFAULT_QUERY_CUTOFF;
-				this.explicitCutoff = false;
 				env.diagnostics.push(
 					unclosedQueryDiagnostic(tagToken.getText(), headerSpan, externalFile),
 				);
@@ -638,19 +625,13 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 			if (!parsedArgs.ok) {
 				this.queryName = null;
 				this.queryText = rawQuery;
-				this.explainFlag = false;
-				this.cutoff = DEFAULT_QUERY_CUTOFF;
-				this.explicitCutoff = false;
 				env.diagnostics.push(parsedArgs.diagnostic);
 				return;
 			}
 
-			const { name, explain, cutoff, explicitCutoff } = parsedArgs;
+			const { name, cutoff, explicitCutoff } = parsedArgs;
 			this.queryName = name;
 			this.queryText = rawQuery;
-			this.explainFlag = explain;
-			this.cutoff = cutoff;
-			this.explicitCutoff = explicitCutoff;
 
 			const previousDef = env.seenNames.get(name);
 			if (previousDef) {
@@ -678,7 +659,6 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 				Object.freeze({
 					name,
 					query: rawQuery,
-					explain,
 					cutoff,
 					explicitCutoff,
 					headerSpan,
@@ -689,13 +669,12 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 			);
 		}
 
-		public async render(ctx: Context, emitter: Emitter): Promise<void> {
+		public async render(ctx: Context): Promise<void> {
 			const env = this.env;
 			if (this.queryName === null) {
 				return;
 			}
 
-			let lazyOptions: TemplateLazyQueryOptions | undefined;
 			if (env.lazyQueryNames?.has(this.queryName) && env.runLazyQuery) {
 				const state = readTemplateTargetState(ctx);
 				const priorQueryPaths: Record<string, readonly string[]> = {};
@@ -717,7 +696,7 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 						priorQueryPaths[refName] = Object.freeze([]);
 					}
 				}
-				lazyOptions = {
+				const lazyOptions: TemplateLazyQueryOptions = {
 					hostDoc: state?.virtualDoc ?? null,
 					priorQueryPaths,
 				};
@@ -741,29 +720,13 @@ export function registerQueryTag(liquid: Liquid, getBinding: () => QueryTagBindi
 						Object.create(null) as Record<string, unknown[]>,
 						env.payload,
 					);
-					delete nextPayload[this.queryName];
+					const emptyFrozenRows: unknown[] = Object.freeze([]) as unknown as unknown[];
+					nextPayload[this.queryName] = emptyFrozenRows;
 					const frozenPayload = Object.freeze(nextPayload);
 					env.payload = frozenPayload;
 					if (state !== null) {
 						state.rootRecord['query'] = frozenPayload;
 					}
-				}
-			}
-
-			if (!env.explainQuery) {
-				return;
-			}
-			const hasPayloadKey = Object.prototype.hasOwnProperty.call(env.payload, this.queryName);
-			if (this.explainFlag || !hasPayloadKey) {
-				const markdown = await env.explainQuery(
-					this.queryText,
-					`Query Explain Plan: ${this.queryName}`,
-					Object.freeze({ value: this.cutoff, explicit: this.explicitCutoff }),
-					lazyOptions,
-				);
-				const trimmed = markdown.trim();
-				if (trimmed.length > 0) {
-					emitter.write(`\n\n${trimmed}\n\n`);
 				}
 			}
 		}

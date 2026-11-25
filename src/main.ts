@@ -22,7 +22,6 @@ import {
 	openInsertFromTemplatePicker,
 } from './adapters/template-runner';
 import {
-	explainVaultQuery,
 	runVaultQuery,
 	type VaultQueryCallback,
 	type VaultQueryOptions,
@@ -391,7 +390,10 @@ export default class RhizomePlugin extends Plugin {
 		this.addSettingTab(new RhizomeSettingTab(this.app, this));
 
 		this.registerMarkdownCodeBlockProcessor('rhizome', (source, el, ctx) =>
-			processRhizomeCodeBlock(source, el, ctx, this),
+			processRhizomeCodeBlock(source, el, ctx, this, 'rhizome'),
+		);
+		this.registerMarkdownCodeBlockProcessor('rhizome-sample', (source, el, ctx) =>
+			processRhizomeCodeBlock(source, el, ctx, this, 'rhizome-sample'),
 		);
 		this.registerMarkdownPostProcessor((el, ctx) => processRhizomeInlineSpans(el, ctx, this));
 		this.registerEditorSuggest(new RhizomeInlineSuggest(this.app));
@@ -539,19 +541,5 @@ export default class RhizomePlugin extends Plugin {
 			this.activeQueryRoster?.register(queries, options, result, onUpdate);
 		}
 		return result;
-	}
-
-	async explainQuery(input: string = '', options?: VaultQueryOptions): Promise<string> {
-		return explainVaultQuery(
-			this.app,
-			input,
-			{
-				...options,
-				backlinks: this.backlinkIndex.snapshot(),
-				cache: this.documentCache,
-				isIgnoredFile: (file) => this.isIgnoredNote(file),
-			},
-			this.loggerAdapter,
-		);
 	}
 }

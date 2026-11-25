@@ -100,7 +100,6 @@ export interface CodeBlockAnalysis {
 const LIQUID_KEYWORDS: ReadonlySet<string> = new Set([
 	'query',
 	'endquery',
-	'explain',
 	'cutoff',
 	'heading',
 	'endheading',
@@ -554,7 +553,6 @@ export function analyzeRhizomeCodeBlock(
 
 		const parsedArgs = parseQueryTagArgs(scanned.rawArgs, headerSpan);
 		const name = parsedArgs.ok ? parsedArgs.name : '__invalid__';
-		const explain = parsedArgs.ok ? parsedArgs.explain : false;
 		const cutoff = parsedArgs.ok ? parsedArgs.cutoff : DEFAULT_QUERY_CUTOFF;
 		const explicitCutoff = parsedArgs.ok ? parsedArgs.explicitCutoff : false;
 
@@ -578,7 +576,6 @@ export function analyzeRhizomeCodeBlock(
 			Object.freeze({
 				name,
 				query: rawQuery,
-				explain,
 				cutoff,
 				explicitCutoff,
 				headerSpan,

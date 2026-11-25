@@ -2,20 +2,22 @@ import type { Text } from '@codemirror/state';
 import {
 	createFenceScanState,
 	findYamlFrontmatterEndLine,
+	type RhizomeCodeBlockFlavor,
 	stepFenceScanLine,
 } from '@core/templates/template-blocks';
 
 /**
- * Location and content slice of a fenced `rhizome` codeblock in a CodeMirror document.
+ * Location, flavor, and content slice of a fenced `rhizome` or `rhizome-sample` codeblock in a CodeMirror document.
  */
 export interface FencedRhizomeBlock {
+	readonly flavor: RhizomeCodeBlockFlavor;
 	readonly bodyFrom: number;
 	readonly bodyTo: number;
 	readonly source: string;
 }
 
 /**
- * Finds fenced `rhizome` codeblocks within `doc` that intersect `[windowFrom, windowTo]`.
+ * Finds fenced `rhizome` and `rhizome-sample` codeblocks within `doc` that intersect `[windowFrom, windowTo]`.
  */
 export function findRhizomeCodeBlocks(
 	doc: Text,
@@ -50,6 +52,7 @@ export function findRhizomeCodeBlocks(
 		if (closed !== null) {
 			if (closed.bodyTo >= windowFrom && closed.bodyFrom <= windowTo) {
 				blocks.push({
+					flavor: closed.flavor,
 					bodyFrom: closed.bodyFrom,
 					bodyTo: closed.bodyTo,
 					source: doc.sliceString(closed.bodyFrom, closed.bodyTo),
@@ -58,11 +61,12 @@ export function findRhizomeCodeBlocks(
 		}
 	}
 
-	if (state.inFence && state.isRhizomeFence) {
+	if (state.inFence && state.isRhizomeFence && state.flavor !== null) {
 		const bodyFrom = state.bodyFrom;
 		const bodyTo = doc.length;
 		if (bodyTo >= windowFrom && bodyFrom <= windowTo) {
 			blocks.push({
+				flavor: state.flavor,
 				bodyFrom,
 				bodyTo,
 				source: doc.sliceString(bodyFrom, bodyTo),

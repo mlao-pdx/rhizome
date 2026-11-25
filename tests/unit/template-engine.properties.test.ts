@@ -5,6 +5,8 @@ import {
 	createVaultLiquidFs,
 	formatMomentDate,
 	isStrftimeDateFormat,
+	parseRhizomeTemplatePass1,
+	renderParsedRhizomeTemplate,
 	renderRhizomeTemplate,
 	resolveTemplateFolders,
 } from '../../src/core/templates';
@@ -22,16 +24,21 @@ const validQueryNameArb = fc
 			name !== 'constructor',
 	);
 
-const safeQueryBodyArb = fc
-	.string({ maxLength: 40 })
-	.map((s) => s.replace(/\{%|%\}|\{\{|\}\}/g, ' '));
+const validExecutableQueryBodyArb = fc.constantFrom(
+	'',
+	'#work',
+	'tag:task',
+	'[status: open]',
+	'path:notes',
+	'file:readme',
+	'#alpha OR #beta',
+);
 
 describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
-	it('Single-Pass Batching & Zero-Scan Short-Circuit Invariant: N >= 1 valid queries call runQueries once; N = 0 or parse errors call runQueries 0 times', async () => {
+	it('Single-Pass Batching & Zero-Scan Short-Circuit Invariant: N >= 1 valid queries call runQueries once; N = 0 or parse/compile errors call runQueries 0 times', async () => {
 		const querySpecArb = fc.record({
 			name: validQueryNameArb,
-			query: safeQueryBodyArb,
-			explain: fc.boolean(),
+			query: validExecutableQueryBodyArb,
 		});
 		const uniqueQueriesArb = fc.uniqueArray(querySpecArb, {
 			selector: (item) => item.name,
@@ -48,7 +55,7 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 				const template = specs
 					.map(
 						(s) =>
-							`{% query ${s.name}${s.explain ? ' explain' : ''} %}${s.query}{% endquery %}\n{{ query.${s.name}.size }}`,
+							`{% query ${s.name} %}${s.query}{% endquery %}\n{{ query.${s.name}.size }}`,
 					)
 					.join('\n');
 
@@ -62,7 +69,6 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 						}
 						return out;
 					},
-					explainQuery: async (_q, heading) => `EXPLAIN(${heading})`,
 				});
 
 				expect(res.ok).toBe(true);
@@ -81,11 +87,10 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 		);
 	});
 
-	it('Missing vs. Empty Payload Contract Invariant: valid, explain, and failed queries obey exact inline output and variable binding semantics', async () => {
+	it('Unified Error vs. Sample Fallback Contract Invariant: production short-circuits with ok: false on failed queries while rhizome-sample binds failed queries to []', async () => {
 		const queryEntryArb = fc.record({
 			name: validQueryNameArb,
-			query: safeQueryBodyArb,
-			explain: fc.boolean(),
+			query: validExecutableQueryBodyArb,
 			status: fc.constantFrom<'matches' | 'empty' | 'failed'>('matches', 'empty', 'failed'),
 		});
 		const uniqueEntriesArb = fc.uniqueArray(queryEntryArb, {
@@ -95,13 +100,12 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 		});
 
 		await assertProperty(
-			'templates/engine__missing-vs-empty-payload-contract',
+			'templates/engine__unified-error-and-sample-fallback-contract',
 			fc.asyncProperty(uniqueEntriesArb, async (entries) => {
-				const explainedNames: string[] = [];
 				const template = entries
 					.map(
 						(e) =>
-							`{% query ${e.name}${e.explain ? ' explain' : ''} %}${e.query}{% endquery %}\nCOUNT_${e.name}={{ query.${e.name}.size | default: -1 }}`,
+							`{% query ${e.name} %}${e.status === 'failed' ? '[unclosed' : e.query}{% endquery %}\nCOUNT_${e.name}={{ query.${e.name}.size | default: -1 }}`,
 					)
 					.concat([
 						'HOST={{ this.file.basename }}',
@@ -111,52 +115,54 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 					])
 					.join('\n');
 
-				const res = await renderRhizomeTemplate(template, {
-					runQueries: async () => {
-						const payload: Record<string, unknown[]> = {
-							'◊host': [{ file: { basename: 'HostDoc' } }],
-						};
-						for (const e of entries) {
-							if (e.status === 'matches') {
-								payload[e.name] = [{ file: { basename: 'A' } }];
-							} else if (e.status === 'empty') {
-								payload[e.name] = [];
-							}
-							// 'failed' is omitted from payload
-						}
-						return payload;
-					},
-					explainQuery: async (_q, heading) => {
-						explainedNames.push(heading);
-						return `PLAN[${heading}]`;
-					},
-					runtimeContext: {
-						referenceTimeMs: Date.UTC(2026, 9, 31, 8, 33, 0, 0),
-						timeZone: 'UTC',
-					},
+				const payload: Record<string, unknown[]> = {
+					'◊host': [{ file: { basename: 'HostDoc' } }],
+				};
+				for (const e of entries) {
+					if (e.status === 'matches') {
+						payload[e.name] = [{ file: { basename: 'A' } }];
+					} else if (e.status === 'empty') {
+						payload[e.name] = [];
+					}
+				}
+
+				const anyFailed = entries.some((e) => e.status === 'failed');
+				const runtimeContext = {
+					referenceTimeMs: Date.UTC(2026, 9, 31, 8, 33, 0, 0),
+					timeZone: 'UTC',
+				};
+
+				const prodRes = await renderRhizomeTemplate(template, {
+					runQueries: async () => payload,
+					runtimeContext,
 				});
 
-				expect(res.ok).toBe(true);
-				expect(res.markdown).toContain('HOST=HostDoc');
-				expect(res.markdown).toContain('HIDDEN_HOST=NONE');
-				expect(res.markdown).toContain('RANGE=2026-10-30..2026-11-01');
-				expect(res.markdown).toContain('CMP=OK');
-				for (const e of entries) {
-					const shouldExplain = e.explain || e.status === 'failed';
-					const marker = `PLAN[Query Explain Plan: ${e.name}]`;
-					if (shouldExplain) {
-						expect(res.markdown).toContain(marker);
-					} else {
-						expect(res.markdown).not.toContain(marker);
-					}
+				if (anyFailed) {
+					expect(prodRes.ok).toBe(false);
+					expect(prodRes.markdown).toContain('> [!danger] Query Error:');
+					expect(prodRes.markdown).not.toContain('HOST=HostDoc');
+				} else {
+					expect(prodRes.ok).toBe(true);
+					expect(prodRes.markdown).toContain('HOST=HostDoc');
+					expect(prodRes.markdown).toContain('HIDDEN_HOST=NONE');
+					expect(prodRes.markdown).toContain('RANGE=2026-10-30..2026-11-01');
+					expect(prodRes.markdown).toContain('CMP=OK');
+				}
 
-					if (e.status === 'matches') {
-						expect(res.markdown).toContain(`COUNT_${e.name}=1`);
-					} else if (e.status === 'empty') {
-						expect(res.markdown).toContain(`COUNT_${e.name}=0`);
-					} else {
-						expect(res.markdown).toContain(`COUNT_${e.name}=-1`);
-					}
+				// In rhizome-sample (allowFailedQueries: true), failed queries bind to `[]` (size 0)
+				const parsed = parseRhizomeTemplatePass1(template);
+				const sampleRes = await renderParsedRhizomeTemplate(
+					template,
+					parsed,
+					payload,
+					runtimeContext,
+					undefined,
+					{ allowFailedQueries: true },
+				);
+				expect(sampleRes.ok).toBe(true);
+				for (const e of entries) {
+					const expectedCount = e.status === 'matches' ? 1 : 0;
+					expect(sampleRes.markdown).toContain(`COUNT_${e.name}=${expectedCount}`);
 				}
 			}),
 		);
@@ -195,12 +201,11 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 			fc.asyncProperty(
 				fuzzTemplateArb,
 				validQueryNameArb,
-				safeQueryBodyArb,
-				safeQueryBodyArb,
+				validExecutableQueryBodyArb,
+				validExecutableQueryBodyArb,
 				async (fuzzInput, dupName, q1, q2) => {
 					const fuzzRes = await renderRhizomeTemplate(fuzzInput, {
 						runQueries: async () => ({}),
-						explainQuery: async () => 'EXPLAIN',
 					});
 					expect(typeof fuzzRes.ok).toBe('boolean');
 					expect(typeof fuzzRes.markdown).toBe('string');
@@ -216,7 +221,6 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 							dupScans++;
 							return {};
 						},
-						explainQuery: async () => '',
 					});
 					expect(dupRes.ok).toBe(false);
 					expect(dupScans).toBe(0);
@@ -378,7 +382,6 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 						runQueries: async () => ({
 							'◊host': [{ file: { created: ms }, properties: {} }],
 						}),
-						explainQuery: async () => '',
 						runtimeContext: {
 							sourcePath: 'Host.md',
 							referenceTimeMs: ms,
@@ -402,8 +405,6 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 				fc.integer({ min: 1, max: 15 }),
 			),
 			compactColon: fc.boolean(),
-			explainFirst: fc.boolean(),
-			explain: fc.boolean(),
 			matchCount: fc.integer({ min: 0, max: 25 }),
 		});
 		const uniqueSpecsArb = fc.uniqueArray(queryCutoffSpecArb, {
@@ -429,11 +430,7 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 								: s.compactColon
 									? `cutoff:${s.cutoffOpt}`
 									: `cutoff: ${s.cutoffOpt}`;
-						const explainArg = s.explain ? 'explain' : '';
-						const opts = s.explainFirst
-							? [explainArg, cutoffArg].filter(Boolean).join(' ')
-							: [cutoffArg, explainArg].filter(Boolean).join(' ');
-						const headerArgs = opts.length > 0 ? `${s.name} ${opts}` : s.name;
+						const headerArgs = cutoffArg.length > 0 ? `${s.name} ${cutoffArg}` : s.name;
 						return `{% query ${headerArgs} %}#tag{% endquery %}\nSIZE_${s.name}={{ query.${s.name}.size }}`;
 					})
 					.join('\n');
@@ -449,8 +446,6 @@ describe('LiquidJS Template Engine & {% query %} Property Invariants', () => {
 
 				const res = await renderRhizomeTemplate(template, {
 					runQueries: async () => rawPayload,
-					explainQuery: async (_q, heading, cutoff) =>
-						`EXPLAIN(${heading}:${cutoff?.value}:${cutoff?.explicit})`,
 					...(sourcePath !== undefined ? { runtimeContext: { sourcePath } } : {}),
 				});
 
